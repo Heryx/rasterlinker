@@ -23,22 +23,23 @@
 """
 
 import os
-
 from qgis.core import QgsProject, QgsRasterLayer, QgsLayerTreeGroup, QgsLayerTreeLayer
-from qgis.PyQt import QtWidgets, QtCore
-from qgis.PyQt.QtWidgets import QDialogButtonBox, QFileDialog
-from qgis.PyQt import uic
+from qgis.PyQt import QtWidgets, uic
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
+from qgis.PyQt.QtWidgets import QInputDialog, QFileDialog
 
-# This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
+
+# Questo carica il file .ui in modo che PyQt possa popolare il plugin con gli elementi dal Qt Designer
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'gpr_linker_dialog_base.ui'))
 
 
 class GPRDialog(QtWidgets.QDialog, FORM_CLASS):
+    
     def __init__(self, parent=None):
         """Constructor."""
         super(GPRDialog, self).__init__(parent)
+       
         # Set up the user interface from Designer through FORM_CLASS.
         # After self.setupUi() you can access any designer object by doing
         # self.<objectname>, and you can use autoconnect slots - see
@@ -61,11 +62,8 @@ class GPRDialog(QtWidgets.QDialog, FORM_CLASS):
         # Connect the valueChanged signal of the dial to the toggle_raster_visibility method
         self.dial.valueChanged.connect(self.toggle_raster_visibility)
 
-        # Connect the signal for the checkbox state change
-        self.listView.clicked.connect(self.toggle_group_visibility)
-
     def populate_group_checkbox_list(self):
-        """Populate the QListView with checkboxes for each group in the TOC."""
+        #Populate the QListView with checkboxes for each group in the TOC.
         root = QgsProject.instance().layerTreeRoot()
         self.list_model.clear()  # Clear the model
 
@@ -76,64 +74,42 @@ class GPRDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.list_model.appendRow(item)
 
     def browse_rasters(self):
-        """Open the file dialog to select raster files."""
-        files, _ = QFileDialog.getOpenFileNames(self, "Select raster files", "/", "Raster files (*.tif *.tiff)")
+        # Open the file dialog to select raster files.
+        files, _ = QFileDialog.getOpenFileNames(self, "Select raster files", "/", "Raster files (*.tif *.tiff *.png *.jpg)")
         if files:
             print("Selected raster files:", files)
-            # Perform desired operations with the selected raster files
-            for file in files:
-                layer = QgsRasterLayer(file, os.path.basename(file))
-                if layer.isValid():
-                    QgsProject.instance().addMapLayer(layer)
-                else:
-                    print(f"Unable to load raster file: {file}")
+            # Open a dialog to input the group name
+            group_name, ok = QInputDialog.getText(self, "Enter Group Name", "Group Name:")
+            if ok:
+                # Call load_rasters_into_group after importing the raster files
+                self.load_rasters_into_group(files, group_name)
+                # Update the group list after loading the raster files
+                self.populate_group_checkbox_list()
+                # Set the range of the dial based on the number of raster layers in the group
+                self.update_dial_range()
 
-            # Update the group list after loading the raster files
-            self.populate_group_checkbox_list()
-
-            # Set the range of the dial based on the number of raster layers in the group
-            self.update_dial_range()
-
-    def import_rasters(self):
-        """Open the file dialog to select raster files and create a new group."""
-        files, _ = QFileDialog.getOpenFileNames(self, "Select raster files", "/", "Raster files (*.tif *.tiff)")
-        if files:
-            # Ask the user to input the group name
-            group_name, ok = QtWidgets.QInputDialog.getText(self, "Enter Group Name", "Enter the name for the new group:")
-            if ok and group_name:
-                # Create the new group
-                root = QgsProject.instance().layerTreeRoot()
-                group = root.addGroup(group_name)
-                if group:
-                    # Load raster files into the new group
-                    for file in files:
-                        layer = QgsRasterLayer(file, os.path.basename(file))
-                        if layer.isValid():
-                            QgsProject.instance().addMapLayer(layer, False)
-                            group.insertChildNode(0, QgsLayerTreeLayer(layer))
-                        else:
-                            print(f"Unable to load raster file: {file}")
-                else:
-                    QMessageBox.warning(self, "Error", "Failed to create the group.")
-            else:
-                QMessageBox.warning(self, "Error", "Group name not provided.")
-
+        # Funzione per caricare i raster in un gruppo specificato
+    
     def load_rasters_into_group(self, raster_files, group_name):
-        """Load raster files into the specified group."""
+        # Load raster files into the specified group.
         group = QgsProject.instance().layerTreeRoot().findGroup(group_name)
-        if group:
-            for file in raster_files:
-                layer = QgsRasterLayer(file, os.path.basename(file))
-                if layer.isValid():
-                    QgsProject.instance().addMapLayer(layer, False)
-                    group.insertChildNode(0, QgsLayerTreeLayer(layer))
-                else:
-                    print(f"Unable to load raster file: {file}")
-        else:
-            print(f"No group found with name: {group_name}")
+
+        if not group:
+            # If the group doesn't exist, create it
+            group = QgsLayerTreeGroup(group_name)
+            QgsProject.instance().layerTreeRoot().addChildNode(group)
+
+        for file in raster_files:
+            layer = QgsRasterLayer(file, os.path.basename(file))
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer, False) #Questa stringa inserisce i raster direttamente nella TOC
+                layer_node = QgsLayerTreeLayer(layer)
+                group.insertChildNode(0, QgsLayerTreeLayer(layer))
+            else:
+                print(f"Unable to load raster file: {file}")
 
     def populate_group_list(self):
-        """Populate the QListView with items for each group in the TOC."""
+        #Populate the QListView with items for each group in the TOC.
         model = QtWidgets.QStandardItemModel()
         root = QgsProject.instance().layerTreeRoot()
 
@@ -144,46 +120,53 @@ class GPRDialog(QtWidgets.QDialog, FORM_CLASS):
 
         self.listView.setModel(model)
 
-    def toggle_group_visibility(self, index):
-        """Toggle group visibility based on the checkbox state."""
-        item = self.list_model.itemFromIndex(index)
-        if item is not None:
-            if item.checkState() == QtCore.Qt.Checked:
-                # Enable the dial when at least one group is checked
-                self.dial.setEnabled(True)
-            else:
-                # Disable the dial if no group is checked
-                self.dial.setEnabled(False)
-
-    def toggle_raster_visibility(self, value):
-        """Toggle raster visibility based on the dial value."""
+    # Funzione per alternare la visibilità dei raster all'interno del gruppo
+    def toggle_raster_visibility(value):
+        # Get the selected group from the list view
         selected_index = self.listView.selectedIndexes()
-        if selected_index:
-            group_name = selected_index[0].data()
-            group = QgsProject.instance().layerTreeRoot().findGroup(group_name)
-            if group:
-                layer_nodes = [child for child in group.children() if isinstance(child, QgsLayerTreeLayer)]
-                if layer_nodes:
-                    # Disable the previous raster
-                    previous_index = value - 1 if value > 0 else len(layer_nodes) - 1
-                    if previous_index < len(layer_nodes):
-                        previous_layer_node = layer_nodes[previous_index]
-                        previous_layer_node.setItemVisibilityChecked(False)
+        if not selected_index:
+            print("Nessun gruppo selezionato.")
+            return
 
-                    # Enable the current raster
-                    current_index = value
-                    if current_index < len(layer_nodes):
-                        current_layer_node = layer_nodes[current_index]
-                        current_layer_node.setItemVisibilityChecked(True)
-                else:
-                    print("No raster layers in the selected group.")
-            else:
-                print(f"No group found with name: {group_name}")
-        else:
-            print("No group selected.")
+        group_name = selected_index[0].data()
+        group = QgsProject.instance().layerTreeRoot().findGroup(group_name)
+        if not group:
+            print(f"Nessun gruppo trovato con il nome: {group_name}")
+            return
+
+        # Get the layer nodes (not the layers themselves) in the group
+        layer_nodes = [child for child in group.children() if isinstance(child, QgsLayerTreeLayer)]
+        if not layer_nodes:
+            print("Nessun raster layers nel gruppo selezionato.")
+            return
+
+        # Adjust the value to loop around if it exceeds the layer nodes length
+        num_layers = len(layer_nodes)
+        adjusted_value = value % num_layers
+
+        # Disable the previous raster
+        previous_index = adjusted_value - 1 if adjusted_value > 0 else num_layers - 1
+        previous_layer_node = layer_nodes[previous_index]
+        previous_layer_node.setItemVisibilityChecked(False)
+
+        # Enable the current raster
+        current_layer_node = layer_nodes[adjusted_value]
+        current_layer_node.setItemVisibilityChecked(True)
+
+
+        # Funzione per aggiornare la visibilità del layer
+        def update_layer_visibility(value):
+            for node in layer_nodes:
+                node.setItemVisibilityChecked(False)
+            layer_nodes[value].setItemVisibilityChecked(True)
+
+        dial.valueChanged.connect(update_layer_visibility)
+        layout.addWidget(dial)
+
+        dialog.exec_()
 
     def update_dial_range(self):
-        """Update the range of the dial based on the number of raster layers in the selected group."""
+        #Update the range of the dial based on the number of raster layers in the selected group.
         selected_index = self.listView.selectedIndexes()
         if selected_index:
             group_name = selected_index[0].data()
