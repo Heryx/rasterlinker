@@ -64,8 +64,7 @@ class GPRDialog(QtWidgets.QDialog, FORM_CLASS):
         self.dial.valueChanged.connect(self.toggle_raster_visibility)
         # Connect the signal for the checkbox state change
         self.listView.clicked.connect(self.toggle_group_visibility)
-        #connesso al populate group list widget
-#        self.listView.clicked.connect(self.on_group_list_item_clicked)
+
 
         """Popolazione iniziale della lista dei gruppi"""
         # Populate the group list initially
@@ -81,7 +80,13 @@ class GPRDialog(QtWidgets.QDialog, FORM_CLASS):
         # Call traverse_layer_tree to populate plugin_created_groups list
         root = QgsProject.instance().layerTreeRoot()
         self.traverse_layer_tree(root)
-        
+
+         #connesso al populate group list widget
+        self.listView.clicked.connect(self.on_group_list_item_clicked)
+
+        # Connetti il segnale valueChanged del dial al metodo update_raster_label
+        self.dial.valueChanged.connect(self.update_raster_label)
+
     def populate_group_list(self):
         print("Populating group list...")
         # Ottieni il modello esistente
@@ -208,15 +213,7 @@ class GPRDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.update_dial_range()
 
         # Funzione per caricare i raster in un gruppo specificato
-    """
-    def on_group_list_item_clicked(self, index):
-        # Gestisce l'evento del clic sugli elementi della lista
-        item = self.list_model.itemFromIndex(index)
-        if item is not None:
-            selected_group_name = item.text()
-            print("Selected group:", selected_group_name)
 
-    """
     # Funzione per alternare la visibilità dei raster all'interno del gruppo
     def traverse_layer_tree(self, node):
         # Recursive method to traverse all groups in the layer tree
@@ -228,3 +225,31 @@ class GPRDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.traverse_layer_tree(child)
 
 
+    def on_group_list_item_clicked(self, index):
+        # Gestisce l'evento del clic sugli elementi della lista
+        item = self.list_model.itemFromIndex(index)
+        if item is not None:
+            selected_group_name = item.text()
+            print("Selected group:", selected_group_name)
+
+
+    def update_raster_label(self, value):
+        # Metodo per aggiornare il testo del QLabel con il nome del raster corrente
+        selected_index = self.listView.selectedIndexes()
+        if selected_index:
+            group_name = selected_index[0].data()
+            group = QgsProject.instance().layerTreeRoot().findGroup(group_name)
+            if group:
+                layer_nodes = [child for child in group.children() if isinstance(child, QgsLayerTreeLayer)]
+                if layer_nodes:
+                    # Ottieni il nome del raster corrente basato sul valore del dial
+                    current_index = value
+                    if current_index < len(layer_nodes):
+                        current_layer_node = layer_nodes[current_index]
+                        # Accedi direttamente al layer all'interno di QgsLayerTreeLayer
+                        raster_layer = current_layer_node.layer()
+                        if raster_layer:
+                            # Ottieni il nome del layer raster
+                            raster_name = raster_layer.name()
+                            # Aggiorna il testo del QLabel con il nome del raster corrente
+                            self.nomeraster.setText(raster_name)
