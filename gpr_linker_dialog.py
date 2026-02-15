@@ -12,7 +12,5 @@ from .gpr_linker_dialog_base import Ui_Dialog
 
 class GPRDialog(QDialog, Ui_Dialog):
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setupUi(self)
-
-
+        super(GPRDialog, self).__init__(parent)
+        self.setupUi(self)  # Imposta l'interfaccia utente
