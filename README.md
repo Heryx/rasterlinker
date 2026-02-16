@@ -14,3 +14,15 @@ The plugin enhances structured raster navigation within complex QGIS projects,
 especially where multiple raster slices or time/depth grids must be inspected sequentially.
 
 RasterLinker is designed to support non-invasive survey workflows and structured spatial analysis environments.
+
+## How to Cite
+If RasterLinker supports your work, please cite it as:
+
+Guarino, G. (2026). RasterLinker (v1.0.0) [QGIS plugin]. GitHub. https://github.com/Heryx/rasterlinker
+
+Suggested in-text citation:
+- (Guarino, 2026)
+
+Licensing note:
+- Plugin source code: GPL-2.0-or-later
+- Documentation/citation text: CC BY 4.0 (recommended for reuse with attribution)
