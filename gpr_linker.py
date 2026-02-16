@@ -30,7 +30,7 @@ GPR - QGIS Plugin Implementation
 
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon, QStandardItemModel, QStandardItem
-from qgis.PyQt.QtWidgets import QAction, QMessageBox, QFileDialog, QAbstractItemView
+from qgis.PyQt.QtWidgets import QAction, QMessageBox, QFileDialog, QAbstractItemView, QDockWidget
 from qgis.core import QgsPointXY, QgsProject, QgsRasterLayer, QgsLayerTreeLayer, QgsLayerTreeGroup, QgsMessageLog, Qgis, QgsCoordinateTransform, QgsRectangle
 from PyQt5.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton, QListWidgetItem
 from .grid_creator import create_oriented_grid
@@ -56,6 +56,8 @@ class RasterLinkerPlugin:
         self.actions = []
         self.menu = self.tr(u'&RasterLinker')
         self.first_start = None
+        self.dlg = None
+        self.dock_widget = None
 
     # Translation helper
     def tr(self, message):
@@ -82,12 +84,22 @@ class RasterLinkerPlugin:
         for action in self.actions:
             self.iface.removePluginMenu(self.tr(u'&RasterLinker'), action)
             self.iface.removeToolBarIcon(action)
+        if self.dock_widget is not None:
+            self.iface.removeDockWidget(self.dock_widget)
+            self.dock_widget.deleteLater()
+            self.dock_widget = None
+            self.dlg = None
 
     def run(self):
         """Esegue il plugin."""
         if self.first_start:
             self.first_start = False
             self.dlg = RasterLinkerDialog()
+            self.dock_widget = QDockWidget(self.tr(u"Raster Linker"), self.iface.mainWindow())
+            self.dock_widget.setObjectName("RasterLinkerDockWidget")
+            self.dock_widget.setWidget(self.dlg)
+            self.dock_widget.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+            self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock_widget)
             self.populate_group_list()
             self.dlg.groupListWidget.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
@@ -112,7 +124,8 @@ class RasterLinkerPlugin:
             self.dlg.Dial.valueChanged.connect(self.update_visibility_with_dial)
             self.dlg.dial2.valueChanged.connect(self.update_visibility_with_dial)
 
-        self.dlg.show()
+        self.dock_widget.show()
+        self.dock_widget.raise_()
 
     #Disegna poligono
     def activate_polygon_draw_tool(self):
