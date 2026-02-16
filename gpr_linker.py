@@ -28,18 +28,15 @@
 GPR - QGIS Plugin Implementation
 """
 
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
-from qgis.PyQt.QtGui import QIcon, QStandardItemModel, QStandardItem
+from qgis.PyQt.QtCore import QSettings, QCoreApplication, Qt
+from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox, QFileDialog, QAbstractItemView, QDockWidget
-from qgis.core import QgsPointXY, QgsProject, QgsRasterLayer, QgsLayerTreeLayer, QgsLayerTreeGroup, QgsMessageLog, Qgis, QgsCoordinateTransform, QgsRectangle
-from PyQt5.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton, QListWidgetItem
+from qgis.core import QgsPointXY, QgsProject, QgsRasterLayer, QgsLayerTreeLayer, QgsLayerTreeGroup, QgsCoordinateTransform, QgsRectangle
+from PyQt5.QtWidgets import QLabel, QPushButton, QListWidgetItem, QCheckBox, QComboBox
 from .grid_creator import create_oriented_grid
 from .grid_selection_tool import GridSelectionTool
 from .polygon_grid_creator import create_grid_from_polygon
 from .polygon_draw_tool import PolygonDrawTool
-
-
-
 
 from .resources import *
 from .gpr_linker_dialog import RasterLinkerDialog
@@ -58,6 +55,14 @@ class RasterLinkerPlugin:
         self.first_start = None
         self.dlg = None
         self.dock_widget = None
+        self.settings = QSettings()
+        self.settings_group = "RasterLinker"
+        self.grid_use_snap = True
+        self.grid_force_orthogonal = False
+        self.grid_dimension_mode = "ask"
+        self.snap_checkbox = None
+        self.ortho_checkbox = None
+        self.dimension_mode_combo = None
 
     # Translation helper
     def tr(self, message):
@@ -81,6 +86,8 @@ class RasterLinkerPlugin:
 
     def unload(self):
         """Unload the plugin."""
+        if self.dlg is not None:
+            self._save_ui_settings()
         for action in self.actions:
             self.iface.removePluginMenu(self.tr(u'&RasterLinker'), action)
             self.iface.removeToolBarIcon(action)
@@ -106,7 +113,7 @@ class RasterLinkerPlugin:
             self.dlg.selectGridPointsButton.setEnabled(True)
             self.dlg.lineEditDistanceX.setEnabled(True)
             self.dlg.lineEditDistanceY.setEnabled(True)
-            self.dlg.lineEditDistance.setEnabled(True)
+            self.dlg.lineEditAreaNames.setEnabled(True)
             self.dlg.lineEditX0Y0.setEnabled(True)
             self.dlg.lineEditX1Y0.setEnabled(True)
             self.dlg.lineEditY0.setEnabled(True)
@@ -127,7 +134,14 @@ class RasterLinkerPlugin:
             # Preimposta valori predefiniti
             self.dlg.lineEditDistanceX.setText("1.0")  # Valore predefinito per distanza X
             self.dlg.lineEditDistanceY.setText("1.0")  # Valore predefinito per distanza Y
-            self.dlg.lineEditDistance.setPlaceholderText("Nome area | prefisso sottocelle")
+            self.dlg.lineEditAreaNames.setPlaceholderText("Nome area | prefisso sottocelle")
+            self.dlg.lineEditAreaNames.setToolTip(
+                "Area naming field. Format: AreaName|CellPrefix (prefix optional)."
+            )
+            self.dlg.lineEditAreaNames.setAccessibleName("lineEditAreaNames")
+            self._load_ui_settings()
+            self._build_grid_options_controls()
+            self._connect_persistent_fields()
 
             # Collega il dial alla funzione di aggiornamento
             self.dlg.Dial.valueChanged.connect(self.update_visibility_with_dial)
@@ -135,13 +149,6 @@ class RasterLinkerPlugin:
 
         self.dock_widget.show()
         self.dock_widget.raise_()
-
-    #Disegna poligono
-    def activate_polygon_draw_tool(self):
-        """
-        Attiva il tool per disegnare un poligono.
-        """
-        self.create_grid_from_polygon_layer()
 
     def create_grid_from_polygon_layer(self):
         """
@@ -164,6 +171,7 @@ class RasterLinkerPlugin:
                 "per attivare/disattivare il vincolo 0/90, poi clicca per avviare le dimensioni. "
                 "Con Shift+secondo click puoi "
                 "avviare direttamente l'inserimento dimensioni. "
+                "Dock controls: Use snap / Lock 0-90 / Dimension mode. "
                 "Campo nome: 'NomeArea|PrefissoCelle' (prefisso opzionale)."
             )
         except Exception as e:
@@ -180,6 +188,8 @@ class RasterLinkerPlugin:
             distance_y = float(self.dlg.lineEditDistanceY.text().strip())
             area_name, cell_prefix = self._get_grid_names_from_ui()
             polygon_layer.setName(area_name)
+            if not self._confirm_planar_units_for_grid():
+                return
 
             # Crea la griglia
             create_grid_from_polygon(
@@ -187,7 +197,8 @@ class RasterLinkerPlugin:
                 distance_x,
                 distance_y,
                 area_name=area_name,
-                cell_prefix=cell_prefix
+                cell_prefix=cell_prefix,
+                max_cells=120000,
             )
 
             QMessageBox.information(
@@ -202,11 +213,11 @@ class RasterLinkerPlugin:
 
     def _get_grid_names_from_ui(self):
         """
-        Estrae i nomi da lineEditDistance.
+        Estrae i nomi da lineEditAreaNames.
         Formato supportato: "NomeArea|PrefissoCelle"
         Se manca il prefisso: "NomeArea" -> prefisso automatico.
         """
-        raw_value = self.dlg.lineEditDistance.text().strip()
+        raw_value = self.dlg.lineEditAreaNames.text().strip()
         if not raw_value:
             area_name = "Area_Indagine"
             return area_name, f"{area_name}_cell"
@@ -220,80 +231,94 @@ class RasterLinkerPlugin:
         area_name = raw_value
         return area_name, f"{area_name}_cell"
 
+    def _settings_key(self, key):
+        return f"{self.settings_group}/{key}"
 
+    def _load_ui_settings(self):
+        self.grid_use_snap = self.settings.value(self._settings_key("grid/use_snap"), True, type=bool)
+        self.grid_force_orthogonal = self.settings.value(self._settings_key("grid/force_orthogonal"), False, type=bool)
+        mode = self.settings.value(self._settings_key("grid/dimension_mode"), "ask")
+        self.grid_dimension_mode = mode if mode in ("ask", "manual", "canvas") else "ask"
 
+        self.dlg.lineEditDistanceX.setText(
+            self.settings.value(self._settings_key("grid/distance_x"), self.dlg.lineEditDistanceX.text())
+        )
+        self.dlg.lineEditDistanceY.setText(
+            self.settings.value(self._settings_key("grid/distance_y"), self.dlg.lineEditDistanceY.text())
+        )
+        self.dlg.lineEditAreaNames.setText(
+            self.settings.value(self._settings_key("grid/area_names"), "")
+        )
 
-### Crea Griglia ###
-    def create_grid_from_ui(self):
-        """
-        Funzione chiamata dalla UI per creare una griglia basata sui parametri forniti.
-        """
-        try:
-            # Ottieni i parametri dalla UI
-            point_x = float(self.dlg.lineEditPointX.text())  # Punto X (esempio da un LineEdit nella UI)
-            point_y = float(self.dlg.lineEditPointY.text())  # Punto Y
-            distance = float(self.dlg.lineEditDistance.text())  # Distanza tra linee
-            num_tid = int(self.dlg.spinBoxNumTID.value())  # Numero di TID
-            num_lid = int(self.dlg.spinBoxNumLID.value())  # Numero di LID
-            raster_crs = QgsProject.instance().crs()  # CRS del progetto corrente
+    def _save_ui_settings(self):
+        self._sync_grid_options_from_controls()
+        self.settings.setValue(self._settings_key("grid/distance_x"), self.dlg.lineEditDistanceX.text().strip())
+        self.settings.setValue(self._settings_key("grid/distance_y"), self.dlg.lineEditDistanceY.text().strip())
+        self.settings.setValue(self._settings_key("grid/area_names"), self.dlg.lineEditAreaNames.text().strip())
+        self.settings.setValue(self._settings_key("grid/use_snap"), self.grid_use_snap)
+        self.settings.setValue(self._settings_key("grid/force_orthogonal"), self.grid_force_orthogonal)
+        self.settings.setValue(self._settings_key("grid/dimension_mode"), self.grid_dimension_mode)
 
-            # Crea il punto zero
-            point_zero = QgsPointXY(point_x, point_y)
+    def _connect_persistent_fields(self):
+        self.dlg.lineEditDistanceX.editingFinished.connect(self._save_ui_settings)
+        self.dlg.lineEditDistanceY.editingFinished.connect(self._save_ui_settings)
+        self.dlg.lineEditAreaNames.editingFinished.connect(self._save_ui_settings)
+        if self.snap_checkbox is not None:
+            self.snap_checkbox.toggled.connect(self._save_ui_settings)
+        if self.ortho_checkbox is not None:
+            self.ortho_checkbox.toggled.connect(self._save_ui_settings)
+        if self.dimension_mode_combo is not None:
+            self.dimension_mode_combo.currentIndexChanged.connect(self._save_ui_settings)
 
-            # Crea la griglia
-            create_oriented_grid(point_zero, distance, raster_crs, num_tid, num_lid)
+    def _build_grid_options_controls(self):
+        layout = self.dlg.horizontalLayout_2
+        self.snap_checkbox = QCheckBox("Use snap")
+        self.snap_checkbox.setChecked(self.grid_use_snap)
+        self.snap_checkbox.setToolTip("Use QGIS snapping while drawing and previewing the polygon.")
 
-            QMessageBox.information(self.dlg, "Successo", "Griglia creata con successo!")
-        except Exception as e:
-            QMessageBox.critical(self.dlg, "Errore", f"Errore durante la creazione della griglia: {str(e)}")
+        self.ortho_checkbox = QCheckBox("Lock 0/90")
+        self.ortho_checkbox.setChecked(self.grid_force_orthogonal)
+        self.ortho_checkbox.setToolTip("Force orthogonal orientation for preview and click points.")
 
-    def create_oriented_grid_from_ui(self):
-        """
-        Funzione per creare una griglia orientata basata sui valori dalla UI.
-        """
-        try:
-            # Funzione di utilità per estrarre e convertire un valore da QLineEdit
-            def get_float_from_lineedit(lineedit, default_value=0.0):
-                text = lineedit.text().strip()
-                print(f"Valore letto da {lineedit.objectName()}: '{text}'")  # Debug del valore letto
-                if not text:
-                    print(f"Il campo {lineedit.objectName()} è vuoto. Imposto il valore predefinito: {default_value}")
-                    return default_value
-                try:
-                    return float(text)
-                except ValueError:
-                    raise ValueError(f"Il campo '{lineedit.objectName()}' contiene un valore non numerico: '{text}'")
+        mode_label = QLabel("Dimension mode")
+        self.dimension_mode_combo = QComboBox()
+        self.dimension_mode_combo.addItem("Ask", "ask")
+        self.dimension_mode_combo.addItem("Manual", "manual")
+        self.dimension_mode_combo.addItem("Canvas", "canvas")
+        mode_index = self.dimension_mode_combo.findData(self.grid_dimension_mode)
+        self.dimension_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
+        self.dimension_mode_combo.setToolTip("How to choose total length/width after orientation lock.")
 
-            # Recupera i valori dalle LineEdit e valida
-            x0 = get_float_from_lineedit(self.dlg.lineEditX0)
-            y0 = get_float_from_lineedit(self.dlg.lineEditY0)
-            x1 = get_float_from_lineedit(self.dlg.lineEditX1)
-            y1 = get_float_from_lineedit(self.dlg.lineEditY1)
+        layout.addWidget(self.snap_checkbox)
+        layout.addWidget(self.ortho_checkbox)
+        layout.addWidget(mode_label)
+        layout.addWidget(self.dimension_mode_combo)
 
-            # Recupera le distanze con valori di default se vuoti
-            distance_x = get_float_from_lineedit(self.dlg.lineEditDistanceX, default_value=1.0)
-            distance_y = get_float_from_lineedit(self.dlg.lineEditDistanceY, default_value=1.0)
+    def _sync_grid_options_from_controls(self):
+        if self.snap_checkbox is not None:
+            self.grid_use_snap = bool(self.snap_checkbox.isChecked())
+        if self.ortho_checkbox is not None:
+            self.grid_force_orthogonal = bool(self.ortho_checkbox.isChecked())
+        if self.dimension_mode_combo is not None:
+            mode = self.dimension_mode_combo.currentData()
+            self.grid_dimension_mode = mode if mode in ("ask", "manual", "canvas") else "ask"
 
-            # Log dei valori recuperati
-            print(f"Valori estratti dalla UI:")
-            print(f"x0={x0}, y0={y0}, x1={x1}, y1={y1}, distance_x={distance_x}, distance_y={distance_y}")
-
-            # Ottieni il CRS del progetto
-            raster_crs = QgsProject.instance().crs()
-            print(f"CRS del progetto: {raster_crs.authid()}")  # Debug del CRS
-
-            # Crea la griglia orientata
-            create_oriented_grid(x0, y0, x1, y1, distance_x, distance_y, raster_crs)
-
-            QMessageBox.information(self.dlg, "Successo", "Griglia orientata creata con successo!")
-        except ValueError as ve:
-            QMessageBox.warning(self.dlg, "Errore", f"Errore nei valori dei campi: {ve}")
-            print(f"Errore nei valori dei campi: {ve}")  # Stampa di debug per console
-        except Exception as e:
-            QMessageBox.critical(self.dlg, "Errore", f"Errore durante la creazione della griglia: {str(e)}")
-            print(f"Errore durante la creazione della griglia: {e}")  # Stampa di debug per console
-
-
+    def _confirm_planar_units_for_grid(self):
+        project_crs = QgsProject.instance().crs()
+        if not project_crs.isGeographic():
+            return True
+        answer = QMessageBox.question(
+            self.dlg,
+            "CRS Warning",
+            (
+                f"Project CRS is geographic ({project_crs.authid()}). "
+                "X/Y lengths are interpreted in degrees, not meters.\n\n"
+                "Continue anyway?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
 ### Crea Griglia con punti
     def activate_grid_selection_tool(self):
         """
@@ -831,3 +856,4 @@ class RasterLinkerPlugin:
                 QMessageBox.information(self.dlg, "Successo", f"Raster '{raster_name}' spostato nel gruppo '{target_group_name}'.")
         else:
             QMessageBox.warning(self.dlg, "Errore", f"Raster '{raster_name}' non trovato.")
+

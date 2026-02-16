@@ -46,7 +46,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
     def canvasReleaseEvent(self, event):
         try:
             shift_active = self._shift_active(event)
-            axis_constraint = shift_active or self.orthogonal_lock_enabled
+            axis_constraint = shift_active or self.orthogonal_lock_enabled or self._plugin_force_orthogonal()
             if event.button() == Qt.MiddleButton:
                 self._lock_orientation_and_build_rectangle()
                 return
@@ -78,7 +78,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         if not self.points:
             return
         point = self._map_point_with_snap(event)
-        if len(self.points) >= 1 and (self._shift_active(event) or self.orthogonal_lock_enabled):
+        if len(self.points) >= 1 and (self._shift_active(event) or self.orthogonal_lock_enabled or self._plugin_force_orthogonal()):
             point = self._axis_snapped_point(self.points[0], point)
         self.current_mouse_point = point
         self._update_preview()
@@ -86,8 +86,8 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_X:
             self.orthogonal_lock_enabled = not self.orthogonal_lock_enabled
-            state = "attivo" if self.orthogonal_lock_enabled else "disattivo"
-            QMessageBox.information(None, "Vincolo ortogonale", f"Vincolo 0/90 {state}.")
+            if self.points and self.current_mouse_point is not None:
+                self._update_preview()
             return
 
         if event.key() == Qt.Key_D or (event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_D):
@@ -127,6 +127,21 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         self._begin_dimension_mode_selection()
 
     def _begin_dimension_mode_selection(self):
+        preferred_mode = self._plugin_dimension_mode()
+        if preferred_mode == "manual":
+            self._build_rectangle_from_dialog()
+            return
+        if preferred_mode == "canvas":
+            self.dimension_pick_mode = "length"
+            self.pending_length = None
+            QMessageBox.information(
+                None,
+                "Da canvas",
+                "Click 1: imposta la lunghezza lungo l'orientamento bloccato. "
+                "Click 2: imposta la larghezza."
+            )
+            return
+
         choice = QMessageBox(None)
         choice.setWindowTitle("Dimensioni area")
         choice.setText("Come vuoi definire lunghezza e larghezza?")
@@ -291,6 +306,8 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         """
         Usa lo snapping di QGIS se disponibile/valido; fallback su coordinate libere.
         """
+        if not self._plugin_use_snap():
+            return self.toMapCoordinates(event.pos())
         try:
             snap_utils = self.canvas.snappingUtils()
             if snap_utils is not None:
@@ -300,6 +317,16 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         except Exception:
             pass
         return self.toMapCoordinates(event.pos())
+
+    def _plugin_use_snap(self):
+        return bool(getattr(self.parent_plugin, "grid_use_snap", True))
+
+    def _plugin_force_orthogonal(self):
+        return bool(getattr(self.parent_plugin, "grid_force_orthogonal", False))
+
+    def _plugin_dimension_mode(self):
+        mode = getattr(self.parent_plugin, "grid_dimension_mode", "ask")
+        return mode if mode in ("ask", "manual", "canvas") else "ask"
 
     def _add_vertex_marker(self, point):
         marker = QgsVertexMarker(self.canvas)
