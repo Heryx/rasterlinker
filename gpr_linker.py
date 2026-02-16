@@ -30,7 +30,7 @@ GPR - QGIS Plugin Implementation
 
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon, QStandardItemModel, QStandardItem
-from qgis.PyQt.QtWidgets import QAction, QMessageBox, QFileDialog
+from qgis.PyQt.QtWidgets import QAction, QMessageBox, QFileDialog, QAbstractItemView
 from qgis.core import QgsPointXY, QgsProject, QgsRasterLayer, QgsLayerTreeLayer, QgsLayerTreeGroup, QgsMessageLog, Qgis, QgsCoordinateTransform, QgsRectangle
 from PyQt5.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton, QListWidgetItem
 from .grid_creator import create_oriented_grid
@@ -89,6 +89,7 @@ class RasterLinkerPlugin:
             self.first_start = False
             self.dlg = RasterLinkerDialog()
             self.populate_group_list()
+            self.dlg.groupListWidget.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
             # Collega i segnali ai metodi
             self.dlg.createGroupButton.clicked.connect(self.create_group)
