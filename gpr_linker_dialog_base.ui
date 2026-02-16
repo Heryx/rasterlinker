@@ -139,7 +139,7 @@
     </rect>
    </property>
    <property name="text">
-    <string>Y lenght</string>
+    <string>Cell Y (m)</string>
    </property>
   </widget>
   <widget class="QLabel" name="labelx_6">
@@ -155,7 +155,7 @@
     </rect>
    </property>
    <property name="text">
-    <string>X lenght</string>
+    <string>Cell X (m)</string>
    </property>
   </widget>
   <widget class="QLineEdit" name="lineEditDistanceY">
@@ -171,7 +171,7 @@
     </rect>
    </property>
   </widget>
-  <widget class="QLineEdit" name="lineEditDistance">
+  <widget class="QLineEdit" name="lineEditAreaNames">
    <property name="enabled">
     <bool>false</bool>
    </property>

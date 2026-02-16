@@ -70,7 +70,14 @@ def _axis_breaks(min_value, max_value, step):
     return values
 
 
-def create_grid_from_polygon(polygon_layer, distance_x, distance_y, area_name=None, cell_prefix=None):
+def create_grid_from_polygon(
+    polygon_layer,
+    distance_x,
+    distance_y,
+    area_name=None,
+    cell_prefix=None,
+    max_cells=120000,
+):
     """
     Crea celle poligonali orientate e ritagliate sul poligono di input.
 
@@ -80,6 +87,7 @@ def create_grid_from_polygon(polygon_layer, distance_x, distance_y, area_name=No
         distance_y (float): Passo lungo asse secondario.
         area_name (str): Nome area principale.
         cell_prefix (str): Prefisso celle.
+        max_cells (int): Numero massimo di celle candidate prima del clip.
 
     Returns:
         QgsVectorLayer: Layer poligonale delle celle.
@@ -120,6 +128,12 @@ def create_grid_from_polygon(polygon_layer, distance_x, distance_y, area_name=No
 
     u_values = _axis_breaks(u_min, u_max, distance_x)
     v_values = _axis_breaks(v_min, v_max, distance_y)
+    candidate_cells = max(0, len(u_values) - 1) * max(0, len(v_values) - 1)
+    if candidate_cells > max_cells:
+        raise ValueError(
+            f"Grid too dense: {candidate_cells} candidate cells exceed limit ({max_cells}). "
+            "Increase X/Y length or reduce area size."
+        )
 
     grid_layer = QgsVectorLayer(
         f"Polygon?crs={polygon_layer.crs().authid()}",
