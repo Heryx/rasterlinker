@@ -31,12 +31,24 @@ GPR - QGIS Plugin Implementation
 from qgis.PyQt.QtCore import QSettings, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox, QFileDialog, QAbstractItemView, QDockWidget
-from qgis.core import QgsPointXY, QgsProject, QgsRasterLayer, QgsLayerTreeLayer, QgsLayerTreeGroup, QgsCoordinateTransform, QgsRectangle
-from PyQt5.QtWidgets import QLabel, QPushButton, QListWidgetItem, QCheckBox, QComboBox
+from qgis.core import (
+    QgsPointXY,
+    QgsProject,
+    QgsRasterLayer,
+    QgsLayerTreeLayer,
+    QgsLayerTreeGroup,
+    QgsCoordinateTransform,
+    QgsRectangle,
+    QgsVectorLayer,
+    QgsVectorFileWriter,
+    Qgis,
+)
+from PyQt5.QtWidgets import QPushButton, QListWidgetItem
 from .grid_creator import create_oriented_grid
 from .grid_selection_tool import GridSelectionTool
 from .polygon_grid_creator import create_grid_from_polygon
 from .polygon_draw_tool import PolygonDrawTool
+from .grid_options_ui import build_grid_options_controls
 
 from .resources import *
 from .gpr_linker_dialog import RasterLinkerDialog
@@ -59,10 +71,20 @@ class RasterLinkerPlugin:
         self.settings_group = "RasterLinker"
         self.grid_use_snap = True
         self.grid_force_orthogonal = False
+        self.grid_relative_orthogonal = False
+        self.keep_source_polygon = True
         self.grid_dimension_mode = "ask"
         self.snap_checkbox = None
         self.ortho_checkbox = None
+        self.ortho_base_checkbox = None
+        self.keep_area_checkbox = None
         self.dimension_mode_combo = None
+        self.help_button = None
+        self.export_button = None
+        self.base_angle_label = None
+        self.length_label = None
+        self.last_area_layer = None
+        self.last_grid_layer = None
 
     # Translation helper
     def tr(self, message):
@@ -159,20 +181,10 @@ class RasterLinkerPlugin:
             self.polygon_draw_tool = PolygonDrawTool(self.iface.mapCanvas(), self)
             self.iface.mapCanvas().setMapTool(self.polygon_draw_tool)
 
-            QMessageBox.information(
-                self.dlg,
-                "Istruzioni",
-                "Disegna un poligono sulla mappa con click sinistro. "
-                "Chiudi con click destro o Invio; ESC per annullare. "
-                "Per rettangolo orientato: primo click origine, orienta col mouse, poi tasto D "
-                "(oppure click centrale) "
-                "per bloccare orientamento e scegliere tra inserimento manuale o da canvas. "
-                "Con Shift l'orientamento si vincola a 0/90; se Shift attiva zoom in QGIS usa X "
-                "per attivare/disattivare il vincolo 0/90, poi clicca per avviare le dimensioni. "
-                "Con Shift+secondo click puoi "
-                "avviare direttamente l'inserimento dimensioni. "
-                "Dock controls: Use snap / Lock 0-90 / Dimension mode. "
-                "Campo nome: 'NomeArea|PrefissoCelle' (prefisso opzionale)."
+            self._notify_info(
+                "Disegna area: click sinistro vertici, destro/Invio chiusura, ESC annulla. "
+                "Rettangolo orientato: primo click origine, poi D/click centrale per dimensioni. "
+                "Dock: Snap, Ortho 0/90, Mode. Nome: Area|Prefix."
             )
         except Exception as e:
             QMessageBox.critical(self.dlg, "Errore", f"Errore durante l'attivazione dello strumento di disegno: {e}")
@@ -192,7 +204,7 @@ class RasterLinkerPlugin:
                 return
 
             # Crea la griglia
-            create_grid_from_polygon(
+            grid_layer = create_grid_from_polygon(
                 polygon_layer,
                 distance_x,
                 distance_y,
@@ -200,12 +212,13 @@ class RasterLinkerPlugin:
                 cell_prefix=cell_prefix,
                 max_cells=120000,
             )
+            self.last_area_layer = polygon_layer
+            self.last_grid_layer = grid_layer
 
-            QMessageBox.information(
-                self.dlg,
-                "Successo",
-                f"Area '{area_name}' creata. Celle generate con prefisso '{cell_prefix}'."
-            )
+            if not self.keep_source_polygon and QgsProject.instance().mapLayer(polygon_layer.id()) is not None:
+                QgsProject.instance().removeMapLayer(polygon_layer.id())
+
+            self._notify_info(f"Area '{area_name}' creata. Celle con prefisso '{cell_prefix}'.")
         except ValueError as ve:
             QMessageBox.warning(self.dlg, "Errore", f"Errore: {ve}")
         except Exception as e:
@@ -237,6 +250,8 @@ class RasterLinkerPlugin:
     def _load_ui_settings(self):
         self.grid_use_snap = self.settings.value(self._settings_key("grid/use_snap"), True, type=bool)
         self.grid_force_orthogonal = self.settings.value(self._settings_key("grid/force_orthogonal"), False, type=bool)
+        self.grid_relative_orthogonal = self.settings.value(self._settings_key("grid/relative_orthogonal"), False, type=bool)
+        self.keep_source_polygon = self.settings.value(self._settings_key("grid/keep_source_polygon"), True, type=bool)
         mode = self.settings.value(self._settings_key("grid/dimension_mode"), "ask")
         self.grid_dimension_mode = mode if mode in ("ask", "manual", "canvas") else "ask"
 
@@ -257,6 +272,8 @@ class RasterLinkerPlugin:
         self.settings.setValue(self._settings_key("grid/area_names"), self.dlg.lineEditAreaNames.text().strip())
         self.settings.setValue(self._settings_key("grid/use_snap"), self.grid_use_snap)
         self.settings.setValue(self._settings_key("grid/force_orthogonal"), self.grid_force_orthogonal)
+        self.settings.setValue(self._settings_key("grid/relative_orthogonal"), self.grid_relative_orthogonal)
+        self.settings.setValue(self._settings_key("grid/keep_source_polygon"), self.keep_source_polygon)
         self.settings.setValue(self._settings_key("grid/dimension_mode"), self.grid_dimension_mode)
 
     def _connect_persistent_fields(self):
@@ -267,41 +284,136 @@ class RasterLinkerPlugin:
             self.snap_checkbox.toggled.connect(self._save_ui_settings)
         if self.ortho_checkbox is not None:
             self.ortho_checkbox.toggled.connect(self._save_ui_settings)
+        if self.ortho_base_checkbox is not None:
+            self.ortho_base_checkbox.toggled.connect(self._save_ui_settings)
+        if self.keep_area_checkbox is not None:
+            self.keep_area_checkbox.toggled.connect(self._save_ui_settings)
         if self.dimension_mode_combo is not None:
             self.dimension_mode_combo.currentIndexChanged.connect(self._save_ui_settings)
+        if self.help_button is not None:
+            self.help_button.clicked.connect(self.show_grid_help)
+        if self.export_button is not None:
+            self.export_button.clicked.connect(self.export_last_grid_to_gpkg)
 
     def _build_grid_options_controls(self):
-        layout = self.dlg.horizontalLayout_2
-        self.snap_checkbox = QCheckBox("Use snap")
-        self.snap_checkbox.setChecked(self.grid_use_snap)
-        self.snap_checkbox.setToolTip("Use QGIS snapping while drawing and previewing the polygon.")
+        (
+            self.snap_checkbox,
+            self.ortho_checkbox,
+            self.ortho_base_checkbox,
+            self.keep_area_checkbox,
+            self.dimension_mode_combo,
+            self.help_button,
+            self.export_button,
+            self.base_angle_label,
+            self.length_label,
+        ) = build_grid_options_controls(
+            self.dlg.horizontalLayout_2,
+            use_snap=self.grid_use_snap,
+            force_orthogonal=self.grid_force_orthogonal,
+            relative_orthogonal=self.grid_relative_orthogonal,
+            keep_source_polygon=self.keep_source_polygon,
+            dimension_mode=self.grid_dimension_mode,
+        )
 
-        self.ortho_checkbox = QCheckBox("Lock 0/90")
-        self.ortho_checkbox.setChecked(self.grid_force_orthogonal)
-        self.ortho_checkbox.setToolTip("Force orthogonal orientation for preview and click points.")
-
-        mode_label = QLabel("Dimension mode")
-        self.dimension_mode_combo = QComboBox()
-        self.dimension_mode_combo.addItem("Ask", "ask")
-        self.dimension_mode_combo.addItem("Manual", "manual")
-        self.dimension_mode_combo.addItem("Canvas", "canvas")
-        mode_index = self.dimension_mode_combo.findData(self.grid_dimension_mode)
-        self.dimension_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
-        self.dimension_mode_combo.setToolTip("How to choose total length/width after orientation lock.")
-
-        layout.addWidget(self.snap_checkbox)
-        layout.addWidget(self.ortho_checkbox)
-        layout.addWidget(mode_label)
-        layout.addWidget(self.dimension_mode_combo)
+    def _notify_info(self, message, duration=6):
+        self.iface.messageBar().pushMessage("RasterLinker", message, level=Qgis.Info, duration=duration)
 
     def _sync_grid_options_from_controls(self):
         if self.snap_checkbox is not None:
             self.grid_use_snap = bool(self.snap_checkbox.isChecked())
         if self.ortho_checkbox is not None:
             self.grid_force_orthogonal = bool(self.ortho_checkbox.isChecked())
+        if self.ortho_base_checkbox is not None:
+            self.grid_relative_orthogonal = bool(self.ortho_base_checkbox.isChecked())
+        if self.keep_area_checkbox is not None:
+            self.keep_source_polygon = bool(self.keep_area_checkbox.isChecked())
         if self.dimension_mode_combo is not None:
             mode = self.dimension_mode_combo.currentData()
             self.grid_dimension_mode = mode if mode in ("ask", "manual", "canvas") else "ask"
+
+    def update_draw_indicators(self, angle_rad=None, length=None):
+        if self.base_angle_label is None:
+            return
+        if angle_rad is None:
+            self.base_angle_label.setText("Base: --")
+        else:
+            angle_deg = (angle_rad * 180.0 / 3.141592653589793) % 360.0
+            self.base_angle_label.setText(f"Base: {angle_deg:.1f}deg")
+
+        if self.length_label is not None:
+            if length is None:
+                self.length_label.setText("Len: --")
+            else:
+                self.length_label.setText(f"Len: {length:.2f}")
+
+    # Backward compatibility with existing calls.
+    def update_base_angle_indicator(self, angle_rad=None):
+        self.update_draw_indicators(angle_rad=angle_rad, length=None)
+
+    def show_grid_help(self):
+        help_text = (
+            "Draw workflow:\n"
+            "- Left click: add vertex\n"
+            "- Right click / Enter: finish polygon\n"
+            "- ESC: cancel\n"
+            "- D or middle-click: lock orientation and choose dimensions\n"
+            "- X: toggle ortho lock from keyboard\n"
+            "- Ortho base: orthogonal snapping relative to drawn base\n"
+            "- Mode: Ask / Manual / Canvas for length-width input"
+        )
+        QMessageBox.information(self.dlg, "Grid Help", help_text)
+
+    def export_last_grid_to_gpkg(self):
+        if self.last_grid_layer is None:
+            QMessageBox.warning(self.dlg, "Export", "No generated grid found to export.")
+            return
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self.dlg,
+            "Export Area + Grid",
+            "",
+            "GeoPackage (*.gpkg)",
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".gpkg"):
+            output_path += ".gpkg"
+
+        area_layer = self.last_area_layer
+        grid_layer = self.last_grid_layer
+        export_targets = []
+        if area_layer is not None:
+            export_targets.append((area_layer, area_layer.name() or "area"))
+        export_targets.append((grid_layer, grid_layer.name() or "grid"))
+
+        transform_context = QgsProject.instance().transformContext()
+        try:
+            for idx, (layer, layer_name) in enumerate(export_targets):
+                opts = QgsVectorFileWriter.SaveVectorOptions()
+                opts.driverName = "GPKG"
+                opts.fileEncoding = "UTF-8"
+                opts.layerName = layer_name
+                opts.actionOnExistingFile = (
+                    QgsVectorFileWriter.CreateOrOverwriteFile
+                    if idx == 0
+                    else QgsVectorFileWriter.CreateOrOverwriteLayer
+                )
+                result = QgsVectorFileWriter.writeAsVectorFormatV3(layer, output_path, transform_context, opts)
+                err_code = result[0] if isinstance(result, tuple) else result
+                err_msg = result[1] if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], str) else ""
+                if err_code != QgsVectorFileWriter.NoError:
+                    raise RuntimeError(err_msg or f"Error code {err_code} while exporting {layer_name}.")
+
+            for _, layer_name in export_targets:
+                gpkg_layer = QgsVectorLayer(f"{output_path}|layername={layer_name}", layer_name, "ogr")
+                if gpkg_layer.isValid():
+                    QgsProject.instance().addMapLayer(gpkg_layer)
+                else:
+                    self._notify_info(f"Exported layer '{layer_name}' but reload failed.", duration=8)
+
+            self._notify_info(f"Exported to {output_path} and loaded in project.", duration=8)
+        except Exception as e:
+            QMessageBox.critical(self.dlg, "Export Error", f"Unable to export GeoPackage: {e}")
 
     def _confirm_planar_units_for_grid(self):
         project_crs = QgsProject.instance().crs()
