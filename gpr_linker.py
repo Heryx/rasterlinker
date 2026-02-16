@@ -42,11 +42,11 @@ from .polygon_draw_tool import PolygonDrawTool
 
 
 from .resources import *
-from .gpr_linker_dialog import GPRDialog
+from .gpr_linker_dialog import RasterLinkerDialog
 import os.path
 
 
-class GPR:
+class RasterLinkerPlugin:
     """QGIS Plugin Implementation."""
 
     def __init__(self, iface):
@@ -54,12 +54,12 @@ class GPR:
         self.iface = iface
         self.plugin_dir = os.path.dirname(__file__)
         self.actions = []
-        self.menu = self.tr(u'&GPR')
+        self.menu = self.tr(u'&RasterLinker')
         self.first_start = None
 
     # Translation helper
     def tr(self, message):
-        return QCoreApplication.translate('GPR', message)
+        return QCoreApplication.translate('RasterLinker', message)
 
     # Add actions to the toolbar/menu
     def add_action(self, icon_path, text, callback, parent=None):
@@ -74,20 +74,20 @@ class GPR:
     def initGui(self):
         """Initialize the GUI."""
         icon_path = ':/plugins/gpr_linker/icon.png'
-        self.add_action(icon_path, text=self.tr(u'GRP Linker'), callback=self.run, parent=self.iface.mainWindow())
+        self.add_action(icon_path, text=self.tr(u'Raster Linker'), callback=self.run, parent=self.iface.mainWindow())
         self.first_start = True
 
     def unload(self):
         """Unload the plugin."""
         for action in self.actions:
-            self.iface.removePluginMenu(self.tr(u'&GPR'), action)
+            self.iface.removePluginMenu(self.tr(u'&RasterLinker'), action)
             self.iface.removeToolBarIcon(action)
 
     def run(self):
         """Esegue il plugin."""
         if self.first_start:
             self.first_start = False
-            self.dlg = GPRDialog()
+            self.dlg = RasterLinkerDialog()
             self.populate_group_list()
 
             # Collega i segnali ai metodi
