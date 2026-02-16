@@ -102,6 +102,15 @@ class RasterLinkerPlugin:
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock_widget)
             self.populate_group_list()
             self.dlg.groupListWidget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            self.dlg.createGridButton.setEnabled(True)
+            self.dlg.selectGridPointsButton.setEnabled(True)
+            self.dlg.lineEditDistanceX.setEnabled(True)
+            self.dlg.lineEditDistanceY.setEnabled(True)
+            self.dlg.lineEditDistance.setEnabled(True)
+            self.dlg.lineEditX0Y0.setEnabled(True)
+            self.dlg.lineEditX1Y0.setEnabled(True)
+            self.dlg.lineEditY0.setEnabled(True)
+            self.dlg.lineEditX0Y1.setEnabled(True)
 
             # Collega i segnali ai metodi
             self.dlg.createGroupButton.clicked.connect(self.create_group)
@@ -112,13 +121,13 @@ class RasterLinkerPlugin:
             self.dlg.selectGridPointsButton.clicked.connect(self.activate_grid_selection_tool)
 
             self.dlg.createGridButton.clicked.connect(self.create_grid_from_polygon_layer)
-            self.dlg.createGridButton.clicked.connect(self.activate_polygon_draw_tool)
 
             self.dlg.zoomSelectedGroupsButton.clicked.connect(self.zoom_to_selected_groups)
 
             # Preimposta valori predefiniti
             self.dlg.lineEditDistanceX.setText("1.0")  # Valore predefinito per distanza X
             self.dlg.lineEditDistanceY.setText("1.0")  # Valore predefinito per distanza Y
+            self.dlg.lineEditDistance.setPlaceholderText("Nome area | prefisso sottocelle")
 
             # Collega il dial alla funzione di aggiornamento
             self.dlg.Dial.valueChanged.connect(self.update_visibility_with_dial)
@@ -132,8 +141,7 @@ class RasterLinkerPlugin:
         """
         Attiva il tool per disegnare un poligono.
         """
-        self.polygon_draw_tool = PolygonDrawTool(self.iface.mapCanvas(), self)
-        self.iface.mapCanvas().setMapTool(self.polygon_draw_tool)
+        self.create_grid_from_polygon_layer()
 
     def create_grid_from_polygon_layer(self):
         """
@@ -144,7 +152,20 @@ class RasterLinkerPlugin:
             self.polygon_draw_tool = PolygonDrawTool(self.iface.mapCanvas(), self)
             self.iface.mapCanvas().setMapTool(self.polygon_draw_tool)
 
-            QMessageBox.information(self.dlg, "Istruzioni", "Disegna un poligono sulla mappa per creare la griglia.")
+            QMessageBox.information(
+                self.dlg,
+                "Istruzioni",
+                "Disegna un poligono sulla mappa con click sinistro. "
+                "Chiudi con click destro o Invio; ESC per annullare. "
+                "Per rettangolo orientato: primo click origine, orienta col mouse, poi tasto D "
+                "(oppure click centrale) "
+                "per bloccare orientamento e scegliere tra inserimento manuale o da canvas. "
+                "Con Shift l'orientamento si vincola a 0/90; se Shift attiva zoom in QGIS usa X "
+                "per attivare/disattivare il vincolo 0/90, poi clicca per avviare le dimensioni. "
+                "Con Shift+secondo click puoi "
+                "avviare direttamente l'inserimento dimensioni. "
+                "Campo nome: 'NomeArea|PrefissoCelle' (prefisso opzionale)."
+            )
         except Exception as e:
             QMessageBox.critical(self.dlg, "Errore", f"Errore durante l'attivazione dello strumento di disegno: {e}")
 
@@ -157,15 +178,47 @@ class RasterLinkerPlugin:
             # Recupera i valori di distanza dalla UI
             distance_x = float(self.dlg.lineEditDistanceX.text().strip())
             distance_y = float(self.dlg.lineEditDistanceY.text().strip())
+            area_name, cell_prefix = self._get_grid_names_from_ui()
+            polygon_layer.setName(area_name)
 
             # Crea la griglia
-            create_grid_from_polygon(polygon_layer, distance_x, distance_y)
+            create_grid_from_polygon(
+                polygon_layer,
+                distance_x,
+                distance_y,
+                area_name=area_name,
+                cell_prefix=cell_prefix
+            )
 
-            QMessageBox.information(self.dlg, "Successo", "Griglia creata con successo!")
+            QMessageBox.information(
+                self.dlg,
+                "Successo",
+                f"Area '{area_name}' creata. Celle generate con prefisso '{cell_prefix}'."
+            )
         except ValueError as ve:
             QMessageBox.warning(self.dlg, "Errore", f"Errore: {ve}")
         except Exception as e:
             QMessageBox.critical(self.dlg, "Errore", f"Errore durante la creazione della griglia: {e}")
+
+    def _get_grid_names_from_ui(self):
+        """
+        Estrae i nomi da lineEditDistance.
+        Formato supportato: "NomeArea|PrefissoCelle"
+        Se manca il prefisso: "NomeArea" -> prefisso automatico.
+        """
+        raw_value = self.dlg.lineEditDistance.text().strip()
+        if not raw_value:
+            area_name = "Area_Indagine"
+            return area_name, f"{area_name}_cell"
+
+        if "|" in raw_value:
+            parts = [p.strip() for p in raw_value.split("|", 1)]
+            area_name = parts[0] or "Area_Indagine"
+            cell_prefix = parts[1] or f"{area_name}_cell"
+            return area_name, cell_prefix
+
+        area_name = raw_value
+        return area_name, f"{area_name}_cell"
 
 
 
@@ -280,45 +333,6 @@ class RasterLinkerPlugin:
             QMessageBox.warning(self.dlg, "Errore", f"Errore nei valori delle distanze: {ve}")
         except Exception as e:
             QMessageBox.critical(self.dlg, "Errore", f"Errore durante la creazione della griglia: {str(e)}")
-
-
-
-    def activate_grid_selection_tool(self):
-        """
-        Attiva il tool per selezionare i punti della griglia.
-        """
-        self.grid_selection_tool = GridSelectionTool(self.iface.mapCanvas(), self)
-        self.iface.mapCanvas().setMapTool(self.grid_selection_tool)
-
-
-    def set_grid_points(self, points):
-        """
-        Riceve i 3 punti selezionati e genera la griglia.
-        Args:
-            points (list of QgsPointXY): Lista dei 3 punti selezionati (x0, y0), (x1, y0), (x0, y1).
-        """
-        try:
-            # Estrai i punti
-            x0, y0 = points[0].x(), points[0].y()  # Punto di origine
-            x1, _ = points[1].x(), points[1].y()  # Estremità asse X
-            _, y1 = points[2].x(), points[2].y()  # Estremità asse Y
-
-            # Distanza tra le linee della griglia
-            distance = float(self.dlg.lineEditDistance.text())
-
-            # Nome del gruppo selezionato
-            group_name = self.dlg.groupListWidget.currentItem().text()
-
-            # Ottieni il CRS del progetto
-            raster_crs = QgsProject.instance().crs()
-
-            # Genera la griglia
-            create_oriented_grid(x0, y0, x1, y1, distance, raster_crs, group_name)
-
-            QMessageBox.information(self.dlg, "Successo", f"Griglia creata e associata al gruppo '{group_name}'.")
-        except Exception as e:
-            QMessageBox.critical(self.dlg, "Errore", f"Errore durante la creazione della griglia: {str(e)}")
-
 
 ###########################
     def add_open_button_to_group(self, group_name):
