@@ -3,14 +3,15 @@
 # This file should be included when you package your plugin.# Mandatory items:
 
 [general]
-name=ImageSeq
+name=RasterLinker
 qgisMinimumVersion=3.0
-description=A plugin for displaying images in sequence, such as satellite images or GPR surveys.
+description=QGIS plugin to organize raster datasets in groups and create oriented survey grids from drawn areas.
 version=0.2
 author=Giuseppe Guarino
 email=guarino.archeo@gmail.com
 
-about= Image sequences (Geophysical or Satellite)
+about=RasterLinker helps users manage raster sequences (GPR, geophysical, satellite) and generate oriented polygon grids for survey planning. Developed by Giuseppe Guarino. Suggested citation text and documentation may be shared under CC BY 4.0. Plugin source code remains distributed under GPL-2.0-or-later.
+license=GPL-2.0-or-later
 
 tracker=http://bugs
 repository=http://repo
@@ -39,9 +40,8 @@ deprecated=False
 # Check the documentation for more information.
 # plugin_dependencies=
 
-Category of the plugin: Raster, Vector, Database or Web
+# Category of the plugin: Raster, Vector, Database or Web
 # category=
 
 # If the plugin can run on QGIS Server.
 server=False
-

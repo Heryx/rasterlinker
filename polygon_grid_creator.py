@@ -5,6 +5,7 @@ Genera una griglia di celle poligonali orientate in base al poligono disegnato.
 """
 
 import math
+from datetime import datetime, timezone
 from qgis.core import (
     QgsFeature,
     QgsField,
@@ -147,11 +148,17 @@ def create_grid_from_polygon(
             QgsField("area", QVariant.String),
             QgsField("row", QVariant.Int),
             QgsField("col", QVariant.Int),
+            QgsField("width_m", QVariant.Double),
+            QgsField("height_m", QVariant.Double),
+            QgsField("angle_deg", QVariant.Double),
+            QgsField("created_at", QVariant.String),
         ]
     )
     grid_layer.updateFields()
 
     features = []
+    angle_deg = math.degrees(angle)
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     row_idx = 0
     for j in range(len(v_values) - 1):
         v0 = v_values[j]
@@ -170,7 +177,18 @@ def create_grid_from_polygon(
 
             feat = QgsFeature(grid_layer.fields())
             feat.setGeometry(clipped)
-            feat.setAttributes([f"{cell_prefix}_{row_idx:03d}_{col_idx:03d}", area_name, row_idx, col_idx])
+            feat.setAttributes(
+                [
+                    f"{cell_prefix}_{row_idx:03d}_{col_idx:03d}",
+                    area_name,
+                    row_idx,
+                    col_idx,
+                    float(distance_x),
+                    float(distance_y),
+                    float(angle_deg),
+                    created_at,
+                ]
+            )
             features.append(feat)
 
     provider.addFeatures(features)

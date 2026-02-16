@@ -3,7 +3,7 @@ import math
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsVertexMarker
-from qgis.core import QgsVectorLayer, QgsFeature, QgsGeometry, QgsProject, QgsWkbTypes, QgsPointXY
+from qgis.core import QgsVectorLayer, QgsFeature, QgsGeometry, QgsProject, QgsWkbTypes, QgsPointXY, Qgis
 from PyQt5.QtWidgets import QMessageBox, QInputDialog, QApplication
 
 
@@ -53,7 +53,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             if event.button() == Qt.LeftButton:
                 point = self._map_point_with_snap(event)
                 if len(self.points) >= 1 and axis_constraint:
-                    point = self._axis_snapped_point(self.points[0], point)
+                    point = self._constraint_snapped_point(self.points[0], point)
                 if self.dimension_pick_mode is not None:
                     self._handle_canvas_dimension_pick(point)
                     return
@@ -79,7 +79,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             return
         point = self._map_point_with_snap(event)
         if len(self.points) >= 1 and (self._shift_active(event) or self.orthogonal_lock_enabled or self._plugin_force_orthogonal()):
-            point = self._axis_snapped_point(self.points[0], point)
+            point = self._constraint_snapped_point(self.points[0], point)
         self.current_mouse_point = point
         self._update_preview()
 
@@ -99,11 +99,11 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         elif event.key() == Qt.Key_Escape:
             self.reset()
             self.canvas.unsetMapTool(self)
-            QMessageBox.information(None, "Annullato", "Disegno poligono annullato.")
+            self._notify_info("Disegno poligono annullato.")
 
     def _lock_orientation_and_build_rectangle(self):
         if not self.points:
-            QMessageBox.information(None, "Orientamento", "Fai prima click sul punto di origine.")
+            self._notify_info("Fai prima click sul punto di origine.")
             return
 
         origin = self.points[0]
@@ -112,11 +112,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             reference = self.points[1]
 
         if reference is None:
-            QMessageBox.information(
-                None,
-                "Orientamento",
-                "Muovi il mouse per orientare la base, poi premi D (oppure click centrale)."
-            )
+            self._notify_info("Muovi il mouse per orientare la base, poi premi D o click centrale.")
             return
 
         angle = self._compute_angle(origin, reference)
@@ -134,12 +130,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         if preferred_mode == "canvas":
             self.dimension_pick_mode = "length"
             self.pending_length = None
-            QMessageBox.information(
-                None,
-                "Da canvas",
-                "Click 1: imposta la lunghezza lungo l'orientamento bloccato. "
-                "Click 2: imposta la larghezza."
-            )
+            self._notify_info("Canvas mode: click 1 lunghezza, click 2 larghezza.")
             return
 
         choice = QMessageBox(None)
@@ -159,12 +150,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         if clicked == canvas_btn:
             self.dimension_pick_mode = "length"
             self.pending_length = None
-            QMessageBox.information(
-                None,
-                "Da canvas",
-                "Click 1: imposta la lunghezza lungo l'orientamento bloccato. "
-                "Click 2: imposta la larghezza."
-            )
+            self._notify_info("Canvas mode: click 1 lunghezza, click 2 larghezza.")
 
     def _compute_angle(self, origin, reference):
         dx = reference.x() - origin.x()
@@ -179,6 +165,36 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         if abs(dx) >= abs(dy):
             return QgsPointXY(point.x(), origin.y())
         return QgsPointXY(origin.x(), point.y())
+
+    def _constraint_snapped_point(self, origin, point):
+        """
+        Applica vincolo ortogonale assoluto (0/90) o relativo alla base disegnata.
+        """
+        if self._plugin_relative_orthogonal():
+            base_angle = self._base_orientation_angle()
+            if base_angle is not None:
+                return self._relative_axis_snapped_point(origin, point, base_angle)
+        return self._axis_snapped_point(origin, point)
+
+    def _relative_axis_snapped_point(self, origin, point, base_angle):
+        ux = (math.cos(base_angle), math.sin(base_angle))
+        uy = (-math.sin(base_angle), math.cos(base_angle))
+        vx = point.x() - origin.x()
+        vy = point.y() - origin.y()
+        proj_u = vx * ux[0] + vy * ux[1]
+        proj_v = vx * uy[0] + vy * uy[1]
+        if abs(proj_u) >= abs(proj_v):
+            return QgsPointXY(origin.x() + proj_u * ux[0], origin.y() + proj_u * ux[1])
+        return QgsPointXY(origin.x() + proj_v * uy[0], origin.y() + proj_v * uy[1])
+
+    def _base_orientation_angle(self):
+        if len(self.points) >= 2:
+            return self._compute_angle(self.points[0], self.points[1])
+        if self.locked_angle is not None:
+            return self.locked_angle
+        if self.current_mouse_point is not None and self.points:
+            return self._compute_angle(self.points[0], self.current_mouse_point)
+        return None
 
     def _shift_active(self, event=None):
         """
@@ -235,7 +251,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
                 return
             self.pending_length = length
             self.dimension_pick_mode = "width"
-            QMessageBox.information(None, "Da canvas", "Ora clicca per impostare la larghezza.")
+            self._notify_info("Ora clicca per impostare la larghezza.")
             return
 
         if self.dimension_pick_mode == "width":
@@ -285,7 +301,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             if hasattr(self.parent_plugin, "create_grid_from_drawn_polygon"):
                 self.parent_plugin.create_grid_from_drawn_polygon(polygon_layer)
 
-            QMessageBox.information(None, "Successo", "Poligono creato.")
+            self._notify_info("Poligono creato.")
         except Exception as e:
             QMessageBox.critical(None, "Errore", f"Errore durante la creazione del poligono: {e}")
         finally:
@@ -324,9 +340,19 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
     def _plugin_force_orthogonal(self):
         return bool(getattr(self.parent_plugin, "grid_force_orthogonal", False))
 
+    def _plugin_relative_orthogonal(self):
+        return bool(getattr(self.parent_plugin, "grid_relative_orthogonal", False))
+
     def _plugin_dimension_mode(self):
         mode = getattr(self.parent_plugin, "grid_dimension_mode", "ask")
         return mode if mode in ("ask", "manual", "canvas") else "ask"
+
+    def _notify_info(self, message, duration=5):
+        iface = getattr(self.parent_plugin, "iface", None)
+        if iface is not None and hasattr(iface, "messageBar"):
+            iface.messageBar().pushMessage("RasterLinker", message, level=Qgis.Info, duration=duration)
+            return
+        QMessageBox.information(None, "Info", message)
 
     def _add_vertex_marker(self, point):
         marker = QgsVertexMarker(self.canvas)
@@ -353,6 +379,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         if len(ring) >= 3:
             closed_ring = ring + [ring[0]]
             self.polygon_rubber_band.setToGeometry(QgsGeometry.fromPolygonXY([closed_ring]), None)
+        self._publish_base_angle()
 
     def reset(self):
         self.points = []
@@ -366,6 +393,33 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         for marker in self.vertex_markers:
             self.canvas.scene().removeItem(marker)
         self.vertex_markers = []
+        self._publish_base_angle()
+
+    def _publish_base_angle(self):
+        callback = getattr(self.parent_plugin, "update_draw_indicators", None)
+        if callback is None:
+            callback = getattr(self.parent_plugin, "update_base_angle_indicator", None)
+        if callback is None:
+            return
+        angle = None
+        length = None
+        if len(self.points) >= 2:
+            angle = self._compute_angle(self.points[0], self.points[1])
+            length = math.hypot(
+                self.points[1].x() - self.points[0].x(),
+                self.points[1].y() - self.points[0].y(),
+            )
+        elif len(self.points) == 1 and self.current_mouse_point is not None:
+            angle = self._compute_angle(self.points[0], self.current_mouse_point)
+            length = math.hypot(
+                self.current_mouse_point.x() - self.points[0].x(),
+                self.current_mouse_point.y() - self.points[0].y(),
+            )
+
+        try:
+            callback(angle, length)
+        except TypeError:
+            callback(angle)
 
     def deactivate(self):
         self.reset()
