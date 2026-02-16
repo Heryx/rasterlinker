@@ -10,7 +10,7 @@
 from PyQt5.QtWidgets import QDialog
 from .gpr_linker_dialog_base import Ui_Dialog
 
-class GPRDialog(QDialog, Ui_Dialog):
+class RasterLinkerDialog(QDialog, Ui_Dialog):
     def __init__(self, parent=None):
-        super(GPRDialog, self).__init__(parent)
+        super(RasterLinkerDialog, self).__init__(parent)
         self.setupUi(self)  # Imposta l'interfaccia utente
