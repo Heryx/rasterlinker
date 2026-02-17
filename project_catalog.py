@@ -32,6 +32,7 @@ def _default_catalog(project_root):
         "radargrams": [],
         "timeslices": [],
         "links": [],
+        "raster_groups": [],
     }
 
 
@@ -87,6 +88,12 @@ def register_radargram(project_root, radargram_record):
     return save_catalog(project_root, data)
 
 
+def register_timeslice(project_root, timeslice_record):
+    data = load_catalog(project_root)
+    data["timeslices"].append(normalize_timeslice_record(timeslice_record))
+    return save_catalog(project_root, data)
+
+
 def register_link(project_root, link_record):
     data = load_catalog(project_root)
     data["links"].append(normalize_link_record(link_record))
@@ -108,6 +115,24 @@ def ensure_catalog_schema(project_root, data):
     data["radargrams"] = [normalize_radargram_record(v) for v in data.get("radargrams", []) if isinstance(v, dict)]
     data["timeslices"] = [normalize_timeslice_record(v) for v in data.get("timeslices", []) if isinstance(v, dict)]
     data["links"] = [normalize_link_record(v) for v in data.get("links", []) if isinstance(v, dict)]
+    data["raster_groups"] = [normalize_raster_group_record(v) for v in data.get("raster_groups", []) if isinstance(v, dict)]
+    if not data["raster_groups"]:
+        data["raster_groups"].append(
+            normalize_raster_group_record(
+                {
+                    "id": "grp_imported",
+                    "name": "Imported",
+                    "radargram_ids": [r.get("id") for r in data.get("radargrams", []) if r.get("id")],
+                    "timeslice_ids": [],
+                }
+            )
+        )
+    else:
+        known_radargrams = {r.get("id") for r in data.get("radargrams", []) if r.get("id")}
+        known_timeslices = {t.get("id") for t in data.get("timeslices", []) if t.get("id")}
+        for group in data["raster_groups"]:
+            group["radargram_ids"] = [rid for rid in group.get("radargram_ids", []) if rid in known_radargrams]
+            group["timeslice_ids"] = [tid for tid in group.get("timeslice_ids", []) if tid in known_timeslices]
     return data
 
 
@@ -168,6 +193,117 @@ def normalize_link_record(rec):
     rec.setdefault("notes", "")
     rec.setdefault("created_at", utc_now_iso())
     return rec
+
+
+def normalize_raster_group_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"group_{utc_now_iso()}")
+    rec.setdefault("name", "Group")
+    rec.setdefault("radargram_ids", [])
+    rec.setdefault("timeslice_ids", [])
+    rec["radargram_ids"] = [v for v in rec.get("radargram_ids", []) if v]
+    rec["timeslice_ids"] = [v for v in rec.get("timeslice_ids", []) if v]
+    rec.setdefault("created_at", utc_now_iso())
+    return rec
+
+
+def create_raster_group(project_root, group_name):
+    data = load_catalog(project_root)
+    existing = [g for g in data.get("raster_groups", []) if (g.get("name") or "").strip().lower() == group_name.strip().lower()]
+    if existing:
+        return existing[0], False
+
+    group = normalize_raster_group_record(
+        {
+            "id": f"group_{utc_now_iso()}",
+            "name": group_name.strip(),
+            "radargram_ids": [],
+            "timeslice_ids": [],
+            "created_at": utc_now_iso(),
+        }
+    )
+    data["raster_groups"].append(group)
+    save_catalog(project_root, data)
+    return group, True
+
+
+def assign_radargrams_to_group(project_root, group_id, radargram_ids):
+    data = load_catalog(project_root)
+    radargram_ids = [rid for rid in radargram_ids if rid]
+
+    group = next((g for g in data.get("raster_groups", []) if g.get("id") == group_id), None)
+    if group is None:
+        raise ValueError(f"Raster group not found: {group_id}")
+
+    merged = list(dict.fromkeys(group.get("radargram_ids", []) + radargram_ids))
+    group["radargram_ids"] = merged
+    save_catalog(project_root, data)
+    return group
+
+
+def add_radargram_to_default_group(project_root, radargram_id):
+    if not radargram_id:
+        return
+    data = load_catalog(project_root)
+    default_group = next((g for g in data.get("raster_groups", []) if g.get("id") == "grp_imported"), None)
+    if default_group is None:
+        default_group = normalize_raster_group_record(
+            {
+                "id": "grp_imported",
+                "name": "Imported",
+                "radargram_ids": [],
+                "timeslice_ids": [],
+                "created_at": utc_now_iso(),
+            }
+        )
+        data.setdefault("raster_groups", []).append(default_group)
+    if radargram_id not in default_group["radargram_ids"]:
+        default_group["radargram_ids"].append(radargram_id)
+        save_catalog(project_root, data)
+
+
+def assign_timeslices_to_group(project_root, group_id, timeslice_ids):
+    data = load_catalog(project_root)
+    timeslice_ids = [tid for tid in timeslice_ids if tid]
+    group = next((g for g in data.get("raster_groups", []) if g.get("id") == group_id), None)
+    if group is None:
+        raise ValueError(f"Raster group not found: {group_id}")
+    merged = list(dict.fromkeys(group.get("timeslice_ids", []) + timeslice_ids))
+    group["timeslice_ids"] = merged
+    save_catalog(project_root, data)
+    return group
+
+
+def remove_timeslices_from_group(project_root, group_id, timeslice_ids):
+    data = load_catalog(project_root)
+    timeslice_ids = set(tid for tid in timeslice_ids if tid)
+    group = next((g for g in data.get("raster_groups", []) if g.get("id") == group_id), None)
+    if group is None:
+        raise ValueError(f"Raster group not found: {group_id}")
+    group["timeslice_ids"] = [tid for tid in group.get("timeslice_ids", []) if tid not in timeslice_ids]
+    save_catalog(project_root, data)
+    return group
+
+
+def add_timeslice_to_default_group(project_root, timeslice_id):
+    if not timeslice_id:
+        return
+    data = load_catalog(project_root)
+    default_group = next((g for g in data.get("raster_groups", []) if g.get("id") == "grp_imported"), None)
+    if default_group is None:
+        default_group = normalize_raster_group_record(
+            {
+                "id": "grp_imported",
+                "name": "Imported",
+                "radargram_ids": [],
+                "timeslice_ids": [],
+                "created_at": utc_now_iso(),
+            }
+        )
+        data.setdefault("raster_groups", []).append(default_group)
+    if timeslice_id not in default_group["timeslice_ids"]:
+        default_group["timeslice_ids"].append(timeslice_id)
+        save_catalog(project_root, data)
 
 
 def validate_catalog(project_root, catalog_data=None):

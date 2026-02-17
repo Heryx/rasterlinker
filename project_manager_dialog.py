@@ -18,8 +18,12 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QFileDialog,
     QMessageBox,
+    QInputDialog,
+    QDialog,
 )
+from qgis.PyQt.QtCore import QSettings
 from qgis.core import QgsProject, QgsPointCloudLayer, QgsRasterLayer
+from qgis.gui import QgsProjectionSelectionDialog
 
 from .project_catalog import (
     ensure_project_structure,
@@ -27,7 +31,12 @@ from .project_catalog import (
     save_catalog,
     register_model_3d,
     register_radargram,
+    register_timeslice,
     save_radargram_sidecar,
+    add_radargram_to_default_group,
+    create_raster_group,
+    assign_timeslices_to_group,
+    remove_timeslices_from_group,
     validate_catalog,
     normalize_copy_into_project,
     export_project_package,
@@ -41,10 +50,14 @@ from .link_editor_dialog import LinkEditorDialog
 
 
 class ProjectManagerDialog(QDialog):
-    def __init__(self, iface, parent=None):
+    def __init__(self, iface, parent=None, on_project_updated=None):
         super().__init__(parent)
         self.iface = iface
         self.project_root = ""
+        self.on_project_updated = on_project_updated
+        self.settings = QSettings()
+        self.settings_key_active_project = "RasterLinker/active_project_root"
+        self.settings_key_default_import_crs = "RasterLinker/default_import_crs_authid"
         self.setWindowTitle("RasterLinker Project Manager")
         self.resize(760, 300)
         self._build_ui()
@@ -68,7 +81,7 @@ class ProjectManagerDialog(QDialog):
         row.addWidget(browse_btn)
         root_layout.addLayout(row)
 
-        create_btn = QPushButton("Create/Open Project")
+        create_btn = QPushButton("Create Project")
         create_btn.clicked.connect(self._create_or_open_project)
         create_btn.setMinimumWidth(180)
         create_btn.setMinimumHeight(30)
@@ -93,10 +106,15 @@ class ProjectManagerDialog(QDialog):
         import_rg_btn.setMinimumHeight(28)
         import_layout.addWidget(import_rg_btn, 0, 1)
 
+        import_ts_btn = QPushButton("Import Time-slices")
+        import_ts_btn.clicked.connect(self._import_timeslices)
+        import_ts_btn.setMinimumHeight(28)
+        import_layout.addWidget(import_ts_btn, 1, 0)
+
         import_manifest_btn = QPushButton("Import Manifest")
         import_manifest_btn.clicked.connect(self._import_manifest)
         import_manifest_btn.setMinimumHeight(28)
-        import_layout.addWidget(import_manifest_btn, 1, 0, 1, 2)
+        import_layout.addWidget(import_manifest_btn, 1, 1)
 
         catalog_box = QGroupBox("Catalog & QA")
         catalog_layout = QGridLayout(catalog_box)
@@ -118,20 +136,25 @@ class ProjectManagerDialog(QDialog):
         validate_btn.setMinimumHeight(28)
         catalog_layout.addWidget(validate_btn, 1, 0)
 
+        crs_btn = QPushButton("Set Import CRS")
+        crs_btn.clicked.connect(self._choose_default_import_crs)
+        crs_btn.setMinimumHeight(28)
+        catalog_layout.addWidget(crs_btn, 1, 1)
+
         cleanup_btn = QPushButton("Cleanup Catalog")
         cleanup_btn.clicked.connect(self._cleanup_catalog)
         cleanup_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(cleanup_btn, 1, 1)
+        catalog_layout.addWidget(cleanup_btn, 2, 0)
 
         reload_btn = QPushButton("Reload Layers")
         reload_btn.clicked.connect(self._reload_imported_layers)
         reload_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(reload_btn, 2, 0)
+        catalog_layout.addWidget(reload_btn, 2, 1)
 
         links_btn = QPushButton("Link Editor")
         links_btn.clicked.connect(self._open_link_editor)
         links_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(links_btn, 2, 1)
+        catalog_layout.addWidget(links_btn, 3, 0, 1, 2)
 
         package_box = QGroupBox("Package")
         package_layout = QGridLayout(package_box)
@@ -148,7 +171,7 @@ class ProjectManagerDialog(QDialog):
         import_pkg_btn.setMinimumHeight(28)
         package_layout.addWidget(import_pkg_btn, 0, 1)
 
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton("OK")
         close_btn.clicked.connect(self.close)
         close_btn.setMinimumHeight(30)
         package_layout.addWidget(close_btn, 1, 0, 1, 2)
@@ -189,11 +212,34 @@ class ProjectManagerDialog(QDialog):
     def _create_or_open_project(self):
         folder = self.path_edit.text().strip()
         if not folder:
-            QMessageBox.warning(self, "Project Manager", "Please select a project folder.")
-            return
+            parent_dir = QFileDialog.getExistingDirectory(self, "Select parent folder for project")
+            if not parent_dir:
+                return
+            folder_name, ok = QInputDialog.getText(
+                self,
+                "Create Project Folder",
+                "Project folder name:",
+                text="RasterLinkerProject",
+            )
+            if not ok or not folder_name.strip():
+                return
+            folder = os.path.join(parent_dir, folder_name.strip())
+            self.path_edit.setText(folder)
+
         ensure_project_structure(folder)
         self.project_root = folder
+        self.settings.setValue(self.settings_key_active_project, folder)
+        sync_counts = self._sync_catalog_from_existing_files()
+        sync_msg = (
+            f" (synced: timeslices {sync_counts['timeslices']}, "
+            f"radargrams {sync_counts['radargrams']}, models {sync_counts['models']})"
+            if any(sync_counts.values())
+            else ""
+        )
         self.iface.messageBar().pushInfo("RasterLinker", f"Project ready: {folder}")
+        if sync_msg:
+            self.iface.messageBar().pushInfo("RasterLinker", f"Existing data recognized{sync_msg}.")
+        self._notify_project_updated()
 
     def _ensure_project_ready(self):
         if self.project_root:
@@ -204,7 +250,335 @@ class ProjectManagerDialog(QDialog):
             return False
         ensure_project_structure(folder)
         self.project_root = folder
+        self.settings.setValue(self.settings_key_active_project, folder)
+        self._notify_project_updated()
         return True
+
+    def _sync_catalog_from_existing_files(self):
+        """
+        Scan existing project folders and register files not yet present in catalog.
+        """
+        catalog = load_catalog(self.project_root)
+        counts = {"timeslices": 0, "radargrams": 0, "models": 0}
+
+        existing_timeslice_paths = {
+            os.path.normcase(os.path.abspath(r.get("project_path", "")))
+            for r in catalog.get("timeslices", [])
+            if r.get("project_path")
+        }
+        existing_radargram_paths = {
+            os.path.normcase(os.path.abspath(r.get("project_path", "")))
+            for r in catalog.get("radargrams", [])
+            if r.get("project_path")
+        }
+        existing_model_paths = {
+            os.path.normcase(os.path.abspath(r.get("project_path", "")))
+            for r in catalog.get("models_3d", [])
+            if r.get("project_path")
+        }
+
+        timeslice_dir = os.path.join(self.project_root, "timeslices_2d")
+        radargram_dir = os.path.join(self.project_root, "radargrams")
+        model_dir = os.path.join(self.project_root, "volumes_3d")
+
+        # Import existing time-slices
+        if os.path.isdir(timeslice_dir):
+            for name in sorted(os.listdir(timeslice_dir)):
+                project_path = os.path.join(timeslice_dir, name)
+                if not os.path.isfile(project_path):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".asc", ".img"}:
+                    continue
+                norm_path = os.path.normcase(os.path.abspath(project_path))
+                if norm_path in existing_timeslice_paths:
+                    continue
+
+                try:
+                    meta = self._inspect_timeslice(project_path)
+                    meta.update(
+                        {
+                            "id": f"timeslice_{utc_now_iso()}_{name}",
+                            "name": os.path.splitext(name)[0],
+                            "normalized_name": name,
+                            "source_path": project_path,
+                            "project_path": project_path,
+                            "imported_at": utc_now_iso(),
+                        }
+                    )
+                    register_timeslice(self.project_root, meta)
+                    existing_timeslice_paths.add(norm_path)
+                    counts["timeslices"] += 1
+                except Exception:
+                    continue
+
+        # Import existing radargrams
+        if os.path.isdir(radargram_dir):
+            for name in sorted(os.listdir(radargram_dir)):
+                project_path = os.path.join(radargram_dir, name)
+                if not os.path.isfile(project_path):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in {".rd3", ".rad", ".dzt", ".npy", ".csv", ".txt", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}:
+                    continue
+                norm_path = os.path.normcase(os.path.abspath(project_path))
+                if norm_path in existing_radargram_paths:
+                    continue
+                try:
+                    meta = inspect_radargram(project_path)
+                    meta.update(
+                        {
+                            "id": f"radargram_{utc_now_iso()}_{name}",
+                            "normalized_name": name,
+                            "source_path": project_path,
+                            "project_path": project_path,
+                            "imported_at": utc_now_iso(),
+                        }
+                    )
+                    geo_info = self._classify_radargram_georef(project_path)
+                    meta.update(geo_info)
+                    register_radargram(self.project_root, meta)
+                    save_radargram_sidecar(self.project_root, meta)
+                    add_radargram_to_default_group(self.project_root, meta.get("id"))
+                    existing_radargram_paths.add(norm_path)
+                    counts["radargrams"] += 1
+                except Exception:
+                    continue
+
+        # Import existing 3D models
+        if os.path.isdir(model_dir):
+            for name in sorted(os.listdir(model_dir)):
+                project_path = os.path.join(model_dir, name)
+                if not os.path.isfile(project_path):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in {".las", ".laz"}:
+                    continue
+                norm_path = os.path.normcase(os.path.abspath(project_path))
+                if norm_path in existing_model_paths:
+                    continue
+                try:
+                    meta = inspect_las_laz(project_path)
+                    meta.update(
+                        {
+                            "id": f"model_{utc_now_iso()}_{name}",
+                            "normalized_name": name,
+                            "source_path": project_path,
+                            "project_path": project_path,
+                            "imported_at": utc_now_iso(),
+                        }
+                    )
+                    register_model_3d(self.project_root, meta)
+                    existing_model_paths.add(norm_path)
+                    counts["models"] += 1
+                except Exception:
+                    continue
+
+        return counts
+
+    def _notify_project_updated(self):
+        if callable(self.on_project_updated):
+            try:
+                self.on_project_updated()
+            except Exception:
+                pass
+
+    def _get_preferred_import_crs(self):
+        authid = (self.settings.value(self.settings_key_default_import_crs, "", type=str) or "").strip()
+        if authid:
+            try:
+                from qgis.core import QgsCoordinateReferenceSystem
+                crs = QgsCoordinateReferenceSystem(authid)
+                if crs.isValid():
+                    return crs
+            except Exception:
+                pass
+        return QgsProject.instance().crs()
+
+    def _choose_default_import_crs(self):
+        selected = None
+        try:
+            dlg = QgsProjectionSelectionDialog(self)
+            current = self._get_preferred_import_crs()
+            if current is not None and current.isValid() and hasattr(dlg, "setCrs"):
+                dlg.setCrs(current)
+
+            result = None
+            if hasattr(dlg, "exec_"):
+                result = dlg.exec_()
+            elif hasattr(dlg, "exec"):
+                result = dlg.exec()
+
+            if result in (QDialog.Accepted, 1, True) and hasattr(dlg, "crs"):
+                selected = dlg.crs()
+        except Exception:
+            selected = None
+
+        if selected is None or not selected.isValid():
+            epsg_text, ok = QInputDialog.getText(
+                self,
+                "Set Import CRS",
+                "Enter EPSG code (example: 32633) or AUTHID (example: EPSG:32633):",
+                text="EPSG:32633",
+            )
+            if not ok or not epsg_text.strip():
+                return
+            try:
+                from qgis.core import QgsCoordinateReferenceSystem
+                raw = epsg_text.strip().upper()
+                authid = raw if raw.startswith("EPSG:") else f"EPSG:{raw}"
+                selected = QgsCoordinateReferenceSystem(authid)
+            except Exception:
+                selected = None
+
+        if selected is None or not selected.isValid():
+            QMessageBox.warning(self, "Set Import CRS", "Invalid CRS selection.")
+            return
+
+        self.settings.setValue(self.settings_key_default_import_crs, selected.authid())
+        self.iface.messageBar().pushInfo("RasterLinker", f"Default import CRS set to {selected.authid()}")
+
+    def _get_or_create_qgis_group(self, group_name):
+        root = QgsProject.instance().layerTreeRoot()
+        plugin_root = next(
+            (
+                g for g in root.children()
+                if hasattr(g, "name") and g.name() == "RasterLinker"
+            ),
+            None,
+        )
+        if plugin_root is None:
+            plugin_root = root.addGroup("RasterLinker")
+
+        target = next(
+            (
+                g for g in plugin_root.children()
+                if hasattr(g, "name") and g.name() == group_name
+            ),
+            None,
+        )
+        if target is None:
+            target = plugin_root.addGroup(group_name)
+        return target
+
+    def _load_timeslice_paths_into_qgis_group(self, paths, group_name):
+        if not paths:
+            return 0
+        target_group = self._get_or_create_qgis_group(group_name)
+        existing_sources = {layer.source() for layer in QgsProject.instance().mapLayers().values()}
+        target_crs = self._get_preferred_import_crs()
+        loaded = 0
+        for path in paths:
+            if not path or not os.path.exists(path) or path in existing_sources:
+                continue
+            layer_name = os.path.basename(path)
+            raster_layer = QgsRasterLayer(path, layer_name)
+            if not raster_layer.isValid():
+                continue
+            if not raster_layer.crs().isValid() and target_crs.isValid():
+                raster_layer.setCrs(target_crs)
+            QgsProject.instance().addMapLayer(raster_layer, False)
+            target_group.addLayer(raster_layer)
+            existing_sources.add(path)
+            loaded += 1
+        return loaded
+
+    def _inspect_timeslice(self, file_path):
+        layer = QgsRasterLayer(file_path, os.path.basename(file_path))
+        if not layer.isValid():
+            return {"is_valid_raster": False}
+        extent = layer.extent()
+        return {
+            "is_valid_raster": True,
+            "crs": layer.crs().authid() if layer.crs().isValid() else None,
+            "width": layer.width(),
+            "height": layer.height(),
+            "band_count": layer.bandCount(),
+            "extent": {
+                "xmin": extent.xMinimum(),
+                "xmax": extent.xMaximum(),
+                "ymin": extent.yMinimum(),
+                "ymax": extent.yMaximum(),
+            },
+        }
+
+    def _import_timeslices(self):
+        if not self._ensure_project_ready():
+            return
+
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Time-slice raster files",
+            "",
+            "Rasters (*.tif *.tiff *.png *.jpg *.jpeg *.asc *.img);;All files (*.*)",
+        )
+        if not file_paths:
+            return
+
+        imported = 0
+        imported_ids = []
+        imported_paths = []
+        for file_path in file_paths:
+            try:
+                project_path, normalized_name = normalize_copy_into_project(
+                    self.project_root, "timeslices_2d", file_path
+                )
+                meta = self._inspect_timeslice(project_path)
+                meta.update(
+                    {
+                        "id": f"timeslice_{utc_now_iso()}_{normalized_name}",
+                        "name": os.path.splitext(normalized_name)[0],
+                        "normalized_name": normalized_name,
+                        "source_path": file_path,
+                        "project_path": project_path,
+                        "imported_at": utc_now_iso(),
+                    }
+                )
+                register_timeslice(self.project_root, meta)
+                imported_ids.append(meta.get("id"))
+                imported_paths.append(project_path)
+                imported += 1
+            except Exception as e:
+                QMessageBox.warning(self, "Import warning", f"{file_path}\n{e}")
+
+        self.iface.messageBar().pushInfo("RasterLinker", f"Time-slices import completed ({imported}).")
+        self._notify_project_updated()
+
+        if imported <= 0:
+            return
+
+        group_name, ok = QInputDialog.getText(
+            self,
+            "New Image Group",
+            (
+                f"{imported} time-slice image(s) imported successfully.\n"
+                "Enter the group name to assign and load them:"
+            ),
+            text="TimeSlices",
+        )
+        if not ok or not group_name.strip():
+            QMessageBox.information(
+                self,
+                "Group assignment required",
+                (
+                    "Time-slices were imported into the project folder and catalog,\n"
+                    "but not assigned to a visible group."
+                ),
+            )
+            return
+
+        try:
+            group, _ = create_raster_group(self.project_root, group_name.strip())
+            assign_timeslices_to_group(self.project_root, group.get("id"), imported_ids)
+            remove_timeslices_from_group(self.project_root, "grp_imported", imported_ids)
+            loaded_now = self._load_timeslice_paths_into_qgis_group(imported_paths, group.get("name", "TimeSlices"))
+            self.iface.messageBar().pushInfo(
+                "RasterLinker",
+                f"Imported time-slices assigned to group: {group.get('name')} (loaded: {loaded_now}).",
+            )
+            self._notify_project_updated()
+        except Exception as e:
+            QMessageBox.warning(self, "Group assignment warning", str(e))
 
     def _import_las_laz(self):
         if not self._ensure_project_ready():
@@ -240,6 +614,14 @@ class ProjectManagerDialog(QDialog):
                 pc_layer = QgsPointCloudLayer(project_path, layer_name, "pdal")
                 if pc_layer.isValid():
                     QgsProject.instance().addMapLayer(pc_layer)
+                else:
+                    self.iface.messageBar().pushWarning(
+                        "RasterLinker",
+                        (
+                            "Point cloud copied and cataloged, but not loaded in canvas. "
+                            "Try exporting as uncompressed LAS (recommended 1.2/1.4) and re-import."
+                        ),
+                    )
             except Exception as e:
                 QMessageBox.warning(self, "Import warning", f"{file_path}\n{e}")
 
@@ -285,6 +667,7 @@ class ProjectManagerDialog(QDialog):
                 meta.update(geo_info)
                 register_radargram(self.project_root, meta)
                 save_radargram_sidecar(self.project_root, meta)
+                add_radargram_to_default_group(self.project_root, meta.get("id"))
                 if meta.get("import_mode") == "mapped":
                     mapped += 1
                 else:
@@ -320,6 +703,7 @@ class ProjectManagerDialog(QDialog):
 
         imported_models = 0
         imported_radargrams = 0
+        imported_timeslices = 0
 
         for item in manifest.get("models_3d", []):
             source_path = item.get("path") or item.get("source_path")
@@ -369,7 +753,34 @@ class ProjectManagerDialog(QDialog):
                 meta.update(geo_info)
                 register_radargram(self.project_root, meta)
                 save_radargram_sidecar(self.project_root, meta)
+                add_radargram_to_default_group(self.project_root, meta.get("id"))
                 imported_radargrams += 1
+            except Exception:
+                continue
+
+        for item in manifest.get("timeslices", []):
+            source_path = item.get("path") or item.get("source_path")
+            if not source_path or not os.path.isfile(source_path):
+                continue
+            try:
+                project_path, normalized_name = normalize_copy_into_project(
+                    self.project_root, "timeslices_2d", source_path
+                )
+                meta = self._inspect_timeslice(project_path)
+                meta.update(
+                    {
+                        "id": f"timeslice_{utc_now_iso()}_{normalized_name}",
+                        "name": item.get("name") or os.path.splitext(normalized_name)[0],
+                        "normalized_name": normalized_name,
+                        "source_path": source_path,
+                        "project_path": project_path,
+                        "imported_at": utc_now_iso(),
+                        "manifest_source": manifest_path,
+                    }
+                )
+                register_timeslice(self.project_root, meta)
+                add_timeslice_to_default_group(self.project_root, meta.get("id"))
+                imported_timeslices += 1
             except Exception:
                 continue
 
@@ -382,7 +793,10 @@ class ProjectManagerDialog(QDialog):
 
         self.iface.messageBar().pushInfo(
             "RasterLinker",
-            f"Manifest import completed (models: {imported_models}, radargrams: {imported_radargrams}).",
+            (
+                f"Manifest import completed (models: {imported_models}, "
+                f"radargrams: {imported_radargrams}, timeslices: {imported_timeslices})."
+            ),
         )
 
     def _classify_radargram_georef(self, project_path):
@@ -520,7 +934,19 @@ class ProjectManagerDialog(QDialog):
             import_project_package(zip_path, target)
             self.path_edit.setText(target)
             self.project_root = target
+            self.settings.setValue(self.settings_key_active_project, target)
+            sync_counts = self._sync_catalog_from_existing_files()
             self.iface.messageBar().pushInfo("RasterLinker", f"Package imported: {target}")
+            if any(sync_counts.values()):
+                self.iface.messageBar().pushInfo(
+                    "RasterLinker",
+                    (
+                        "Existing data recognized "
+                        f"(timeslices {sync_counts['timeslices']}, "
+                        f"radargrams {sync_counts['radargrams']}, models {sync_counts['models']})."
+                    ),
+                )
+            self._notify_project_updated()
         except Exception as e:
             QMessageBox.critical(self, "Import Package", f"Unable to import package:\n{e}")
 

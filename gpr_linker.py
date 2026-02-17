@@ -41,6 +41,9 @@ from qgis.core import (
     QgsRectangle,
     QgsVectorLayer,
     QgsVectorFileWriter,
+    QgsContrastEnhancement,
+    QgsRasterMinMaxOrigin,
+    QgsRasterBandStats,
     Qgis,
 )
 from PyQt5.QtWidgets import QPushButton, QListWidgetItem
@@ -50,6 +53,8 @@ from .polygon_grid_creator import create_grid_from_polygon
 from .polygon_draw_tool import PolygonDrawTool
 from .grid_options_ui import build_grid_options_controls
 from .project_manager_dialog import ProjectManagerDialog
+from .project_catalog import load_catalog, create_raster_group, assign_timeslices_to_group
+from .group_import_dialog import GroupImportDialog
 
 from .resources import *
 from .gpr_linker_dialog import RasterLinkerDialog
@@ -70,6 +75,8 @@ class RasterLinkerPlugin:
         self.dock_widget = None
         self.settings = QSettings()
         self.settings_group = "RasterLinker"
+        self.settings_key_active_project = "RasterLinker/active_project_root"
+        self.settings_key_default_import_crs = "RasterLinker/default_import_crs_authid"
         self.grid_use_snap = True
         self.grid_force_orthogonal = False
         self.grid_relative_orthogonal = False
@@ -87,6 +94,7 @@ class RasterLinkerPlugin:
         self.last_area_layer = None
         self.last_grid_layer = None
         self.project_manager_dialog = None
+        self.plugin_layer_root_name = "RasterLinker"
 
     # Translation helper
     def tr(self, message):
@@ -136,6 +144,10 @@ class RasterLinkerPlugin:
             self.dlg.groupListWidget.setSelectionMode(QAbstractItemView.ExtendedSelection)
             self.dlg.createGridButton.setEnabled(True)
             self.dlg.selectGridPointsButton.setEnabled(True)
+            if hasattr(self.dlg, "Ok"):
+                self.dlg.Ok.hide()
+            if hasattr(self.dlg, "openButton"):
+                self.dlg.openButton.hide()
             self.dlg.lineEditDistanceX.setEnabled(True)
             self.dlg.lineEditDistanceY.setEnabled(True)
             self.dlg.lineEditAreaNames.setEnabled(True)
@@ -148,13 +160,22 @@ class RasterLinkerPlugin:
             self.dlg.createGroupButton.clicked.connect(self.create_group)
             #self.dlg.moveRasterButton.clicked.connect(self.move_rasters)
             #self.dlg.groupListWidget.itemClicked.connect(self.on_group_selected)
-            self.dlg.groupListWidget.itemSelectionChanged.connect(self.populate_raster_list_from_selected_groups)
-            self.dlg.openButton.clicked.connect(self.load_raster)
+            self.dlg.groupListWidget.itemSelectionChanged.connect(self.on_group_selection_changed)
+            if hasattr(self.dlg, "openButton"):
+                self.dlg.openButton.clicked.connect(self.load_raster)
             self.dlg.selectGridPointsButton.clicked.connect(self.activate_grid_selection_tool)
+            if hasattr(self.dlg, "moveRasterButton"):
+                self.dlg.moveRasterButton.clicked.connect(self.move_rasters)
 
             self.dlg.createGridButton.clicked.connect(self.create_grid_from_polygon_layer)
 
             self.dlg.zoomSelectedGroupsButton.clicked.connect(self.zoom_to_selected_groups)
+            self.import_groups_button = QPushButton("Manage Groups")
+            self.import_groups_button.clicked.connect(self.open_group_import_dialog)
+            self.dlg.gridLayout.addWidget(self.import_groups_button, 3, 0, 1, 2)
+            self.enhance_minmax_button = QPushButton("Enhance Min/Max")
+            self.enhance_minmax_button.clicked.connect(self.enhance_loaded_images_minmax)
+            self.dlg.gridLayout.addWidget(self.enhance_minmax_button, 5, 0, 1, 2)
 
             # Preimposta valori predefiniti
             self.dlg.lineEditDistanceX.setText("1.0")  # Valore predefinito per distanza X
@@ -174,12 +195,28 @@ class RasterLinkerPlugin:
 
         self.dock_widget.show()
         self.dock_widget.raise_()
+        if not self._active_project_root():
+            self._notify_info(
+                "No active project linked. Open 'RasterLinker Project Manager' and create/open a project.",
+                duration=8,
+            )
 
     def open_project_manager(self):
         if self.project_manager_dialog is None:
-            self.project_manager_dialog = ProjectManagerDialog(self.iface, self.iface.mainWindow())
+            self.project_manager_dialog = ProjectManagerDialog(
+                self.iface,
+                self.iface.mainWindow(),
+                on_project_updated=self._on_project_manager_updated,
+            )
         self.project_manager_dialog.show()
         self.project_manager_dialog.raise_()
+        if self.dlg is not None:
+            self.populate_group_list()
+
+    def _on_project_manager_updated(self):
+        if self.dlg is not None:
+            self.populate_group_list()
+            self.populate_raster_list_from_selected_groups()
 
     def create_grid_from_polygon_layer(self):
         """
@@ -565,6 +602,228 @@ class RasterLinkerPlugin:
             self.dlg.nomeraster.setText(f"Name Raster: {raster_name}")
         else:
             self.dlg.nomeraster.setText("Name Raster: ")
+
+    def _active_project_root(self):
+        if self.project_manager_dialog is not None and self.project_manager_dialog.project_root:
+            return self.project_manager_dialog.project_root
+        if self.project_manager_dialog is not None:
+            candidate = self.project_manager_dialog.path_edit.text().strip()
+            if candidate:
+                return candidate
+        stored = self.settings.value(self.settings_key_active_project, "", type=str)
+        if stored:
+            return stored
+        return ""
+
+    def _get_preferred_import_crs(self):
+        authid = (self.settings.value(self.settings_key_default_import_crs, "", type=str) or "").strip()
+        if authid:
+            try:
+                from qgis.core import QgsCoordinateReferenceSystem
+                crs = QgsCoordinateReferenceSystem(authid)
+                if crs.isValid():
+                    return crs
+            except Exception:
+                pass
+        return QgsProject.instance().crs()
+
+    def _require_project_root(self, notify=True):
+        project_root = self._active_project_root()
+        if not project_root:
+            if notify:
+                QMessageBox.warning(
+                    self.dlg,
+                    "Project Required",
+                    "Open RasterLinker Project Manager and create/open a project first.",
+                )
+            return None
+        return project_root
+
+    def _get_plugin_root_group(self):
+        root = QgsProject.instance().layerTreeRoot()
+        group = next(
+            (
+                g for g in root.children()
+                if isinstance(g, QgsLayerTreeGroup) and g.name() == self.plugin_layer_root_name
+            ),
+            None,
+        )
+        if group is None:
+            group = root.addGroup(self.plugin_layer_root_name)
+        return group
+
+    def _get_or_create_plugin_qgis_group(self, group_name):
+        plugin_root = self._get_plugin_root_group()
+        group = next(
+            (
+                g for g in plugin_root.children()
+                if isinstance(g, QgsLayerTreeGroup) and g.name() == group_name
+            ),
+            None,
+        )
+        if group is None:
+            group = plugin_root.addGroup(group_name)
+        return group
+
+    def _find_plugin_root_group(self):
+        root = QgsProject.instance().layerTreeRoot()
+        return next(
+            (
+                g for g in root.children()
+                if isinstance(g, QgsLayerTreeGroup) and g.name() == self.plugin_layer_root_name
+            ),
+            None,
+        )
+
+    def _remove_plugin_qgis_group(self, group_name):
+        plugin_root = self._find_plugin_root_group()
+        if plugin_root is None:
+            return
+        target = next(
+            (
+                g for g in plugin_root.children()
+                if isinstance(g, QgsLayerTreeGroup) and g.name() == group_name
+            ),
+            None,
+        )
+        if target is not None:
+            plugin_root.removeChildNode(target)
+
+    def _iter_plugin_raster_layers(self):
+        plugin_root = self._find_plugin_root_group()
+        if plugin_root is None:
+            return
+
+        for group in plugin_root.children():
+            if not isinstance(group, QgsLayerTreeGroup):
+                continue
+            for child in group.children():
+                if not isinstance(child, QgsLayerTreeLayer):
+                    continue
+                layer = child.layer()
+                if isinstance(layer, QgsRasterLayer):
+                    yield layer
+
+    def _apply_minmax_to_layer(self, layer):
+        # Try direct layer API first (best compatibility when available).
+        if hasattr(layer, "setContrastEnhancement"):
+            try:
+                layer.setContrastEnhancement(
+                    QgsContrastEnhancement.StretchToMinimumMaximum,
+                    QgsRasterMinMaxOrigin.MinMax,
+                )
+                layer.triggerRepaint()
+                return True
+            except Exception:
+                pass
+
+        # Fallback: set renderer min/max based on band statistics.
+        provider = layer.dataProvider()
+        if provider is None:
+            return False
+
+        try:
+            stats = provider.bandStatistics(1, QgsRasterBandStats.Min | QgsRasterBandStats.Max)
+            minimum = stats.minimumValue
+            maximum = stats.maximumValue
+        except Exception:
+            return False
+
+        if minimum is None or maximum is None:
+            return False
+
+        renderer = layer.renderer()
+        if renderer is None:
+            return False
+
+        applied = False
+        try:
+            if hasattr(renderer, "setClassificationMin"):
+                renderer.setClassificationMin(float(minimum))
+                applied = True
+            if hasattr(renderer, "setClassificationMax"):
+                renderer.setClassificationMax(float(maximum))
+                applied = True
+
+            if hasattr(renderer, "contrastEnhancement"):
+                ce = renderer.contrastEnhancement()
+                if ce is not None:
+                    ce.setMinimumValue(float(minimum))
+                    ce.setMaximumValue(float(maximum))
+                    ce.setContrastEnhancementAlgorithm(QgsContrastEnhancement.StretchToMinimumMaximum, True)
+                    applied = True
+        except Exception:
+            return False
+
+        if applied:
+            layer.triggerRepaint()
+        return applied
+
+    def _catalog_groups_by_name(self, project_root):
+        catalog = load_catalog(project_root)
+        groups = catalog.get("raster_groups", [])
+        return {g.get("name"): g for g in groups if g.get("name")}
+
+    def _visible_plugin_group_names(self):
+        plugin_root = self._find_plugin_root_group()
+        if plugin_root is None:
+            return []
+        return [g.name() for g in plugin_root.children() if isinstance(g, QgsLayerTreeGroup)]
+
+    def _apply_group_visibility_selection(self, group_names):
+        project_root = self._require_project_root()
+        if not project_root:
+            return
+        by_name = self._catalog_groups_by_name(project_root)
+        selected = [name for name in group_names if name in by_name]
+
+        for existing in self._visible_plugin_group_names():
+            if existing not in selected:
+                self._remove_plugin_qgis_group(existing)
+
+        for name in selected:
+            self._get_or_create_plugin_qgis_group(name)
+
+        self.populate_group_list()
+        if self.dlg.groupListWidget.count() > 0:
+            self.dlg.groupListWidget.setCurrentRow(0)
+        self.load_raster(show_message=False)
+
+    def open_group_import_dialog(self):
+        project_root = self._require_project_root()
+        if not project_root:
+            return
+        by_name = self._catalog_groups_by_name(project_root)
+        groups = [g for g in by_name.values() if g.get("timeslice_ids")]
+        if not groups:
+            QMessageBox.information(self.dlg, "Import Groups", "No groups with images found in this project.")
+            return
+
+        dlg = GroupImportDialog(groups, self._visible_plugin_group_names(), self.dlg)
+        if dlg.exec_() != dlg.Accepted:
+            return
+        self._apply_group_visibility_selection(dlg.selected_group_names())
+
+    def enhance_loaded_images_minmax(self):
+        total = 0
+        enhanced = 0
+        for layer in self._iter_plugin_raster_layers() or []:
+            total += 1
+            if self._apply_minmax_to_layer(layer):
+                enhanced += 1
+
+        if total == 0:
+            QMessageBox.information(
+                self.dlg,
+                "Enhance Min/Max",
+                "No loaded images found in RasterLinker groups.",
+            )
+            return
+
+        self.iface.messageBar().pushInfo(
+            "RasterLinker",
+            f"Enhance Min/Max applied: {enhanced}/{total} layers.",
+        )
 
 
     def populate_group_list(self):
@@ -977,4 +1236,311 @@ class RasterLinkerPlugin:
                 QMessageBox.information(self.dlg, "Successo", f"Raster '{raster_name}' spostato nel gruppo '{target_group_name}'.")
         else:
             QMessageBox.warning(self.dlg, "Errore", f"Raster '{raster_name}' non trovato.")
+
+    # Plugin-catalog driven group/raster management overrides.
+    def populate_group_list(self):
+        """Populate group list using only groups currently present in QGIS dock."""
+        try:
+            if self.dlg is None:
+                return
+            self.dlg.groupListWidget.clear()
+            self.dlg.rasterListWidget.clear()
+
+            project_root = self._require_project_root(notify=False)
+            if not project_root:
+                return
+
+            by_name = self._catalog_groups_by_name(project_root)
+            for group_name in self._visible_plugin_group_names():
+                group = by_name.get(group_name)
+                if not group or not group.get("timeslice_ids"):
+                    continue
+                item = QListWidgetItem(group_name)
+                item.setData(Qt.UserRole, group.get("id"))
+                self.dlg.groupListWidget.addItem(item)
+        except Exception as e:
+            QMessageBox.critical(self.dlg, "Error", f"Error while loading plugin groups: {e}")
+
+    def populate_raster_list_from_selected_groups(self):
+        """Populate raster list from selected plugin groups and catalog-imported time-slices only."""
+        try:
+            self.dlg.rasterListWidget.clear()
+            project_root = self._require_project_root()
+            if not project_root:
+                return
+
+            catalog = load_catalog(project_root)
+            groups_by_id = {g.get("id"): g for g in catalog.get("raster_groups", [])}
+            timeslices_by_id = {t.get("id"): t for t in catalog.get("timeslices", [])}
+
+            selected_group_items = self.dlg.groupListWidget.selectedItems()
+            if not selected_group_items:
+                return
+
+            seen_timeslice_ids = set()
+            for group_item in selected_group_items:
+                group_id = group_item.data(Qt.UserRole)
+                group = groups_by_id.get(group_id)
+                if not group:
+                    continue
+                group_label = group.get("name", "Group")
+                for timeslice_id in group.get("timeslice_ids", []):
+                    if timeslice_id in seen_timeslice_ids:
+                        continue
+                    rec = timeslices_by_id.get(timeslice_id)
+                    if not rec:
+                        continue
+                    project_path = rec.get("project_path")
+                    if not project_path:
+                        continue
+                    seen_timeslice_ids.add(timeslice_id)
+                    display = f"[{group_label}] {rec.get('normalized_name') or rec.get('name') or timeslice_id}"
+                    item = QListWidgetItem(display)
+                    item.setData(
+                        Qt.UserRole,
+                        {
+                            "timeslice_id": timeslice_id,
+                            "project_path": project_path,
+                            "group_id": group_id,
+                            "group_name": group_label,
+                        },
+                    )
+                    self.dlg.rasterListWidget.addItem(item)
+            self._update_navigation_controls()
+        except Exception as e:
+            QMessageBox.critical(self.dlg, "Error", f"Error while loading rasters: {e}")
+
+    def populate_raster_list(self, group_path=None):
+        self.populate_raster_list_from_selected_groups()
+
+    def on_group_selected(self, item):
+        if not item:
+            self._set_name_raster_label(None)
+            return
+        self.populate_raster_list_from_selected_groups()
+        first_item = self.dlg.rasterListWidget.item(0)
+        self._set_name_raster_label(first_item.text() if first_item else None)
+        self.load_raster(show_message=False)
+
+    def on_group_selection_changed(self):
+        if self.dlg is None:
+            return
+        selected_items = self.dlg.groupListWidget.selectedItems()
+        if not selected_items:
+            self.dlg.rasterListWidget.clear()
+            self._set_name_raster_label(None)
+            self._update_navigation_controls(0)
+            return
+        self.on_group_selected(selected_items[0])
+
+    def _update_navigation_controls(self, value=None):
+        if self.dlg is None:
+            return
+
+        total = self.dlg.rasterListWidget.count()
+        max_idx = max(0, total - 1)
+        current = self.dlg.Dial.value() if value is None else int(value)
+        if current < 0:
+            current = 0
+        if current > max_idx:
+            current = max_idx
+
+        controls = [self.dlg.Dial, self.dlg.dial2]
+        for ctrl in controls:
+            ctrl.blockSignals(True)
+            ctrl.setMinimum(0)
+            ctrl.setMaximum(max_idx)
+            ctrl.setSingleStep(1)
+            if hasattr(ctrl, "setPageStep"):
+                ctrl.setPageStep(1)
+            ctrl.setEnabled(total > 0)
+            ctrl.setValue(current)
+            ctrl.blockSignals(False)
+
+    def update_visibility_with_dial(self, value):
+        selected_group_items = self.dlg.groupListWidget.selectedItems()
+        if not selected_group_items:
+            QMessageBox.warning(self.dlg, "Errore", "Seleziona almeno un gruppo prima di usare il dial.")
+            return
+
+        self._update_navigation_controls(value)
+        value = self.dlg.Dial.value()
+
+        parts_for_label = []
+        for group_item in selected_group_items:
+            group_name = group_item.text().strip()
+            group = self._get_or_create_plugin_qgis_group(group_name)
+            raster_nodes = [
+                child for child in group.children()
+                if isinstance(child, QgsLayerTreeLayer) and isinstance(child.layer(), QgsRasterLayer)
+            ]
+            if not raster_nodes:
+                continue
+
+            index = min(value, len(raster_nodes) - 1)
+            for i, node in enumerate(raster_nodes):
+                node.setItemVisibilityChecked(i == index)
+
+            visible_raster_name = raster_nodes[index].layer().name()
+            parts_for_label.append(f"[{group_name}] {visible_raster_name}")
+
+        if parts_for_label:
+            text = " | ".join(parts_for_label)
+            if len(text) > 120:
+                text = text[:117] + "..."
+            self.dlg.nomeraster.setText(f"Name Raster: {text}")
+        else:
+            self.dlg.nomeraster.setText("Name Raster: ")
+
+    def zoom_to_selected_groups(self):
+        selected_group_items = self.dlg.groupListWidget.selectedItems()
+        if not selected_group_items:
+            QMessageBox.warning(self.dlg, "Errore", "Seleziona almeno un gruppo.")
+            return
+
+        project = QgsProject.instance()
+        project_crs = project.crs()
+        combined_extent = None
+        found_any_layer = False
+
+        for group_item in selected_group_items:
+            group_name = group_item.text().strip()
+            group = self._get_or_create_plugin_qgis_group(group_name)
+            for child in group.children():
+                if not isinstance(child, QgsLayerTreeLayer):
+                    continue
+                layer = child.layer()
+                if layer is None:
+                    continue
+
+                extent = layer.extent()
+                if extent is None or extent.isNull() or extent.isEmpty():
+                    continue
+                if layer.crs() != project_crs:
+                    try:
+                        tr = QgsCoordinateTransform(layer.crs(), project_crs, project)
+                        extent = tr.transformBoundingBox(extent)
+                    except Exception:
+                        continue
+                found_any_layer = True
+                if combined_extent is None:
+                    combined_extent = QgsRectangle(extent)
+                else:
+                    combined_extent.combineExtentWith(extent)
+
+        if not found_any_layer or combined_extent is None or combined_extent.isNull() or combined_extent.isEmpty():
+            QMessageBox.warning(self.dlg, "Errore", "Nessun layer valido trovato nei gruppi selezionati.")
+            return
+        canvas = self.iface.mapCanvas()
+        canvas.setExtent(combined_extent)
+        canvas.refresh()
+
+    def create_group(self):
+        group_name = self.dlg.groupNameEdit.text().strip()
+        if not group_name:
+            QMessageBox.warning(self.dlg, "Errore", "Il nome del gruppo non puo essere vuoto.")
+            return
+        project_root = self._require_project_root()
+        if not project_root:
+            return
+        try:
+            _, created = create_raster_group(project_root, group_name)
+            self._get_or_create_plugin_qgis_group(group_name)
+            self.populate_group_list()
+            if created:
+                QMessageBox.information(self.dlg, "Successo", f"Gruppo '{group_name}' creato.")
+            else:
+                QMessageBox.information(self.dlg, "Informazione", f"Il gruppo '{group_name}' e gia presente.")
+        except Exception as e:
+            QMessageBox.critical(self.dlg, "Errore", f"Errore durante la creazione del gruppo: {e}")
+
+    def add_group_with_button(self, group_name):
+        self.populate_group_list()
+
+    def load_raster(self, show_message=True):
+        """Load imported time-slices from selected plugin groups into QGIS layer tree."""
+        try:
+            project_root = self._require_project_root()
+            if not project_root:
+                return
+            selected_groups = self.dlg.groupListWidget.selectedItems()
+            if not selected_groups:
+                if show_message:
+                    QMessageBox.warning(self.dlg, "Errore", "Seleziona almeno un gruppo plugin.")
+                return
+
+            catalog = load_catalog(project_root)
+            groups_by_id = {g.get("id"): g for g in catalog.get("raster_groups", [])}
+            timeslices_by_id = {t.get("id"): t for t in catalog.get("timeslices", [])}
+            existing_sources = {layer.source() for layer in QgsProject.instance().mapLayers().values()}
+            target_crs = self._get_preferred_import_crs()
+            loaded_count = 0
+
+            for group_item in selected_groups:
+                group_id = group_item.data(Qt.UserRole)
+                group = groups_by_id.get(group_id)
+                if not group:
+                    continue
+                group_name = group.get("name", "Group")
+                qgis_group = self._get_or_create_plugin_qgis_group(group_name)
+
+                for timeslice_id in group.get("timeslice_ids", []):
+                    rec = timeslices_by_id.get(timeslice_id)
+                    if not rec:
+                        continue
+                    path = rec.get("project_path")
+                    if not path or not os.path.exists(path) or path in existing_sources:
+                        continue
+                    layer_name = rec.get("normalized_name") or os.path.basename(path)
+                    raster_layer = QgsRasterLayer(path, layer_name)
+                    if not raster_layer.isValid():
+                        continue
+                    if not raster_layer.crs().isValid() and target_crs.isValid():
+                        raster_layer.setCrs(target_crs)
+                    QgsProject.instance().addMapLayer(raster_layer, False)
+                    qgis_group.addLayer(raster_layer)
+                    existing_sources.add(path)
+                    loaded_count += 1
+
+            self.populate_raster_list_from_selected_groups()
+            if show_message:
+                QMessageBox.information(self.dlg, "Successo", f"Time-slice caricate dal catalogo plugin: {loaded_count}")
+        except Exception as e:
+            if show_message:
+                QMessageBox.critical(self.dlg, "Errore", f"Errore durante il caricamento raster: {e}")
+
+    def get_selected_group(self):
+        selected_group_item = self.dlg.groupListWidget.currentItem()
+        if not selected_group_item:
+            QMessageBox.warning(self.dlg, "Errore", "Seleziona un gruppo.")
+            return None
+        return selected_group_item.data(Qt.UserRole)
+
+    def move_rasters(self):
+        """Assign selected imported time-slices to currently selected plugin group."""
+        selected_raster_items = self.dlg.rasterListWidget.selectedItems()
+        selected_group_item = self.dlg.groupListWidget.currentItem()
+        if not selected_raster_items or not selected_group_item:
+            QMessageBox.warning(self.dlg, "Errore", "Seleziona raster e gruppo target.")
+            return
+        project_root = self._require_project_root()
+        if not project_root:
+            return
+
+        target_group_id = selected_group_item.data(Qt.UserRole)
+        timeslice_ids = []
+        for item in selected_raster_items:
+            payload = item.data(Qt.UserRole) or {}
+            tid = payload.get("timeslice_id")
+            if tid:
+                timeslice_ids.append(tid)
+        if not timeslice_ids:
+            QMessageBox.warning(self.dlg, "Errore", "Nessun raster valido selezionato.")
+            return
+        try:
+            assign_timeslices_to_group(project_root, target_group_id, timeslice_ids)
+            self.populate_raster_list_from_selected_groups()
+            QMessageBox.information(self.dlg, "Successo", f"Assegnate {len(timeslice_ids)} time-slice al gruppo.")
+        except Exception as e:
+            QMessageBox.critical(self.dlg, "Errore", f"Errore durante l'assegnazione: {e}")
 
