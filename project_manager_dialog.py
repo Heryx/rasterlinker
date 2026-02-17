@@ -17,8 +17,15 @@ from PyQt5.QtWidgets import (
 )
 from qgis.core import QgsProject, QgsPointCloudLayer
 
-from .project_catalog import ensure_project_structure, register_model_3d
+from .project_catalog import (
+    ensure_project_structure,
+    register_model_3d,
+    register_radargram,
+    normalize_copy_into_project,
+    utc_now_iso,
+)
 from .pointcloud_metadata import inspect_las_laz
+from .radargram_metadata import inspect_radargram
 
 
 class ProjectManagerDialog(QDialog):
@@ -54,6 +61,10 @@ class ProjectManagerDialog(QDialog):
         import_las_btn = QPushButton("Import LAS/LAZ")
         import_las_btn.clicked.connect(self._import_las_laz)
         actions.addWidget(import_las_btn)
+
+        import_rg_btn = QPushButton("Import Radargrams")
+        import_rg_btn.clicked.connect(self._import_radargrams)
+        actions.addWidget(import_rg_btn)
 
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
@@ -94,14 +105,67 @@ class ProjectManagerDialog(QDialog):
 
         for file_path in file_paths:
             try:
-                meta = inspect_las_laz(file_path)
+                project_path, normalized_name = normalize_copy_into_project(
+                    self.project_root, "volumes_3d", file_path
+                )
+                meta = inspect_las_laz(project_path)
+                meta.update(
+                    {
+                        "id": f"model_{utc_now_iso()}_{normalized_name}",
+                        "normalized_name": normalized_name,
+                        "source_path": file_path,
+                        "project_path": project_path,
+                        "imported_at": utc_now_iso(),
+                    }
+                )
                 register_model_3d(self.project_root, meta)
 
-                layer_name = os.path.basename(file_path)
-                pc_layer = QgsPointCloudLayer(file_path, layer_name, "pdal")
+                layer_name = os.path.basename(project_path)
+                pc_layer = QgsPointCloudLayer(project_path, layer_name, "pdal")
                 if pc_layer.isValid():
                     QgsProject.instance().addMapLayer(pc_layer)
             except Exception as e:
                 QMessageBox.warning(self, "Import warning", f"{file_path}\n{e}")
 
         self.iface.messageBar().pushInfo("RasterLinker", "LAS/LAZ import completed.")
+
+    def _import_radargrams(self):
+        if not self.project_root:
+            folder = self.path_edit.text().strip()
+            if not folder:
+                QMessageBox.warning(self, "Project Manager", "Create/Open a project first.")
+                return
+            ensure_project_structure(folder)
+            self.project_root = folder
+
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Radargram files",
+            "",
+            "Radargrams (*.rd3 *.rad *.dzt *.npy *.csv *.txt *.png *.jpg *.jpeg *.tif *.tiff);;All files (*.*)",
+        )
+        if not file_paths:
+            return
+
+        imported = 0
+        for file_path in file_paths:
+            try:
+                project_path, normalized_name = normalize_copy_into_project(
+                    self.project_root, "radargrams", file_path
+                )
+                meta = inspect_radargram(project_path)
+                meta.update(
+                    {
+                        "id": f"radargram_{utc_now_iso()}_{normalized_name}",
+                        "normalized_name": normalized_name,
+                        "source_path": file_path,
+                        "project_path": project_path,
+                        "imported_at": utc_now_iso(),
+                    }
+                )
+                register_radargram(self.project_root, meta)
+                imported += 1
+            except Exception as e:
+                QMessageBox.warning(self, "Import warning", f"{file_path}\n{e}")
+
+        self.iface.messageBar().pushInfo("RasterLinker", f"Radargrams import completed ({imported}).")
