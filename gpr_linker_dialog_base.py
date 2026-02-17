@@ -209,7 +209,7 @@ class Ui_Dialog(object):
         self.labelx_5.setText(_translate("Dialog", "Cell Y (m)"))
         self.labelx_6.setText(_translate("Dialog", "Cell X (m)"))
         self.createGridButton.setText(_translate("Dialog", "Draw Polygon"))
-        self.labelSelezionaRaster.setText(_translate("Dialog", "Lista raster"))
+        self.labelSelezionaRaster.setText(_translate("Dialog", "Raster list"))
         self.labelseleziona.setText(_translate("Dialog", "Group list"))
         self.textBrowser.setHtml(_translate("Dialog", "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n"
 "<html><head><meta name=\"qrichtext\" content=\"1\" /><style type=\"text/css\">\n"

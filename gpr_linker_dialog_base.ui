@@ -224,7 +224,7 @@
          </font>
         </property>
         <property name="text">
-         <string>Lista raster</string>
+         <string>Raster list</string>
         </property>
        </widget>
       </item>

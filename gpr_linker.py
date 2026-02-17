@@ -28,13 +28,17 @@
 GPR - QGIS Plugin Implementation
 """
 
-from qgis.PyQt.QtCore import QSettings, QCoreApplication, Qt
+from qgis.PyQt.QtCore import QSettings, QCoreApplication, Qt, QSize
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox, QFileDialog, QAbstractItemView, QDockWidget, QInputDialog
 from qgis.core import (
     QgsPointXY,
+    QgsPointLocator,
+    QgsApplication,
     QgsProject,
     QgsRasterLayer,
+    QgsSnappingConfig,
+    QgsTolerance,
     QgsLayerTreeLayer,
     QgsLayerTreeGroup,
     QgsCoordinateTransform,
@@ -53,7 +57,17 @@ from qgis.core import (
     QgsUnitTypes,
     Qgis,
 )
-from PyQt5.QtWidgets import QPushButton, QListWidgetItem, QLabel, QSizePolicy
+from PyQt5.QtWidgets import (
+    QPushButton,
+    QListWidgetItem,
+    QLabel,
+    QSizePolicy,
+    QCheckBox,
+    QWidget,
+    QTabWidget,
+    QGridLayout,
+    QVBoxLayout,
+)
 from .grid_creator import create_oriented_grid
 from .grid_selection_tool import GridSelectionTool
 from .polygon_grid_creator import create_grid_from_polygon
@@ -86,11 +100,18 @@ class RasterLinkerPlugin:
         self.settings_key_active_project = "RasterLinker/active_project_root"
         self.settings_key_default_import_crs = "RasterLinker/default_import_crs_authid"
         self.grid_use_snap = True
+        self.grid_snap_mode = "all"
+        self.grid_snap_tolerance = 12.0
+        self.grid_snap_units = "pixels"
         self.grid_force_orthogonal = False
         self.grid_relative_orthogonal = False
         self.keep_source_polygon = True
         self.grid_dimension_mode = "ask"
+        self.grid_internal_enabled = True
         self.snap_checkbox = None
+        self.snap_mode_combo = None
+        self.snap_tolerance_spin = None
+        self.snap_units_combo = None
         self.ortho_checkbox = None
         self.ortho_base_checkbox = None
         self.keep_area_checkbox = None
@@ -99,6 +120,23 @@ class RasterLinkerPlugin:
         self.export_button = None
         self.base_angle_label = None
         self.length_label = None
+        self.internal_grid_checkbox = None
+        self.name_raster_panel = None
+        self.name_raster_title = None
+        self.name_raster_lines = []
+        self.group_tools_label = None
+        self.image_tools_label = None
+        self.tools_tabs = None
+        self.bottom_controls_widget = None
+        self.dialog_main_layout = None
+        self.left_nav_widget = None
+        self._is_narrow_layout = None
+        self.coord_x0_label = None
+        self.coord_x1_label = None
+        self.coord_y0_label = None
+        self.coord_y1_label = None
+        self.cell_x_label = None
+        self.cell_y_label = None
         self.last_area_layer = None
         self.last_grid_layer = None
         self.project_manager_dialog = None
@@ -122,7 +160,19 @@ class RasterLinkerPlugin:
         """Initialize the GUI."""
         icon_path = ':/plugins/gpr_linker/icon.png'
         self.add_action(icon_path, text=self.tr(u'Raster Linker'), callback=self.run, parent=self.iface.mainWindow())
-        self.add_action(icon_path, text=self.tr(u'RasterLinker Project Manager'), callback=self.open_project_manager, parent=self.iface.mainWindow())
+        pm_action = self.add_action(
+            icon_path,
+            text=self.tr(u'RasterLinker Project Manager'),
+            callback=self.open_project_manager,
+            parent=self.iface.mainWindow(),
+        )
+        pm_icon = self._qgis_theme_icon(
+            "mActionProjectProperties.svg",
+            "mActionOptions.svg",
+            "mActionProjectOpen.svg",
+        )
+        if not pm_icon.isNull():
+            pm_action.setIcon(pm_icon)
         self.first_start = True
 
     def unload(self):
@@ -143,11 +193,20 @@ class RasterLinkerPlugin:
         if self.first_start:
             self.first_start = False
             self.dlg = RasterLinkerDialog()
+            self.dlg.on_resized = self._on_dialog_resized
             self.dock_widget = QDockWidget(self.tr(u"Raster Linker"), self.iface.mainWindow())
             self.dock_widget.setObjectName("RasterLinkerDockWidget")
+            self.dock_widget.setFeatures(
+                QDockWidget.DockWidgetMovable
+                | QDockWidget.DockWidgetFloatable
+                | QDockWidget.DockWidgetClosable
+            )
             self.dock_widget.setWidget(self.dlg)
             self.dock_widget.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock_widget)
+            self._tabify_with_existing_right_dock()
+            self._ensure_dialog_main_layout()
+            self._init_name_raster_panel()
             self.populate_group_list()
             self.dlg.groupListWidget.setSelectionMode(QAbstractItemView.ExtendedSelection)
             self.dlg.createGridButton.setEnabled(True)
@@ -165,6 +224,13 @@ class RasterLinkerPlugin:
             self.dlg.lineEditX1Y0.setEnabled(True)
             self.dlg.lineEditY0.setEnabled(True)
             self.dlg.lineEditX0Y1.setEnabled(True)
+            if self.internal_grid_checkbox is None:
+                self.internal_grid_checkbox = QCheckBox("Internal grid", self.dlg)
+                self.internal_grid_checkbox.setToolTip(
+                    "If enabled, create internal cells using Cell X/Cell Y. "
+                    "If disabled, create only the base area from x0/x1/y0/y1."
+                )
+                self.internal_grid_checkbox.toggled.connect(self._on_internal_grid_toggled)
 
             # Collega i segnali ai metodi
             self.dlg.createGroupButton.clicked.connect(self.create_group)
@@ -180,52 +246,82 @@ class RasterLinkerPlugin:
             self.dlg.createGridButton.clicked.connect(self.create_grid_from_polygon_layer)
 
             self.dlg.zoomSelectedGroupsButton.clicked.connect(self.zoom_to_selected_groups)
-            self.dlg.zoomSelectedGroupsButton.setText("Load Selected Groups")
-            self.import_groups_button = QPushButton("Manage Groups")
+            self.dlg.zoomSelectedGroupsButton.setText("Load Groups")
+            self.dlg.zoomSelectedGroupsButton.setToolTip(
+                "Load selected plugin groups into the QGIS layer tree."
+            )
+            self.dlg.zoomSelectedGroupsButton.setStatusTip("Load selected plugin groups")
+            self.import_groups_button = QPushButton("Manage")
+            self.import_groups_button.setToolTip("Open group manager to load/unload plugin groups.")
+            self.import_groups_button.setStatusTip("Open group manager")
             self.import_groups_button.clicked.connect(self.open_group_import_dialog)
             self.dlg.gridLayout.addWidget(self.import_groups_button, 1, 1, 1, 1)
-            self.enhance_minmax_button = QPushButton("Enhance Min/Max")
+            self.enhance_minmax_button = QPushButton("Enhance Range")
+            self.enhance_minmax_button.setToolTip("Apply Min/Max enhancement to loaded rasters.")
+            self.enhance_minmax_button.setStatusTip("Apply min/max enhancement")
             self.enhance_minmax_button.clicked.connect(self.enhance_loaded_images_minmax)
             self.dlg.gridLayout.addWidget(self.enhance_minmax_button, 5, 0, 1, 1)
-            self.enhance_batch_button = QPushButton("Enhance Batch")
+            self.enhance_batch_button = QPushButton("Batch Enhance")
+            self.enhance_batch_button.setToolTip("Apply batch enhancement with selected method.")
+            self.enhance_batch_button.setStatusTip("Apply batch enhancement")
             self.enhance_batch_button.clicked.connect(self.enhance_batch_options)
             self.dlg.gridLayout.addWidget(self.enhance_batch_button, 5, 1, 1, 1)
-            self.save_style_button = QPushButton("Save Group Style")
+            self.save_style_button = QPushButton("Save Style")
+            self.save_style_button.setToolTip("Save style for active group.")
+            self.save_style_button.setStatusTip("Save style for active group")
             self.save_style_button.clicked.connect(self.save_selected_group_style)
             self.dlg.gridLayout.addWidget(self.save_style_button, 6, 0, 1, 1)
-            self.load_style_button = QPushButton("Load Group Style")
+            self.load_style_button = QPushButton("Load Style")
+            self.load_style_button.setToolTip("Load saved style for active group.")
+            self.load_style_button.setStatusTip("Load style for active group")
             self.load_style_button.clicked.connect(self.load_selected_group_style)
             self.dlg.gridLayout.addWidget(self.load_style_button, 6, 1, 1, 1)
-            self.export_layout_button = QPushButton("Export Group Layout")
+            self.export_layout_button = QPushButton("Export PDF")
+            self.export_layout_button.setToolTip("Quick PDF export for selected group.")
+            self.export_layout_button.setStatusTip("Export quick layout PDF")
             self.export_layout_button.clicked.connect(self.export_group_layout_quick)
             self.dlg.gridLayout.addWidget(self.export_layout_button, 7, 0, 1, 2)
 
-            draw_label = QLabel("Drawing")
-            image_label = QLabel("Images")
-            draw_label.setStyleSheet("font-weight:600;")
-            image_label.setStyleSheet("font-weight:600;")
-            self.dlg.gridLayout.addWidget(draw_label, 3, 0, 1, 2)
-            self.dlg.gridLayout.addWidget(image_label, 4, 0, 1, 2)
+            if hasattr(self.dlg, "groupNameEdit"):
+                self.dlg.groupNameEdit.setPlaceholderText("New group name")
+                self.dlg.groupNameEdit.setToolTip("Enter a name and click Create Group.")
+            self.dlg.dial2.setToolTip("Navigation dial: switch visible rasters in selected groups.")
+            self.dlg.Dial.setToolTip("Navigation slider: switch visible rasters in selected groups.")
 
             # Preimposta valori predefiniti
             self.dlg.lineEditDistanceX.setText("1.0")  # Valore predefinito per distanza X
             self.dlg.lineEditDistanceY.setText("1.0")  # Valore predefinito per distanza Y
-            self.dlg.lineEditAreaNames.setPlaceholderText("Nome area | prefisso sottocelle")
+            self.dlg.lineEditAreaNames.setPlaceholderText("Area name | cell prefix")
             self.dlg.lineEditAreaNames.setToolTip(
                 "Area naming field. Format: AreaName|CellPrefix (prefix optional)."
             )
             self.dlg.lineEditAreaNames.setAccessibleName("lineEditAreaNames")
+            self._build_tools_tabs()
+            self._build_bottom_controls_layout()
             self._load_ui_settings()
+            if self.internal_grid_checkbox is not None:
+                self.internal_grid_checkbox.setChecked(bool(self.grid_internal_enabled))
             self._build_grid_options_controls()
+            self._swap_drawing_and_navigation_sections()
+            self._sync_grid_options_from_controls()
             self._connect_persistent_fields()
             self._tune_visual_layout()
+            self._apply_responsive_main_layout(self.dlg.width())
+            self._apply_button_icons()
 
             # Collega il dial alla funzione di aggiornamento
             self.dlg.Dial.valueChanged.connect(self.update_visibility_with_dial)
             self.dlg.dial2.valueChanged.connect(self.update_visibility_with_dial)
 
         self.dock_widget.show()
+        self._ensure_dock_in_right_area()
+        self._tabify_with_existing_right_dock()
         self.dock_widget.raise_()
+        self._apply_dock_constraints()
+        if self.dlg is not None:
+            self._apply_responsive_main_layout(self.dlg.width())
+        if self.dlg is not None:
+            self._apply_button_icons()
         if not self._active_project_root():
             self._notify_info(
                 "No active project linked. Open 'RasterLinker Project Manager' and create/open a project.",
@@ -249,11 +345,150 @@ class RasterLinkerPlugin:
             self.populate_group_list()
             self.populate_raster_list_from_selected_groups()
 
+    def _apply_dock_constraints(self):
+        if self.dock_widget is None or self.dlg is None:
+            return
+        # Keep constraints lightweight to avoid disturbing QGIS global dock layout.
+        self.dlg.setMinimumWidth(380)
+        self.dlg.setMinimumHeight(0)
+        self.dlg.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.dock_widget.setMinimumWidth(380)
+        self.dock_widget.setMinimumHeight(0)
+
+    def _on_dialog_resized(self, size):
+        width = size.width() if hasattr(size, "width") else (self.dlg.width() if self.dlg is not None else 0)
+        self._apply_responsive_main_layout(width)
+
+    def _apply_responsive_main_layout(self, width):
+        if self.dlg is None or not hasattr(self.dlg, "gridLayout_3"):
+            return
+        is_narrow = width < 760
+        if self._is_narrow_layout is is_narrow:
+            return
+
+        gl3 = self.dlg.gridLayout_3
+        if is_narrow:
+            # Stack sections to avoid clipping on narrow/half-screen layouts.
+            gl3.addLayout(self.dlg.verticalLayout_3, 0, 0, 1, 1)
+            gl3.addWidget(self.dlg.widget, 1, 0, 1, 1)
+            gl3.addLayout(self.dlg.gridLayout, 2, 0, 1, 1)
+            if hasattr(self.dlg, "line"):
+                self.dlg.line.hide()
+            gl3.setColumnStretch(0, 1)
+            gl3.setColumnStretch(1, 0)
+            gl3.setColumnStretch(2, 0)
+            gl3.setColumnStretch(3, 0)
+            gl3.setRowStretch(0, 1)
+            gl3.setRowStretch(1, 0)
+            gl3.setRowStretch(2, 0)
+            gl3.setRowStretch(3, 0)
+            if hasattr(self.dlg, "rasterListWidget"):
+                self.dlg.rasterListWidget.setMinimumWidth(160)
+            if hasattr(self.dlg, "groupListWidget"):
+                self.dlg.groupListWidget.setMinimumWidth(160)
+            self.dlg.dial2.setMinimumSize(130, 130)
+            self.dlg.dial2.setMaximumSize(170, 170)
+            self.dlg.Dial.setMinimumHeight(34)
+            self.dlg.Dial.setMaximumHeight(38)
+            if hasattr(self.dlg, "widget"):
+                self.dlg.widget.setMinimumHeight(0)
+        else:
+            # Restore wide two-column layout.
+            gl3.addLayout(self.dlg.verticalLayout_3, 0, 0, 2, 1)
+            gl3.addWidget(self.dlg.widget, 0, 2, 1, 2)
+            gl3.addLayout(self.dlg.gridLayout, 1, 2, 1, 2)
+            if hasattr(self.dlg, "line"):
+                self.dlg.line.show()
+                gl3.addWidget(self.dlg.line, 0, 1, 2, 1)
+            gl3.setColumnStretch(0, 8)
+            gl3.setColumnStretch(1, 0)
+            gl3.setColumnStretch(2, 6)
+            gl3.setColumnStretch(3, 0)
+            gl3.setRowStretch(0, 0)
+            gl3.setRowStretch(1, 0)
+            gl3.setRowStretch(2, 0)
+            gl3.setRowStretch(3, 1)
+            if hasattr(self.dlg, "rasterListWidget"):
+                self.dlg.rasterListWidget.setMinimumWidth(220)
+            if hasattr(self.dlg, "groupListWidget"):
+                self.dlg.groupListWidget.setMinimumWidth(220)
+            self.dlg.dial2.setMinimumSize(160, 160)
+            self.dlg.dial2.setMaximumSize(220, 220)
+            self.dlg.Dial.setMinimumHeight(42)
+            self.dlg.Dial.setMaximumHeight(46)
+            if hasattr(self.dlg, "widget"):
+                self.dlg.widget.setMinimumHeight(220)
+
+        self._is_narrow_layout = is_narrow
+
+    def _ensure_dock_in_right_area(self):
+        if self.dock_widget is None:
+            return
+        if self.dock_widget.isFloating():
+            return
+        main_window = self.iface.mainWindow()
+        try:
+            area = main_window.dockWidgetArea(self.dock_widget)
+            if area != Qt.RightDockWidgetArea:
+                main_window.removeDockWidget(self.dock_widget)
+                main_window.addDockWidget(Qt.RightDockWidgetArea, self.dock_widget)
+        except Exception:
+            pass
+
+    def _tabify_with_existing_right_dock(self):
+        if self.dock_widget is None:
+            return
+        main_window = self.iface.mainWindow()
+        try:
+            main_window.setDockNestingEnabled(True)
+        except Exception:
+            pass
+
+        candidates = []
+        for dock in main_window.findChildren(QDockWidget):
+            if dock is self.dock_widget:
+                continue
+            if dock.isFloating():
+                continue
+            if main_window.dockWidgetArea(dock) != Qt.RightDockWidgetArea:
+                continue
+            candidates.append(dock)
+
+        if not candidates:
+            return
+
+        tokens = (
+            "browser",
+            "processing",
+            "style",
+            "layer",
+            "strumenti di processing",
+            "stile layer",
+        )
+
+        def dock_score(dock):
+            text = f"{dock.windowTitle()} {dock.objectName()}".lower()
+            score = 0
+            for token in tokens:
+                if token in text:
+                    score += 10
+            if dock.isVisible():
+                score += 3
+            return score
+
+        target = sorted(candidates, key=dock_score, reverse=True)[0]
+        try:
+            main_window.tabifyDockWidget(target, self.dock_widget)
+        except Exception:
+            # Fallback: keep standard dock placement.
+            return
+
     def create_grid_from_polygon_layer(self):
         """
         Draw a polygon interactively and create a grid from it.
         """
         try:
+            self._sync_grid_options_from_controls()
             # Activate polygon drawing tool
             self.polygon_draw_tool = PolygonDrawTool(self.iface.mapCanvas(), self)
             self.iface.mapCanvas().setMapTool(self.polygon_draw_tool)
@@ -326,11 +561,19 @@ class RasterLinkerPlugin:
 
     def _load_ui_settings(self):
         self.grid_use_snap = self.settings.value(self._settings_key("grid/use_snap"), True, type=bool)
+        self.grid_snap_mode = self.settings.value(self._settings_key("grid/snap_mode"), "all")
+        self.grid_snap_tolerance = self.settings.value(self._settings_key("grid/snap_tolerance"), 12.0, type=float)
+        self.grid_snap_units = self.settings.value(self._settings_key("grid/snap_units"), "pixels")
         self.grid_force_orthogonal = self.settings.value(self._settings_key("grid/force_orthogonal"), False, type=bool)
         self.grid_relative_orthogonal = self.settings.value(self._settings_key("grid/relative_orthogonal"), False, type=bool)
         self.keep_source_polygon = self.settings.value(self._settings_key("grid/keep_source_polygon"), True, type=bool)
         mode = self.settings.value(self._settings_key("grid/dimension_mode"), "ask")
         self.grid_dimension_mode = mode if mode in ("ask", "manual", "canvas") else "ask"
+        self.grid_internal_enabled = self.settings.value(
+            self._settings_key("grid/internal_enabled"),
+            True,
+            type=bool,
+        )
 
         self.dlg.lineEditDistanceX.setText(
             self.settings.value(self._settings_key("grid/distance_x"), self.dlg.lineEditDistanceX.text())
@@ -348,17 +591,29 @@ class RasterLinkerPlugin:
         self.settings.setValue(self._settings_key("grid/distance_y"), self.dlg.lineEditDistanceY.text().strip())
         self.settings.setValue(self._settings_key("grid/area_names"), self.dlg.lineEditAreaNames.text().strip())
         self.settings.setValue(self._settings_key("grid/use_snap"), self.grid_use_snap)
+        self.settings.setValue(self._settings_key("grid/snap_mode"), self.grid_snap_mode)
+        self.settings.setValue(self._settings_key("grid/snap_tolerance"), float(self.grid_snap_tolerance))
+        self.settings.setValue(self._settings_key("grid/snap_units"), self.grid_snap_units)
         self.settings.setValue(self._settings_key("grid/force_orthogonal"), self.grid_force_orthogonal)
         self.settings.setValue(self._settings_key("grid/relative_orthogonal"), self.grid_relative_orthogonal)
         self.settings.setValue(self._settings_key("grid/keep_source_polygon"), self.keep_source_polygon)
         self.settings.setValue(self._settings_key("grid/dimension_mode"), self.grid_dimension_mode)
+        self.settings.setValue(self._settings_key("grid/internal_enabled"), self.grid_internal_enabled)
 
     def _connect_persistent_fields(self):
         self.dlg.lineEditDistanceX.editingFinished.connect(self._save_ui_settings)
         self.dlg.lineEditDistanceY.editingFinished.connect(self._save_ui_settings)
         self.dlg.lineEditAreaNames.editingFinished.connect(self._save_ui_settings)
+        if self.internal_grid_checkbox is not None:
+            self.internal_grid_checkbox.toggled.connect(self._save_ui_settings)
         if self.snap_checkbox is not None:
             self.snap_checkbox.toggled.connect(self._save_ui_settings)
+        if self.snap_mode_combo is not None:
+            self.snap_mode_combo.currentIndexChanged.connect(self._save_ui_settings)
+        if self.snap_tolerance_spin is not None:
+            self.snap_tolerance_spin.valueChanged.connect(self._save_ui_settings)
+        if self.snap_units_combo is not None:
+            self.snap_units_combo.currentIndexChanged.connect(self._save_ui_settings)
         if self.ortho_checkbox is not None:
             self.ortho_checkbox.toggled.connect(self._save_ui_settings)
         if self.ortho_base_checkbox is not None:
@@ -372,6 +627,204 @@ class RasterLinkerPlugin:
         if self.export_button is not None:
             self.export_button.clicked.connect(self.export_last_grid_to_gpkg)
 
+    def _ensure_dialog_main_layout(self):
+        if self.dlg is None:
+            return
+        if self.dialog_main_layout is not None:
+            return
+        if self.dlg.layout() is None:
+            main_layout = QVBoxLayout(self.dlg)
+            main_layout.setContentsMargins(6, 6, 6, 6)
+            main_layout.setSpacing(10)
+        else:
+            main_layout = self.dlg.layout()
+        if hasattr(self.dlg, "layoutWidget"):
+            self.dlg.layoutWidget.setParent(self.dlg)
+            self.dlg.layoutWidget.setMinimumSize(0, 0)
+            self.dlg.layoutWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            main_layout.addWidget(self.dlg.layoutWidget, 1)
+        self.dialog_main_layout = main_layout
+
+    def _build_tools_tabs(self):
+        if self.dlg is None or self.tools_tabs is not None:
+            return
+
+        for legacy_widget_name in ("openButton", "Ok"):
+            legacy_widget = getattr(self.dlg, legacy_widget_name, None)
+            if legacy_widget is not None:
+                legacy_widget.hide()
+                self.dlg.gridLayout.removeWidget(legacy_widget)
+
+        tabs = QTabWidget(self.dlg.layoutWidget)
+        tabs.setObjectName("toolsTabs")
+        tabs.setDocumentMode(False)
+        tabs.setUsesScrollButtons(False)
+
+        group_tab = QWidget(tabs)
+        group_layout = QGridLayout(group_tab)
+        group_layout.setContentsMargins(6, 6, 6, 6)
+        group_layout.setHorizontalSpacing(8)
+        group_layout.setVerticalSpacing(6)
+        group_layout.addWidget(self.dlg.zoomSelectedGroupsButton, 0, 0, 1, 1)
+        group_layout.addWidget(self.import_groups_button, 0, 1, 1, 1)
+        group_layout.addWidget(self.dlg.createGroupButton, 1, 0, 1, 1)
+        if hasattr(self.dlg, "groupNameEdit"):
+            group_layout.addWidget(self.dlg.groupNameEdit, 1, 1, 1, 1)
+        group_layout.setColumnStretch(0, 1)
+        group_layout.setColumnStretch(1, 1)
+        group_layout.setRowStretch(0, 0)
+        group_layout.setRowStretch(1, 0)
+        group_layout.setRowStretch(2, 0)
+
+        image_tab = QWidget(tabs)
+        image_layout = QGridLayout(image_tab)
+        image_layout.setContentsMargins(6, 6, 6, 6)
+        image_layout.setHorizontalSpacing(8)
+        image_layout.setVerticalSpacing(6)
+        image_layout.addWidget(self.enhance_minmax_button, 0, 0, 1, 1)
+        image_layout.addWidget(self.enhance_batch_button, 0, 1, 1, 1)
+        image_layout.addWidget(self.save_style_button, 1, 0, 1, 1)
+        image_layout.addWidget(self.load_style_button, 1, 1, 1, 1)
+        image_layout.addWidget(self.export_layout_button, 2, 0, 1, 2)
+        image_layout.setColumnStretch(0, 1)
+        image_layout.setColumnStretch(1, 1)
+        image_layout.setRowStretch(0, 0)
+        image_layout.setRowStretch(1, 0)
+        image_layout.setRowStretch(2, 0)
+        image_layout.setRowStretch(3, 0)
+
+        tabs.addTab(group_tab, "Groups")
+        tabs.addTab(image_tab, "Images")
+        tabs.tabBar().setExpanding(False)
+        tabs.tabBar().setElideMode(Qt.ElideRight)
+        tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        tabs.setMinimumHeight(120)
+        tabs.setMaximumHeight(150)
+
+        if self.group_tools_label is not None:
+            self.group_tools_label.hide()
+            self.dlg.gridLayout.removeWidget(self.group_tools_label)
+        if self.image_tools_label is not None:
+            self.image_tools_label.hide()
+            self.dlg.gridLayout.removeWidget(self.image_tools_label)
+
+        self.dlg.gridLayout.addWidget(tabs, 0, 0, 1, 2)
+        self.tools_tabs = tabs
+
+    def _build_bottom_controls_layout(self):
+        if self.dlg is None or self.bottom_controls_widget is not None:
+            return
+
+        self._ensure_dialog_main_layout()
+
+        for legacy_label_name in ("labelx", "labelx_2", "labelx_3", "labelx_4", "labelx_5", "labelx_6"):
+            legacy_label = getattr(self.dlg, legacy_label_name, None)
+            if legacy_label is not None:
+                legacy_label.hide()
+
+        panel = QWidget(self.dlg)
+        panel.setObjectName("gridDefinitionPanel")
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        panel.setMinimumHeight(185)
+        panel_layout = QGridLayout(panel)
+        panel_layout.setContentsMargins(8, 8, 8, 10)
+        panel_layout.setHorizontalSpacing(10)
+        panel_layout.setVerticalSpacing(8)
+
+        self.coord_x0_label = QLabel("x0", panel)
+        self.coord_x1_label = QLabel("x1", panel)
+        self.coord_y0_label = QLabel("y0", panel)
+        self.coord_y1_label = QLabel("y1", panel)
+        self.cell_x_label = QLabel("Cell X (m)", panel)
+        self.cell_y_label = QLabel("Cell Y (m)", panel)
+        for label in (
+            self.coord_x0_label,
+            self.coord_x1_label,
+            self.coord_y0_label,
+            self.coord_y1_label,
+            self.cell_x_label,
+            self.cell_y_label,
+        ):
+            label.setStyleSheet("color: #202020; font-size: 9pt;")
+
+        self.dlg.selectGridPointsButton.setParent(panel)
+        self.dlg.lineEditX0Y0.setParent(panel)
+        self.dlg.lineEditX1Y0.setParent(panel)
+        self.dlg.lineEditY0.setParent(panel)
+        self.dlg.lineEditX0Y1.setParent(panel)
+        self.dlg.createGridButton.setParent(panel)
+        self.dlg.lineEditAreaNames.setParent(panel)
+        self.dlg.lineEditDistanceX.setParent(panel)
+        self.dlg.lineEditDistanceY.setParent(panel)
+        if self.internal_grid_checkbox is not None:
+            self.internal_grid_checkbox.setParent(panel)
+
+        panel_layout.addWidget(self.dlg.selectGridPointsButton, 0, 0, 2, 1)
+        panel_layout.addWidget(self.coord_x0_label, 0, 1, 1, 1)
+        panel_layout.addWidget(self.coord_x1_label, 0, 2, 1, 1)
+        panel_layout.addWidget(self.dlg.lineEditX0Y0, 1, 1, 1, 1)
+        panel_layout.addWidget(self.dlg.lineEditX1Y0, 1, 2, 1, 1)
+
+        panel_layout.addWidget(self.coord_y0_label, 2, 1, 1, 1)
+        panel_layout.addWidget(self.coord_y1_label, 2, 2, 1, 1)
+        panel_layout.addWidget(self.dlg.lineEditY0, 3, 1, 1, 1)
+        panel_layout.addWidget(self.dlg.lineEditX0Y1, 3, 2, 1, 1)
+
+        panel_layout.addWidget(self.dlg.createGridButton, 4, 0, 1, 1)
+        panel_layout.addWidget(self.dlg.lineEditAreaNames, 4, 1, 1, 1)
+        if self.internal_grid_checkbox is not None:
+            panel_layout.addWidget(self.internal_grid_checkbox, 4, 2, 1, 1, Qt.AlignLeft | Qt.AlignVCenter)
+
+        panel_layout.addWidget(self.cell_x_label, 5, 1, 1, 1)
+        panel_layout.addWidget(self.cell_y_label, 5, 2, 1, 1)
+        panel_layout.addWidget(self.dlg.lineEditDistanceX, 6, 1, 1, 1)
+        panel_layout.addWidget(self.dlg.lineEditDistanceY, 6, 2, 1, 1)
+
+        panel_layout.setColumnMinimumWidth(0, 132)
+        panel_layout.setColumnStretch(0, 0)
+        panel_layout.setColumnStretch(1, 1)
+        panel_layout.setColumnStretch(2, 1)
+        panel_layout.setRowMinimumHeight(0, 18)
+        panel_layout.setRowMinimumHeight(1, 32)
+        panel_layout.setRowMinimumHeight(2, 18)
+        panel_layout.setRowMinimumHeight(3, 32)
+        panel_layout.setRowMinimumHeight(4, 34)
+        panel_layout.setRowMinimumHeight(5, 18)
+        panel_layout.setRowMinimumHeight(6, 32)
+
+        self.bottom_controls_widget = panel
+        if self.dialog_main_layout is not None:
+            self.dialog_main_layout.addWidget(panel, 0)
+        else:
+            self.dlg.gridLayout_3.addWidget(panel, 2, 0, 1, 4)
+
+    def _swap_drawing_and_navigation_sections(self):
+        """
+        Put Drawing Options on the right-top block and move Dial/Slider to the left column.
+        """
+        if self.dlg is None:
+            return
+
+        # Build left navigation widget once and host dial + slider there.
+        if self.left_nav_widget is None:
+            nav_widget = QWidget(self.dlg.layoutWidget)
+            nav_layout = QVBoxLayout(nav_widget)
+            nav_layout.setContentsMargins(0, 0, 0, 0)
+            nav_layout.setSpacing(6)
+            nav_layout.addWidget(self.dlg.dial2, 0, Qt.AlignHCenter)
+            nav_layout.addWidget(self.dlg.Dial)
+            self.left_nav_widget = nav_widget
+
+        # Left column order: raster list, group list, navigation, name raster.
+        if hasattr(self.dlg, "verticalLayout_3"):
+            self.dlg.verticalLayout_3.removeWidget(self.dlg.widget)
+            self.dlg.verticalLayout_3.removeWidget(self.left_nav_widget)
+            self.dlg.verticalLayout_3.insertWidget(4, self.left_nav_widget)
+
+        # Right-top hosts drawing options.
+        if hasattr(self.dlg, "gridLayout_3"):
+            self.dlg.gridLayout_3.addWidget(self.dlg.widget, 0, 2, 1, 2)
+
     def _tune_visual_layout(self):
         # Remove obsolete instruction block to recover vertical space.
         if hasattr(self.dlg, "textBrowser"):
@@ -379,13 +832,31 @@ class RasterLinkerPlugin:
         if hasattr(self.dlg, "lebelstep"):
             self.dlg.lebelstep.hide()
 
-        # Make navigation controls easier to use.
-        self.dlg.dial2.setMinimumSize(165, 165)
-        self.dlg.dial2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.dlg.dial2.setNotchTarget(2.0)
-        self.dlg.Dial.setMinimumHeight(34)
+        button_style = (
+            "font-size: 9pt; "
+            "padding: 4px 8px;"
+        )
+        label_style = "color: #202020; font-size: 9pt;"
 
-        # Improve readability/consistency of action buttons.
+        # Make navigation controls easier to use.
+        self.dlg.dial2.setMinimumSize(160, 160)
+        self.dlg.dial2.setMaximumSize(220, 220)
+        self.dlg.dial2.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.dlg.dial2.setNotchTarget(2.0)
+        self.dlg.Dial.setMinimumHeight(42)
+        self.dlg.Dial.setMaximumHeight(46)
+        if hasattr(self.dlg, "rasterListWidget"):
+            self.dlg.rasterListWidget.setMinimumWidth(220)
+            self.dlg.rasterListWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.dlg.rasterListWidget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.dlg.rasterListWidget.setStyleSheet("font-size: 9pt;")
+        if hasattr(self.dlg, "groupListWidget"):
+            self.dlg.groupListWidget.setMinimumWidth(220)
+            self.dlg.groupListWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.dlg.groupListWidget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.dlg.groupListWidget.setStyleSheet("font-size: 9pt;")
+
+        # Improve readability/consistency of layout-managed action buttons.
         for btn in [
             getattr(self, "import_groups_button", None),
             getattr(self, "enhance_minmax_button", None),
@@ -393,17 +864,315 @@ class RasterLinkerPlugin:
             getattr(self, "save_style_button", None),
             getattr(self, "load_style_button", None),
             getattr(self, "export_layout_button", None),
-            self.dlg.createGridButton,
-            self.dlg.selectGridPointsButton,
             self.dlg.zoomSelectedGroupsButton,
             self.dlg.createGroupButton,
+            self.dlg.selectGridPointsButton,
+            self.dlg.createGridButton,
+        ]:
+            if btn is not None:
+                btn.setMinimumHeight(30)
+                btn.setMinimumWidth(108)
+                btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                btn.setStyleSheet(button_style)
+                btn.setIconSize(QSize(16, 16))
+
+        # Compact right-side tools block to leave more visual room for drawing options.
+        for btn in [
+            self.dlg.zoomSelectedGroupsButton,
+            getattr(self, "import_groups_button", None),
+            self.dlg.createGroupButton,
+            getattr(self, "enhance_minmax_button", None),
+            getattr(self, "enhance_batch_button", None),
+            getattr(self, "save_style_button", None),
+            getattr(self, "load_style_button", None),
+            getattr(self, "export_layout_button", None),
         ]:
             if btn is not None:
                 btn.setMinimumHeight(28)
+                btn.setMinimumWidth(96)
+
+        if hasattr(self.dlg, "lineEditAreaNames"):
+            self.dlg.lineEditAreaNames.setStyleSheet("font-size: 9pt; padding: 2px 4px;")
+            self.dlg.lineEditAreaNames.setMinimumHeight(24)
+        if self.internal_grid_checkbox is not None:
+            self.internal_grid_checkbox.setStyleSheet(label_style)
+
+        for edit_name in ("lineEditX0Y0", "lineEditX1Y0", "lineEditY0", "lineEditX0Y1", "lineEditDistanceX", "lineEditDistanceY", "groupNameEdit"):
+            edit = getattr(self.dlg, edit_name, None)
+            if edit is not None:
+                edit.setMinimumHeight(24)
+                edit.setStyleSheet("font-size: 9pt; padding: 2px 4px;")
+
+        for label in (
+            self.coord_x0_label,
+            self.coord_x1_label,
+            self.coord_y0_label,
+            self.coord_y1_label,
+            self.cell_x_label,
+            self.cell_y_label,
+        ):
+            if label is not None:
+                label.setStyleSheet(label_style)
+        self._on_internal_grid_toggled(self.internal_grid_checkbox.isChecked() if self.internal_grid_checkbox is not None else True)
+
+        if self.tools_tabs is not None:
+            self.tools_tabs.setStyleSheet(
+                "QTabBar::tab { font-size: 9pt; padding: 0px 4px; min-width: 48px; }"
+            )
+
+        for checkbox in (
+            self.snap_checkbox,
+            self.ortho_checkbox,
+            self.ortho_base_checkbox,
+            self.keep_area_checkbox,
+        ):
+            if checkbox is not None:
+                checkbox.setStyleSheet("color: #202020; font-size: 9pt;")
+        for input_widget in (
+            self.snap_mode_combo,
+            self.snap_tolerance_spin,
+            self.snap_units_combo,
+            self.dimension_mode_combo,
+        ):
+            if input_widget is not None:
+                input_widget.setMinimumHeight(26)
+                input_widget.setStyleSheet("font-size: 9pt;")
+        for aux_btn in (self.help_button, self.export_button):
+            if aux_btn is not None:
+                aux_btn.setMinimumHeight(32)
+                aux_btn.setMinimumWidth(86)
+                aux_btn.setStyleSheet(button_style)
+
+        if hasattr(self.dlg, "gridLayout"):
+            self.dlg.gridLayout.setHorizontalSpacing(8)
+            self.dlg.gridLayout.setVerticalSpacing(6)
+            self.dlg.gridLayout.setColumnStretch(0, 1)
+            self.dlg.gridLayout.setColumnStretch(1, 1)
+            self.dlg.gridLayout.setContentsMargins(12, 0, 0, 0)
+            self.dlg.gridLayout.setRowStretch(0, 0)
+        if hasattr(self.dlg, "gridLayout_3"):
+            self.dlg.gridLayout_3.setHorizontalSpacing(10)
+            self.dlg.gridLayout_3.setVerticalSpacing(8)
+            self.dlg.gridLayout_3.setColumnStretch(0, 8)
+            self.dlg.gridLayout_3.setColumnStretch(1, 0)
+            self.dlg.gridLayout_3.setColumnStretch(2, 6)
+            self.dlg.gridLayout_3.setColumnStretch(3, 0)
+            # Keep top-right controls and tools aligned in a stable layout.
+            self.dlg.gridLayout_3.addWidget(self.dlg.widget, 0, 2, 1, 2)
+            self.dlg.gridLayout_3.addLayout(self.dlg.gridLayout, 1, 2, 1, 2)
+            self.dlg.gridLayout_3.setRowStretch(0, 0)
+            self.dlg.gridLayout_3.setRowStretch(1, 0)
+            self.dlg.gridLayout_3.setRowStretch(2, 0)
+            self.dlg.gridLayout_3.setRowStretch(3, 1)
+        if hasattr(self.dlg, "verticalLayout_3"):
+            # Keep a visible gap between left widgets and separator line.
+            self.dlg.verticalLayout_3.setContentsMargins(0, 0, 10, 0)
+            self.dlg.verticalLayout_3.setSpacing(8)
+            # Ensure Drawing Options keeps enough vertical room at different DPI scales.
+            self.dlg.verticalLayout_3.setStretch(0, 0)
+            self.dlg.verticalLayout_3.setStretch(1, 3)
+            self.dlg.verticalLayout_3.setStretch(2, 0)
+            self.dlg.verticalLayout_3.setStretch(3, 3)
+            self.dlg.verticalLayout_3.setStretch(4, 4)
+        if hasattr(self.dlg, "widget"):
+            self.dlg.widget.setMinimumHeight(220)
+            self.dlg.widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        if self.left_nav_widget is not None:
+            self.left_nav_widget.setMinimumHeight(180)
+            self.left_nav_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        if hasattr(self.dlg, "line"):
+            self.dlg.line.setFixedWidth(2)
+            self.dlg.line.setStyleSheet("color: #9a9a9a;")
+        if self.bottom_controls_widget is None:
+            self._reposition_bottom_controls()
+
+    def _init_name_raster_panel(self):
+        if self.name_raster_panel is not None or self.dlg is None:
+            return
+
+        if hasattr(self.dlg, "nomeraster"):
+            self.dlg.nomeraster.hide()
+
+        panel = QWidget(self.dlg.layoutWidget)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(2, 2, 2, 2)
+        panel_layout.setSpacing(4)
+
+        title = QLabel("Name Raster:")
+        title.setStyleSheet("color: #202020; font-size: 9pt; font-weight: 600;")
+        panel_layout.addWidget(title)
+
+        lines = []
+        for _ in range(4):
+            row = QLabel("-")
+            row.setStyleSheet("color: #202020; font-size: 9pt;")
+            row.setWordWrap(True)
+            panel_layout.addWidget(row)
+            lines.append(row)
+
+        self.name_raster_panel = panel
+        self.name_raster_title = title
+        self.name_raster_lines = lines
+        panel.setMinimumHeight(56)
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        if hasattr(self.dlg, "verticalLayout_3"):
+            self.dlg.verticalLayout_3.addWidget(panel)
+        else:
+            self.dlg.gridLayout_3.addWidget(panel, 2, 0, 1, 4)
+        self._render_name_raster_lines([])
+
+    def _reposition_bottom_controls(self):
+        """Place legacy absolute-position controls directly under the main layout block."""
+        if self.dlg is None or not hasattr(self.dlg, "layoutWidget"):
+            return
+        lw = self.dlg.layoutWidget.geometry()
+        base_y = lw.y() + lw.height() + 10
+
+        # Column anchors used by the legacy bottom section.
+        x_btn = 180
+        x_col1 = 300
+        x_col2 = 420
+
+        y_row1 = base_y + 22
+        y_row1_lbl = y_row1 - 20
+        y_row2 = y_row1 + 50
+        y_row2_lbl = y_row2 - 20
+        y_row3 = y_row2 + 50
+        y_row3_lbl = y_row3 - 20
+
+        # Row 1: orientation + x0/x1
+        if hasattr(self.dlg, "selectGridPointsButton"):
+            self.dlg.selectGridPointsButton.move(x_btn, y_row1)
+        if hasattr(self.dlg, "lineEditX0Y0"):
+            self.dlg.lineEditX0Y0.move(x_col1, y_row1)
+        if hasattr(self.dlg, "lineEditX1Y0"):
+            self.dlg.lineEditX1Y0.move(x_col2, y_row1)
+
+        # Row 2: y0/y1
+        if hasattr(self.dlg, "lineEditY0"):
+            self.dlg.lineEditY0.move(x_col1, y_row2)
+        if hasattr(self.dlg, "lineEditX0Y1"):
+            self.dlg.lineEditX0Y1.move(x_col2, y_row2)
+
+        # Row 3: draw polygon + name + cell sizes
+        if hasattr(self.dlg, "createGridButton"):
+            self.dlg.createGridButton.move(90, y_row3)
+        if hasattr(self.dlg, "lineEditAreaNames"):
+            self.dlg.lineEditAreaNames.move(208, y_row3)
+        if hasattr(self.dlg, "lineEditDistanceX"):
+            self.dlg.lineEditDistanceX.move(x_col1, y_row3)
+        if hasattr(self.dlg, "lineEditDistanceY"):
+            self.dlg.lineEditDistanceY.move(x_col2, y_row3)
+        if self.internal_grid_checkbox is not None:
+            self.internal_grid_checkbox.move(208, y_row3_lbl - 2)
+
+        # Labels aligned to related fields.
+        if hasattr(self.dlg, "labelx_3"):
+            self.dlg.labelx_3.move(x_col1, y_row2_lbl)
+        if hasattr(self.dlg, "labelx_4"):
+            self.dlg.labelx_4.move(x_col2, y_row2_lbl)
+        if hasattr(self.dlg, "labelx_6"):
+            self.dlg.labelx_6.move(x_col1, y_row3_lbl)
+            self.dlg.labelx_6.setFixedWidth(86)
+            self.dlg.labelx_6.setText("Cell X (m)")
+            self.dlg.labelx_6.setStyleSheet("color: #202020; font-size: 9pt;")
+        if hasattr(self.dlg, "labelx_5"):
+            self.dlg.labelx_5.move(x_col2, y_row3_lbl)
+            self.dlg.labelx_5.setFixedWidth(86)
+            self.dlg.labelx_5.setText("Cell Y (m)")
+            self.dlg.labelx_5.setStyleSheet("color: #202020; font-size: 9pt;")
+
+        # Hide legacy x0/x1 labels in the top layout and create aligned labels near fields.
+        if hasattr(self.dlg, "labelx"):
+            self.dlg.labelx.hide()
+        if hasattr(self.dlg, "labelx_2"):
+            self.dlg.labelx_2.hide()
+        if not hasattr(self, "_coord_x0_label"):
+            self._coord_x0_label = QLabel("x0", self.dlg)
+            self._coord_x1_label = QLabel("x1", self.dlg)
+            self._coord_x0_label.setStyleSheet("color: #202020; font-size: 9pt;")
+            self._coord_x1_label.setStyleSheet("color: #202020; font-size: 9pt;")
+        self._coord_x0_label.setGeometry(x_col1, y_row1_lbl, 40, 16)
+        self._coord_x1_label.setGeometry(x_col2, y_row1_lbl, 40, 16)
+        self._coord_x0_label.show()
+        self._coord_x1_label.show()
+
+    def _render_name_raster_lines(self, lines):
+        if self.name_raster_panel is None:
+            return
+        normalized = [str(x) for x in (lines or []) if str(x).strip()]
+        if not normalized:
+            normalized = ["No raster loaded"]
+        for idx, row in enumerate(self.name_raster_lines):
+            if idx < len(normalized):
+                row.setText(normalized[idx])
+                row.show()
+            else:
+                row.setText("")
+                row.hide()
+
+    def _build_name_lines_for_selected_groups(self):
+        if self.dlg is None:
+            return []
+        selected_group_items = self.dlg.groupListWidget.selectedItems()
+        if not selected_group_items:
+            return []
+
+        value = self.dlg.Dial.value()
+        lines = []
+        for group_item in selected_group_items:
+            group_name = group_item.text().strip()
+            group = self._get_or_create_plugin_qgis_group(group_name)
+            raster_nodes = [
+                child for child in group.children()
+                if isinstance(child, QgsLayerTreeLayer) and isinstance(child.layer(), QgsRasterLayer)
+            ]
+            if not raster_nodes:
+                continue
+            index = min(value, len(raster_nodes) - 1)
+            visible_raster_name = raster_nodes[index].layer().name()
+            lines.append(f"[{group_name}] {visible_raster_name}")
+        return lines
+
+    def _qgis_theme_icon(self, *names):
+        for name in names:
+            if not name:
+                continue
+            normalized = name if str(name).startswith("/") else f"/{name}"
+            icon = QgsApplication.getThemeIcon(normalized)
+            if icon is not None and not icon.isNull():
+                return icon
+        return QIcon()
+
+    def _set_button_icon(self, button, *theme_names):
+        if button is None:
+            return
+        icon = self._qgis_theme_icon(*theme_names)
+        if not icon.isNull():
+            button.setIcon(icon)
+            button.setIconSize(QSize(16, 16))
+
+    def _apply_button_icons(self):
+        # Use QGIS native theme icons when available.
+        self._set_button_icon(getattr(self.dlg, "createGroupButton", None), "mActionAddGroup.svg", "mActionNewVectorLayer.svg")
+        self._set_button_icon(getattr(self.dlg, "zoomSelectedGroupsButton", None), "mActionZoomToSelected.svg", "mActionZoomFullExtent.svg")
+        self._set_button_icon(getattr(self, "import_groups_button", None), "mActionOptions.svg", "mActionPropertiesWidget.svg")
+        self._set_button_icon(getattr(self.dlg, "createGridButton", None), "mActionCapturePolygon.svg", "mActionNewVectorLayer.svg")
+        self._set_button_icon(getattr(self.dlg, "selectGridPointsButton", None), "mActionCapturePoint.svg", "mActionMoveVertex.svg")
+        self._set_button_icon(getattr(self, "enhance_minmax_button", None), "mActionRasterHistogram.svg", "mActionOptions.svg")
+        self._set_button_icon(getattr(self, "enhance_batch_button", None), "mActionRasterHistogram.svg", "mActionFilter2.svg")
+        self._set_button_icon(getattr(self, "save_style_button", None), "mActionFileSave.svg", "mActionSaveAs.svg")
+        self._set_button_icon(getattr(self, "load_style_button", None), "mActionFileOpen.svg", "mActionAddRasterLayer.svg")
+        self._set_button_icon(getattr(self, "export_layout_button", None), "mActionSaveAsPDF.svg", "mActionSaveAs.svg")
+        self._set_button_icon(getattr(self, "help_button", None), "mActionHelpContents.svg", "mActionOptions.svg")
+        self._set_button_icon(getattr(self, "export_button", None), "mActionSaveAs.svg", "mActionFileSave.svg")
 
     def _build_grid_options_controls(self):
         (
             self.snap_checkbox,
+            self.snap_mode_combo,
+            self.snap_tolerance_spin,
+            self.snap_units_combo,
             self.ortho_checkbox,
             self.ortho_base_checkbox,
             self.keep_area_checkbox,
@@ -415,6 +1184,9 @@ class RasterLinkerPlugin:
         ) = build_grid_options_controls(
             self.dlg.horizontalLayout_2,
             use_snap=self.grid_use_snap,
+            snap_mode=self.grid_snap_mode,
+            snap_tolerance=self.grid_snap_tolerance,
+            snap_units=self.grid_snap_units,
             force_orthogonal=self.grid_force_orthogonal,
             relative_orthogonal=self.grid_relative_orthogonal,
             keep_source_polygon=self.keep_source_polygon,
@@ -427,6 +1199,14 @@ class RasterLinkerPlugin:
     def _sync_grid_options_from_controls(self):
         if self.snap_checkbox is not None:
             self.grid_use_snap = bool(self.snap_checkbox.isChecked())
+        if self.snap_mode_combo is not None:
+            mode = self.snap_mode_combo.currentData()
+            self.grid_snap_mode = mode if mode in ("all", "vertex_segment", "vertex", "segment", "intersection") else "all"
+        if self.snap_tolerance_spin is not None:
+            self.grid_snap_tolerance = float(self.snap_tolerance_spin.value())
+        if self.snap_units_combo is not None:
+            unit = self.snap_units_combo.currentData()
+            self.grid_snap_units = unit if unit in ("pixels", "mm", "cm", "map_units") else "pixels"
         if self.ortho_checkbox is not None:
             self.grid_force_orthogonal = bool(self.ortho_checkbox.isChecked())
         if self.ortho_base_checkbox is not None:
@@ -436,6 +1216,77 @@ class RasterLinkerPlugin:
         if self.dimension_mode_combo is not None:
             mode = self.dimension_mode_combo.currentData()
             self.grid_dimension_mode = mode if mode in ("ask", "manual", "canvas") else "ask"
+        if self.internal_grid_checkbox is not None:
+            self.grid_internal_enabled = bool(self.internal_grid_checkbox.isChecked())
+        self._apply_grid_snapping_config()
+
+    def _on_internal_grid_toggled(self, checked):
+        enabled = bool(checked)
+        if hasattr(self.dlg, "lineEditDistanceX"):
+            self.dlg.lineEditDistanceX.setEnabled(enabled)
+        if hasattr(self.dlg, "lineEditDistanceY"):
+            self.dlg.lineEditDistanceY.setEnabled(enabled)
+        label_style = "color: #202020; font-size: 9pt;" if enabled else "color: #6d6d6d; font-size: 9pt;"
+        for label in (self.cell_x_label, self.cell_y_label):
+            if label is not None:
+                label.setStyleSheet(label_style)
+
+    def get_snap_filter(self):
+        edge_flag = getattr(QgsPointLocator, "Edge", getattr(QgsPointLocator, "Segment", 0))
+        intersection_flag = getattr(QgsPointLocator, "Intersection", 0)
+        vertex_flag = getattr(QgsPointLocator, "Vertex", 0)
+        all_flag = getattr(QgsPointLocator, "All", vertex_flag | edge_flag | intersection_flag)
+        mode = getattr(self, "grid_snap_mode", "all")
+        if mode == "vertex":
+            return vertex_flag
+        if mode == "segment":
+            return edge_flag
+        if mode == "vertex_segment":
+            return vertex_flag | edge_flag
+        if mode == "intersection":
+            return intersection_flag
+        return all_flag
+
+    def _snap_tolerance_pixels(self):
+        value = float(getattr(self, "grid_snap_tolerance", 12.0))
+        units = getattr(self, "grid_snap_units", "pixels")
+        if units == "pixels":
+            return value
+        if units in ("mm", "cm"):
+            dpi = float(self.iface.mapCanvas().logicalDpiX() or 96.0)
+            mm_value = value if units == "mm" else value * 10.0
+            return mm_value * dpi / 25.4
+        return value
+
+    def _apply_grid_snapping_config(self):
+        """Apply plugin snap options to the current QGIS snapping config."""
+        try:
+            project = QgsProject.instance()
+            config = QgsSnappingConfig(project.snappingConfig())
+            config.setEnabled(bool(self.grid_use_snap))
+
+            if hasattr(QgsSnappingConfig, "AllLayers"):
+                config.setMode(QgsSnappingConfig.AllLayers)
+            elif hasattr(QgsSnappingConfig, "SnappingMode"):
+                config.setMode(QgsSnappingConfig.SnappingMode.AllLayers)
+
+            snap_filter = self.get_snap_filter()
+            if hasattr(config, "setTypeFlag"):
+                config.setTypeFlag(snap_filter)
+            elif hasattr(config, "setType"):
+                config.setType(snap_filter)
+
+            if self.grid_snap_units == "map_units":
+                config.setUnits(QgsTolerance.MapUnits)
+                config.setTolerance(float(self.grid_snap_tolerance))
+            else:
+                config.setUnits(QgsTolerance.Pixels)
+                config.setTolerance(float(self._snap_tolerance_pixels()))
+
+            project.setSnappingConfig(config)
+        except Exception:
+            # Keep plugin functional even if API differs across QGIS versions.
+            pass
 
     def update_draw_indicators(self, angle_rad=None, length=None):
         if self.base_angle_label is None:
@@ -465,7 +1316,9 @@ class RasterLinkerPlugin:
             "- D or middle-click: lock orientation and choose dimensions\n"
             "- X: toggle ortho lock from keyboard\n"
             "- Ortho base: orthogonal snapping relative to drawn base\n"
-            "- Mode: Ask / Manual / Canvas for length-width input"
+            "- Snap to: All / Vertex / Segment / Intersection\n"
+            "- Tol: snap tolerance (px, mm, cm, or map units)\n"
+            "- Dimension Input: Ask / Manual / Canvas for length-width input"
         )
         QMessageBox.information(self.dlg, "Grid Help", help_text)
 
@@ -542,6 +1395,7 @@ class RasterLinkerPlugin:
         """
         Activate tool to orient the grid from 3 canvas picks.
         """
+        self._sync_grid_options_from_controls()
         if self._get_grid_dimensions_from_fields() is None:
             QMessageBox.warning(
                 self.dlg,
@@ -560,7 +1414,8 @@ class RasterLinkerPlugin:
                 "1) First click: grid origin (0,0)\n"
                 "2) Second click: X-axis direction\n"
                 "3) Third click: Y-axis direction\n\n"
-                "Grid size comes from x0/x1/y0/y1 values."
+                "Grid size comes from x0/x1/y0/y1 values.\n"
+                "Internal cells are optional and controlled by 'Internal grid'."
             ),
         )
         self.grid_selection_tool = GridSelectionTool(self.iface.mapCanvas(), self)
@@ -591,11 +1446,16 @@ class RasterLinkerPlugin:
                 return
             grid_length_x, grid_length_y = dims
 
-            cell_x = float(self.dlg.lineEditDistanceX.text().strip())
-            cell_y = float(self.dlg.lineEditDistanceY.text().strip())
-            if cell_x <= 0 or cell_y <= 0:
-                QMessageBox.warning(self.dlg, "Invalid Cell Size", "Cell X and Cell Y must be positive.")
-                return
+            internal_enabled = bool(self.internal_grid_checkbox.isChecked()) if self.internal_grid_checkbox is not None else True
+            if internal_enabled:
+                cell_x = float(self.dlg.lineEditDistanceX.text().strip())
+                cell_y = float(self.dlg.lineEditDistanceY.text().strip())
+                if cell_x <= 0 or cell_y <= 0:
+                    QMessageBox.warning(self.dlg, "Invalid Cell Size", "Cell X and Cell Y must be positive.")
+                    return
+            else:
+                cell_x = grid_length_x
+                cell_y = grid_length_y
 
             x0, y0 = points[0].x(), points[0].y()
             x1, y1 = points[1].x(), points[1].y()
@@ -621,7 +1481,8 @@ class RasterLinkerPlugin:
                 (
                     f"Oriented grid created.\n"
                     f"Grid size: {grid_length_x:.3f} x {grid_length_y:.3f}\n"
-                    f"Cell size: {cell_x:.3f} x {cell_y:.3f}"
+                    f"Cell size: {cell_x:.3f} x {cell_y:.3f}\n"
+                    f"Internal grid: {'enabled' if internal_enabled else 'disabled'}"
                 ),
             )
         except ValueError as ve:
@@ -666,7 +1527,7 @@ class RasterLinkerPlugin:
                         group.addChildNode(cloned_node)
                         root.removeLayer(raster_layer.id())
                     self.populate_raster_list(group_name)
-                    QMessageBox.information(self.dlg, "Success", f"Raster '{layer_name}' caricato nel gruppo '{group_name}'.")
+                    QMessageBox.information(self.dlg, "Success", f"Raster '{layer_name}' loaded into group '{group_name}'.")
                 else:
                     QMessageBox.warning(self.dlg, "Error", f"File '{layer_name}' is not a valid raster.")
 
@@ -710,9 +1571,9 @@ class RasterLinkerPlugin:
     def _set_name_raster_label(self, raster_name=None):
         """Update 'Name Raster' label in GUI."""
         if raster_name:
-            self.dlg.nomeraster.setText(f"Name Raster: {raster_name}")
+            self._render_name_raster_lines([raster_name])
         else:
-            self.dlg.nomeraster.setText("Name Raster: ")
+            self._render_name_raster_lines([])
 
     def _active_project_root(self):
         if self.project_manager_dialog is not None and self.project_manager_dialog.project_root:
@@ -1208,7 +2069,7 @@ class RasterLinkerPlugin:
                 if not group:
                     continue
 
-                # etichetta corta del gruppo (ultimo pezzo del path)
+                # Short group label (last path token)
                 group_label = group_path.split("/")[-1] if group_path else group_path
 
                 for child in group.children():
@@ -1273,10 +2134,10 @@ class RasterLinkerPlugin:
             QMessageBox.warning(self.dlg, "Error", "Unable to determine selected group path.")
             return
 
-        # Popola la lista raster (come giÃ  fai)
+        # Populate raster list
         self.populate_raster_list(group_path)
 
-        # Trova il gruppo e imposta 'Name Raster' sul raster visibile (se esiste), altrimenti il primo
+        # Find group and set 'Name Raster' to visible raster (or first one)
         group = self._find_group_by_path(group_path)
         if not group:
             self._set_name_raster_label(None)
@@ -1334,18 +2195,7 @@ class RasterLinkerPlugin:
             group_label = group_path.split("/")[-1] if group_path else group_path
             parts_for_label.append(f"[{group_label}] {visible_raster_name}")
 
-        # Update label once (after loop)
-        if parts_for_label:
-            text = " | ".join(parts_for_label)
-
-            # Optional truncation to avoid very long labels
-            max_len = 120
-            if len(text) > max_len:
-                text = text[:max_len - 3] + "..."
-
-            self.dlg.nomeraster.setText(f"Name Raster: {text}")
-        else:
-            self.dlg.nomeraster.setText("Name Raster: ")
+        self._render_name_raster_lines(parts_for_label)
 
 
     def zoom_to_selected_groups(self):
@@ -1383,7 +2233,7 @@ class RasterLinkerPlugin:
                 if extent is None or extent.isNull() or extent.isEmpty():
                     continue
 
-                # Trasforma extent nel CRS di progetto se serve
+                # Transform extent to project CRS if needed
                 if layer.crs() != project_crs:
                     try:
                         tr = QgsCoordinateTransform(layer.crs(), project_crs, project)
@@ -1461,7 +2311,7 @@ class RasterLinkerPlugin:
                 QMessageBox.warning(self.dlg, "Error", "No file selected.")
                 return
 
-            # Trova il gruppo
+            # Find group
             root = QgsProject.instance().layerTreeRoot()
             group = next((g for g in root.children() if g.name() == group_name and g.nodeType() == 0), None)
             if not group:
@@ -1543,7 +2393,7 @@ class RasterLinkerPlugin:
         QMessageBox.information(self.dlg, "Success", f"Raster '{raster_layer.name()}' added to group '{group_name}'.")
 
     def move_rasters(self):
-        """Sposta il raster selezionato in un altro gruppo."""
+        """Move selected raster to another group."""
         selected_raster_item = self.dlg.rasterListWidget.currentItem()
         selected_group_item = self.dlg.groupListWidget.currentItem()
 
@@ -1654,8 +2504,12 @@ class RasterLinkerPlugin:
             self._set_name_raster_label(None)
             return
         self.populate_raster_list_from_selected_groups()
-        first_item = self.dlg.rasterListWidget.item(0)
-        self._set_name_raster_label(first_item.text() if first_item else None)
+        lines = self._build_name_lines_for_selected_groups()
+        if lines:
+            self._render_name_raster_lines(lines)
+        else:
+            first_item = self.dlg.rasterListWidget.item(0)
+            self._set_name_raster_label(first_item.text() if first_item else None)
         self.load_raster(show_message=False)
 
     def on_group_selection_changed(self):
@@ -1667,7 +2521,11 @@ class RasterLinkerPlugin:
             self._set_name_raster_label(None)
             self._update_navigation_controls(0)
             return
-        self.on_group_selected(selected_items[0])
+        self.populate_raster_list_from_selected_groups()
+        self._update_navigation_controls()
+        lines = self._build_name_lines_for_selected_groups()
+        self._render_name_raster_lines(lines)
+        self.load_raster(show_message=False)
 
     def _update_navigation_controls(self, value=None):
         if self.dlg is None:
@@ -1720,13 +2578,7 @@ class RasterLinkerPlugin:
             visible_raster_name = raster_nodes[index].layer().name()
             parts_for_label.append(f"[{group_name}] {visible_raster_name}")
 
-        if parts_for_label:
-            text = " | ".join(parts_for_label)
-            if len(text) > 120:
-                text = text[:117] + "..."
-            self.dlg.nomeraster.setText(f"Name Raster: {text}")
-        else:
-            self.dlg.nomeraster.setText("Name Raster: ")
+        self._render_name_raster_lines(parts_for_label)
 
     def zoom_to_selected_groups(self):
         selected_group_items = self.dlg.groupListWidget.selectedItems()
