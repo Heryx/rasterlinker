@@ -49,6 +49,7 @@ from .grid_selection_tool import GridSelectionTool
 from .polygon_grid_creator import create_grid_from_polygon
 from .polygon_draw_tool import PolygonDrawTool
 from .grid_options_ui import build_grid_options_controls
+from .project_manager_dialog import ProjectManagerDialog
 
 from .resources import *
 from .gpr_linker_dialog import RasterLinkerDialog
@@ -85,6 +86,7 @@ class RasterLinkerPlugin:
         self.length_label = None
         self.last_area_layer = None
         self.last_grid_layer = None
+        self.project_manager_dialog = None
 
     # Translation helper
     def tr(self, message):
@@ -104,6 +106,7 @@ class RasterLinkerPlugin:
         """Initialize the GUI."""
         icon_path = ':/plugins/gpr_linker/icon.png'
         self.add_action(icon_path, text=self.tr(u'Raster Linker'), callback=self.run, parent=self.iface.mainWindow())
+        self.add_action(icon_path, text=self.tr(u'RasterLinker Project Manager'), callback=self.open_project_manager, parent=self.iface.mainWindow())
         self.first_start = True
 
     def unload(self):
@@ -171,6 +174,12 @@ class RasterLinkerPlugin:
 
         self.dock_widget.show()
         self.dock_widget.raise_()
+
+    def open_project_manager(self):
+        if self.project_manager_dialog is None:
+            self.project_manager_dialog = ProjectManagerDialog(self.iface, self.iface.mainWindow())
+        self.project_manager_dialog.show()
+        self.project_manager_dialog.raise_()
 
     def create_grid_from_polygon_layer(self):
         """
