@@ -10,6 +10,8 @@ from PyQt5.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
+    QGroupBox,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -25,10 +27,13 @@ from .project_catalog import (
     register_model_3d,
     register_radargram,
     normalize_copy_into_project,
+    export_project_package,
+    import_project_package,
     utc_now_iso,
 )
 from .pointcloud_metadata import inspect_las_laz
 from .radargram_metadata import inspect_radargram
+from .catalog_editor_dialog import CatalogEditorDialog
 
 
 class ProjectManagerDialog(QDialog):
@@ -37,11 +42,14 @@ class ProjectManagerDialog(QDialog):
         self.iface = iface
         self.project_root = ""
         self.setWindowTitle("RasterLinker Project Manager")
-        self.resize(620, 160)
+        self.resize(760, 300)
         self._build_ui()
+        self._apply_styles()
 
     def _build_ui(self):
         root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(8)
 
         title = QLabel("Create/Open a project folder for 2D/3D geophysics data")
         root_layout.addWidget(title)
@@ -56,35 +64,113 @@ class ProjectManagerDialog(QDialog):
         row.addWidget(browse_btn)
         root_layout.addLayout(row)
 
-        actions = QHBoxLayout()
         create_btn = QPushButton("Create/Open Project")
         create_btn.clicked.connect(self._create_or_open_project)
-        actions.addWidget(create_btn)
+        create_btn.setMinimumWidth(180)
+        create_btn.setMinimumHeight(30)
+        root_layout.addWidget(create_btn)
+
+        sections_grid = QGridLayout()
+        sections_grid.setHorizontalSpacing(12)
+        sections_grid.setVerticalSpacing(10)
+
+        import_box = QGroupBox("Import")
+        import_layout = QGridLayout(import_box)
+        import_layout.setHorizontalSpacing(8)
+        import_layout.setVerticalSpacing(8)
 
         import_las_btn = QPushButton("Import LAS/LAZ")
         import_las_btn.clicked.connect(self._import_las_laz)
-        actions.addWidget(import_las_btn)
+        import_las_btn.setMinimumHeight(28)
+        import_layout.addWidget(import_las_btn, 0, 0)
 
         import_rg_btn = QPushButton("Import Radargrams")
         import_rg_btn.clicked.connect(self._import_radargrams)
-        actions.addWidget(import_rg_btn)
+        import_rg_btn.setMinimumHeight(28)
+        import_layout.addWidget(import_rg_btn, 0, 1)
 
         import_manifest_btn = QPushButton("Import Manifest")
         import_manifest_btn.clicked.connect(self._import_manifest)
-        actions.addWidget(import_manifest_btn)
+        import_manifest_btn.setMinimumHeight(28)
+        import_layout.addWidget(import_manifest_btn, 1, 0, 1, 2)
+
+        catalog_box = QGroupBox("Catalog & QA")
+        catalog_layout = QGridLayout(catalog_box)
+        catalog_layout.setHorizontalSpacing(8)
+        catalog_layout.setVerticalSpacing(8)
 
         view_catalog_btn = QPushButton("View Catalog")
         view_catalog_btn.clicked.connect(self._view_catalog_summary)
-        actions.addWidget(view_catalog_btn)
+        view_catalog_btn.setMinimumHeight(28)
+        catalog_layout.addWidget(view_catalog_btn, 0, 0)
+
+        edit_catalog_btn = QPushButton("Catalog Editor")
+        edit_catalog_btn.clicked.connect(self._open_catalog_editor)
+        edit_catalog_btn.setMinimumHeight(28)
+        catalog_layout.addWidget(edit_catalog_btn, 0, 1)
 
         validate_btn = QPushButton("Validate")
         validate_btn.clicked.connect(self._validate_project)
-        actions.addWidget(validate_btn)
+        validate_btn.setMinimumHeight(28)
+        catalog_layout.addWidget(validate_btn, 1, 0)
+
+        cleanup_btn = QPushButton("Cleanup Catalog")
+        cleanup_btn.clicked.connect(self._cleanup_catalog)
+        cleanup_btn.setMinimumHeight(28)
+        catalog_layout.addWidget(cleanup_btn, 1, 1)
+
+        reload_btn = QPushButton("Reload Layers")
+        reload_btn.clicked.connect(self._reload_imported_layers)
+        reload_btn.setMinimumHeight(28)
+        catalog_layout.addWidget(reload_btn, 2, 0, 1, 2)
+
+        package_box = QGroupBox("Package")
+        package_layout = QGridLayout(package_box)
+        package_layout.setHorizontalSpacing(8)
+        package_layout.setVerticalSpacing(8)
+
+        export_pkg_btn = QPushButton("Export Package")
+        export_pkg_btn.clicked.connect(self._export_package)
+        export_pkg_btn.setMinimumHeight(28)
+        package_layout.addWidget(export_pkg_btn, 0, 0)
+
+        import_pkg_btn = QPushButton("Import Package")
+        import_pkg_btn.clicked.connect(self._import_package)
+        import_pkg_btn.setMinimumHeight(28)
+        package_layout.addWidget(import_pkg_btn, 0, 1)
 
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
-        actions.addWidget(close_btn)
-        root_layout.addLayout(actions)
+        close_btn.setMinimumHeight(30)
+        package_layout.addWidget(close_btn, 1, 0, 1, 2)
+
+        sections_grid.addWidget(import_box, 0, 0)
+        sections_grid.addWidget(catalog_box, 0, 1)
+        sections_grid.addWidget(package_box, 1, 0, 1, 2)
+        root_layout.addLayout(sections_grid)
+
+    def _apply_styles(self):
+        self.setStyleSheet(
+            """
+            QGroupBox {
+                border: 1px solid #cfd8dc;
+                border-radius: 6px;
+                margin-top: 10px;
+                font-weight: 600;
+                padding: 8px 6px 6px 6px;
+                background: #fbfcfd;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px 0 4px;
+                color: #37474f;
+            }
+            QPushButton {
+                padding: 4px 8px;
+            }
+            """
+        )
 
     def _browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select project folder")
@@ -269,6 +355,49 @@ class ProjectManagerDialog(QDialog):
             f"Manifest import completed (models: {imported_models}, radargrams: {imported_radargrams}).",
         )
 
+    def _export_package(self):
+        if not self._ensure_project_ready():
+            return
+        out_zip, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Project Package",
+            "",
+            "Zip archive (*.zip)",
+        )
+        if not out_zip:
+            return
+        try:
+            zip_path = export_project_package(self.project_root, out_zip)
+            self.iface.messageBar().pushInfo("RasterLinker", f"Package exported: {zip_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Package", f"Unable to export package:\n{e}")
+
+    def _import_package(self):
+        zip_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Project Package",
+            "",
+            "Zip archive (*.zip)",
+        )
+        if not zip_path:
+            return
+        target = QFileDialog.getExistingDirectory(self, "Select destination project folder")
+        if not target:
+            return
+        try:
+            import_project_package(zip_path, target)
+            self.path_edit.setText(target)
+            self.project_root = target
+            self.iface.messageBar().pushInfo("RasterLinker", f"Package imported: {target}")
+        except Exception as e:
+            QMessageBox.critical(self, "Import Package", f"Unable to import package:\n{e}")
+
+    def _open_catalog_editor(self):
+        if not self._ensure_project_ready():
+            return
+        dlg = CatalogEditorDialog(self.project_root, self)
+        dlg.exec_()
+
     def _view_catalog_summary(self):
         if not self._ensure_project_ready():
             return
@@ -309,3 +438,54 @@ class ProjectManagerDialog(QDialog):
         if len(issues) > 30:
             preview += f"\n... and {len(issues) - 30} more issues."
         QMessageBox.warning(self, "Validation report", preview)
+
+    def _reload_imported_layers(self):
+        if not self._ensure_project_ready():
+            return
+        catalog = load_catalog(self.project_root)
+        project = QgsProject.instance()
+        existing_sources = {layer.source() for layer in project.mapLayers().values()}
+
+        reloaded_models = 0
+        for model in catalog.get("models_3d", []):
+            p = model.get("project_path")
+            if not p or not os.path.exists(p):
+                continue
+            if p in existing_sources:
+                continue
+            layer_name = model.get("normalized_name") or os.path.basename(p)
+            pc_layer = QgsPointCloudLayer(p, layer_name, "pdal")
+            if pc_layer.isValid():
+                project.addMapLayer(pc_layer)
+                reloaded_models += 1
+
+        self.iface.messageBar().pushInfo(
+            "RasterLinker",
+            f"Reload complete. Point-cloud layers added: {reloaded_models}",
+        )
+
+    def _cleanup_catalog(self):
+        if not self._ensure_project_ready():
+            return
+        catalog = load_catalog(self.project_root)
+
+        before_models = len(catalog.get("models_3d", []))
+        before_radargrams = len(catalog.get("radargrams", []))
+
+        catalog["models_3d"] = [
+            m for m in catalog.get("models_3d", [])
+            if m.get("project_path") and os.path.exists(m.get("project_path"))
+        ]
+        catalog["radargrams"] = [
+            r for r in catalog.get("radargrams", [])
+            if r.get("project_path") and os.path.exists(r.get("project_path"))
+        ]
+
+        save_catalog(self.project_root, catalog)
+
+        removed_models = before_models - len(catalog["models_3d"])
+        removed_radargrams = before_radargrams - len(catalog["radargrams"])
+        self.iface.messageBar().pushInfo(
+            "RasterLinker",
+            f"Catalog cleanup done. Removed models: {removed_models}, radargrams: {removed_radargrams}",
+        )

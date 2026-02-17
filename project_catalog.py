@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import zipfile
 from datetime import datetime, timezone
 
 
@@ -87,6 +88,10 @@ def _slugify_filename(name):
     return f"{base}{ext.lower()}"
 
 
+def sanitize_filename(name):
+    return _slugify_filename(name)
+
+
 def _unique_destination_path(directory, filename):
     os.makedirs(directory, exist_ok=True)
     candidate = os.path.join(directory, filename)
@@ -115,3 +120,33 @@ def normalize_copy_into_project(project_root, subfolder, source_path):
     destination_path = _unique_destination_path(destination_dir, normalized_name)
     shutil.copy2(source_path, destination_path)
     return destination_path, os.path.basename(destination_path)
+
+
+def export_project_package(project_root, output_zip_path):
+    """
+    Export entire project folder as zip package.
+    """
+    if not os.path.isdir(project_root):
+        raise FileNotFoundError(project_root)
+    if not output_zip_path.lower().endswith(".zip"):
+        output_zip_path += ".zip"
+
+    with zipfile.ZipFile(output_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(project_root):
+            for fn in files:
+                abs_path = os.path.join(root, fn)
+                rel_path = os.path.relpath(abs_path, project_root)
+                zf.write(abs_path, rel_path)
+    return output_zip_path
+
+
+def import_project_package(zip_path, target_project_root):
+    """
+    Import project package zip into target folder.
+    """
+    if not os.path.isfile(zip_path):
+        raise FileNotFoundError(zip_path)
+    ensure_project_structure(target_project_root)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(target_project_root)
+    return target_project_root

@@ -1,0 +1,192 @@
+# -*- coding: utf-8 -*-
+"""
+Simple catalog editor for project records.
+"""
+
+import os
+
+from PyQt5.QtWidgets import (
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QComboBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QMessageBox,
+    QInputDialog,
+)
+
+from .project_catalog import load_catalog, save_catalog, sanitize_filename
+
+
+class CatalogEditorDialog(QDialog):
+    def __init__(self, project_root, parent=None):
+        super().__init__(parent)
+        self.project_root = project_root
+        self.setWindowTitle("RasterLinker Catalog Editor")
+        self.resize(880, 420)
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        top = QHBoxLayout()
+        self.kind_combo = QComboBox()
+        self.kind_combo.addItem("3D Models", "models_3d")
+        self.kind_combo.addItem("Radargrams", "radargrams")
+        self.kind_combo.currentIndexChanged.connect(self._refresh)
+        top.addWidget(self.kind_combo)
+
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._refresh)
+        top.addWidget(refresh_btn)
+
+        rename_btn = QPushButton("Rename")
+        rename_btn.clicked.connect(self._rename_selected)
+        top.addWidget(rename_btn)
+
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(self._remove_selected)
+        top.addWidget(remove_btn)
+
+        delete_btn = QPushButton("Delete File + Remove")
+        delete_btn.clicked.connect(self._delete_file_and_remove_selected)
+        top.addWidget(delete_btn)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        top.addWidget(close_btn)
+        layout.addLayout(top)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["ID", "Name", "Project path"])
+        self.table.setSelectionBehavior(self.table.SelectRows)
+        self.table.setEditTriggers(self.table.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+    def _records(self):
+        kind = self.kind_combo.currentData()
+        data = load_catalog(self.project_root)
+        return data, kind, data.get(kind, [])
+
+    def _refresh(self):
+        _, _, records = self._records()
+        self.table.setRowCount(len(records))
+        for i, rec in enumerate(records):
+            rid = rec.get("id", "")
+            name = rec.get("normalized_name") or rec.get("name") or rec.get("file_name") or ""
+            pth = rec.get("project_path", "")
+            self.table.setItem(i, 0, QTableWidgetItem(str(rid)))
+            self.table.setItem(i, 1, QTableWidgetItem(str(name)))
+            self.table.setItem(i, 2, QTableWidgetItem(str(pth)))
+        self.table.resizeColumnsToContents()
+
+    def _selected_row(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        return rows[0].row()
+
+    def _rename_selected(self):
+        row = self._selected_row()
+        if row is None:
+            QMessageBox.information(self, "Catalog Editor", "Select a row first.")
+            return
+
+        data, kind, records = self._records()
+        rec = records[row]
+        old_path = rec.get("project_path")
+        if not old_path or not os.path.exists(old_path):
+            QMessageBox.warning(self, "Catalog Editor", "Selected file does not exist on disk.")
+            return
+
+        old_name = os.path.basename(old_path)
+        new_name, ok = QInputDialog.getText(self, "Rename file", "New file name:", text=old_name)
+        if not ok or not new_name.strip():
+            return
+
+        new_name = sanitize_filename(new_name.strip())
+        new_path = os.path.join(os.path.dirname(old_path), new_name)
+        if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(old_path):
+            QMessageBox.warning(self, "Catalog Editor", "A file with this name already exists.")
+            return
+
+        try:
+            if os.path.abspath(new_path) != os.path.abspath(old_path):
+                os.rename(old_path, new_path)
+            rec["project_path"] = new_path
+            rec["normalized_name"] = new_name
+            save_catalog(self.project_root, data)
+            self._refresh()
+        except Exception as e:
+            QMessageBox.critical(self, "Catalog Editor", f"Rename failed:\n{e}")
+
+    def _remove_selected(self):
+        row = self._selected_row()
+        if row is None:
+            QMessageBox.information(self, "Catalog Editor", "Select a row first.")
+            return
+
+        data, kind, records = self._records()
+        rec = records[row]
+        name = rec.get("normalized_name") or rec.get("id") or "record"
+        answer = QMessageBox.question(
+            self,
+            "Remove record",
+            f"Remove '{name}' from catalog?\nFile on disk will NOT be deleted.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        del records[row]
+        data[kind] = records
+        save_catalog(self.project_root, data)
+        self._refresh()
+
+    def _delete_file_and_remove_selected(self):
+        row = self._selected_row()
+        if row is None:
+            QMessageBox.information(self, "Catalog Editor", "Select a row first.")
+            return
+
+        data, kind, records = self._records()
+        rec = records[row]
+        pth = rec.get("project_path")
+        name = rec.get("normalized_name") or rec.get("id") or "record"
+        if not pth or not os.path.exists(pth):
+            QMessageBox.warning(self, "Catalog Editor", "Selected file is missing on disk.")
+            return
+
+        first = QMessageBox.question(
+            self,
+            "Delete file",
+            f"Delete file from disk and remove '{name}' from catalog?\n\n{pth}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if first != QMessageBox.Yes:
+            return
+
+        second = QMessageBox.question(
+            self,
+            "Confirm irreversible action",
+            "This operation cannot be undone. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if second != QMessageBox.Yes:
+            return
+
+        try:
+            os.remove(pth)
+            del records[row]
+            data[kind] = records
+            save_catalog(self.project_root, data)
+            self._refresh()
+        except Exception as e:
+            QMessageBox.critical(self, "Catalog Editor", f"Delete failed:\n{e}")
