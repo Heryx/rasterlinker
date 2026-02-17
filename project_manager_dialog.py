@@ -5,6 +5,7 @@ Simple Project Manager dialog for 2D/3D project folder workflow.
 
 import os
 import json
+import shutil
 
 from PyQt5.QtWidgets import (
     QDialog,
@@ -18,7 +19,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QMessageBox,
 )
-from qgis.core import QgsProject, QgsPointCloudLayer
+from qgis.core import QgsProject, QgsPointCloudLayer, QgsRasterLayer
 
 from .project_catalog import (
     ensure_project_structure,
@@ -26,14 +27,17 @@ from .project_catalog import (
     save_catalog,
     register_model_3d,
     register_radargram,
+    save_radargram_sidecar,
+    validate_catalog,
     normalize_copy_into_project,
     export_project_package,
     import_project_package,
     utc_now_iso,
 )
 from .pointcloud_metadata import inspect_las_laz
-from .radargram_metadata import inspect_radargram
+from .radargram_metadata import inspect_radargram, find_worldfile
 from .catalog_editor_dialog import CatalogEditorDialog
+from .link_editor_dialog import LinkEditorDialog
 
 
 class ProjectManagerDialog(QDialog):
@@ -122,7 +126,12 @@ class ProjectManagerDialog(QDialog):
         reload_btn = QPushButton("Reload Layers")
         reload_btn.clicked.connect(self._reload_imported_layers)
         reload_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(reload_btn, 2, 0, 1, 2)
+        catalog_layout.addWidget(reload_btn, 2, 0)
+
+        links_btn = QPushButton("Link Editor")
+        links_btn.clicked.connect(self._open_link_editor)
+        links_btn.setMinimumHeight(28)
+        catalog_layout.addWidget(links_btn, 2, 1)
 
         package_box = QGroupBox("Package")
         package_layout = QGridLayout(package_box)
@@ -249,12 +258,19 @@ class ProjectManagerDialog(QDialog):
         if not file_paths:
             return
 
+        proceed = self._preflight_radargram_import(file_paths)
+        if not proceed:
+            return
+
         imported = 0
+        mapped = 0
+        catalog_only = 0
         for file_path in file_paths:
             try:
                 project_path, normalized_name = normalize_copy_into_project(
                     self.project_root, "radargrams", file_path
                 )
+                self._copy_radargram_worldfile_if_present(file_path, project_path)
                 meta = inspect_radargram(project_path)
                 meta.update(
                     {
@@ -265,12 +281,22 @@ class ProjectManagerDialog(QDialog):
                         "imported_at": utc_now_iso(),
                     }
                 )
+                geo_info = self._classify_radargram_georef(project_path)
+                meta.update(geo_info)
                 register_radargram(self.project_root, meta)
+                save_radargram_sidecar(self.project_root, meta)
+                if meta.get("import_mode") == "mapped":
+                    mapped += 1
+                else:
+                    catalog_only += 1
                 imported += 1
             except Exception as e:
                 QMessageBox.warning(self, "Import warning", f"{file_path}\n{e}")
 
-        self.iface.messageBar().pushInfo("RasterLinker", f"Radargrams import completed ({imported}).")
+        self.iface.messageBar().pushInfo(
+            "RasterLinker",
+            f"Radargrams import completed ({imported}) - mapped: {mapped}, catalog-only: {catalog_only}.",
+        )
 
     def _import_manifest(self):
         if not self._ensure_project_ready():
@@ -327,6 +353,7 @@ class ProjectManagerDialog(QDialog):
                 project_path, normalized_name = normalize_copy_into_project(
                     self.project_root, "radargrams", source_path
                 )
+                self._copy_radargram_worldfile_if_present(source_path, project_path)
                 meta = inspect_radargram(project_path)
                 meta.update(
                     {
@@ -338,7 +365,10 @@ class ProjectManagerDialog(QDialog):
                         "manifest_source": manifest_path,
                     }
                 )
+                geo_info = self._classify_radargram_georef(project_path)
+                meta.update(geo_info)
                 register_radargram(self.project_root, meta)
+                save_radargram_sidecar(self.project_root, meta)
                 imported_radargrams += 1
             except Exception:
                 continue
@@ -354,6 +384,108 @@ class ProjectManagerDialog(QDialog):
             "RasterLinker",
             f"Manifest import completed (models: {imported_models}, radargrams: {imported_radargrams}).",
         )
+
+    def _classify_radargram_georef(self, project_path):
+        """
+        Classify imported radargram as 'mapped' or 'catalog_only' based on available georeference.
+        """
+        ext = os.path.splitext(project_path)[1].lower()
+        worldfile = find_worldfile(project_path)
+        has_worldfile = bool(worldfile)
+
+        if ext in {".png", ".jpg", ".jpeg", ".bmp"}:
+            if has_worldfile:
+                return {
+                    "import_mode": "mapped",
+                    "georef_level": "worldfile",
+                    "worldfile_path": worldfile,
+                }
+            return {
+                "import_mode": "catalog_only",
+                "georef_level": "none",
+                "worldfile_path": None,
+                "georef_warning": "Missing worldfile for image radargram.",
+            }
+
+        if ext in {".tif", ".tiff"}:
+            raster = QgsRasterLayer(project_path, "radargram_probe")
+            if raster.isValid() and raster.crs().isValid():
+                return {
+                    "import_mode": "mapped",
+                    "georef_level": "embedded",
+                    "worldfile_path": worldfile,
+                    "crs": raster.crs().authid(),
+                }
+            if has_worldfile:
+                return {
+                    "import_mode": "mapped",
+                    "georef_level": "worldfile",
+                    "worldfile_path": worldfile,
+                }
+            return {
+                "import_mode": "catalog_only",
+                "georef_level": "none",
+                "worldfile_path": None,
+                "georef_warning": "TIFF without embedded georeference or worldfile.",
+            }
+
+        return {
+            "import_mode": "catalog_only",
+            "georef_level": "none",
+            "worldfile_path": None,
+            "georef_warning": "Format imported as catalog-only (non-raster georeference not available).",
+        }
+
+    def _copy_radargram_worldfile_if_present(self, source_path, project_path):
+        source_wf = find_worldfile(source_path)
+        if not source_wf:
+            return None
+        _, wf_ext = os.path.splitext(source_wf)
+        target_wf = os.path.splitext(project_path)[0] + wf_ext.lower()
+        shutil.copy2(source_wf, target_wf)
+        return target_wf
+
+    def _preflight_radargram_import(self, file_paths):
+        catalog = load_catalog(self.project_root)
+        existing_project_names = {
+            (r.get("normalized_name") or "").lower() for r in catalog.get("radargrams", [])
+        }
+        existing_source_paths = {
+            os.path.normcase(r.get("source_path") or "") for r in catalog.get("radargrams", [])
+        }
+
+        possible_catalog_only = 0
+        duplicate_sources = 0
+        duplicate_names = 0
+
+        for file_path in file_paths:
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in {".png", ".jpg", ".jpeg", ".bmp"} and not find_worldfile(file_path):
+                possible_catalog_only += 1
+            if os.path.normcase(file_path) in existing_source_paths:
+                duplicate_sources += 1
+            norm_name = os.path.basename(file_path).lower()
+            if norm_name in existing_project_names:
+                duplicate_names += 1
+
+        if not (possible_catalog_only or duplicate_sources or duplicate_names):
+            return True
+
+        msg = (
+            f"Preflight checks:\n"
+            f"- Image files without worldfile (likely catalog-only): {possible_catalog_only}\n"
+            f"- Already imported source paths: {duplicate_sources}\n"
+            f"- Potential duplicate names in project: {duplicate_names}\n\n"
+            "Continue import anyway?"
+        )
+        answer = QMessageBox.question(
+            self,
+            "Radargram Import Preflight",
+            msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
 
     def _export_package(self):
         if not self._ensure_project_ready():
@@ -398,12 +530,19 @@ class ProjectManagerDialog(QDialog):
         dlg = CatalogEditorDialog(self.project_root, self)
         dlg.exec_()
 
+    def _open_link_editor(self):
+        if not self._ensure_project_ready():
+            return
+        dlg = LinkEditorDialog(self.project_root, self)
+        dlg.exec_()
+
     def _view_catalog_summary(self):
         if not self._ensure_project_ready():
             return
         catalog = load_catalog(self.project_root)
         msg = (
             f"Project: {self.project_root}\n"
+            f"Schema version: {catalog.get('schema_version')}\n"
             f"Models 3D: {len(catalog.get('models_3d', []))}\n"
             f"Radargrams: {len(catalog.get('radargrams', []))}\n"
             f"Timeslices: {len(catalog.get('timeslices', []))}\n"
@@ -415,29 +554,31 @@ class ProjectManagerDialog(QDialog):
     def _validate_project(self):
         if not self._ensure_project_ready():
             return
-        catalog = load_catalog(self.project_root)
-        issues = []
-
-        for model in catalog.get("models_3d", []):
-            p = model.get("project_path")
-            if not p or not os.path.exists(p):
-                issues.append(f"Missing model file: {p}")
-            if not model.get("crs"):
-                issues.append(f"Model without CRS: {model.get('normalized_name') or model.get('name')}")
-
-        for rg in catalog.get("radargrams", []):
-            p = rg.get("project_path")
-            if not p or not os.path.exists(p):
-                issues.append(f"Missing radargram file: {p}")
-
-        if not issues:
+        report = validate_catalog(self.project_root)
+        errors = report.get("errors", [])
+        warnings = report.get("warnings", [])
+        if not errors and not warnings:
             self.iface.messageBar().pushInfo("RasterLinker", "Validation passed: no issues found.")
             return
 
-        preview = "\n".join(issues[:30])
-        if len(issues) > 30:
-            preview += f"\n... and {len(issues) - 30} more issues."
-        QMessageBox.warning(self, "Validation report", preview)
+        lines = [f"Errors: {len(errors)}", f"Warnings: {len(warnings)}", ""]
+        if errors:
+            lines.append("[Errors]")
+            lines.extend(errors[:20])
+            if len(errors) > 20:
+                lines.append(f"... and {len(errors) - 20} more errors.")
+            lines.append("")
+        if warnings:
+            lines.append("[Warnings]")
+            lines.extend(warnings[:20])
+            if len(warnings) > 20:
+                lines.append(f"... and {len(warnings) - 20} more warnings.")
+
+        title = "Validation report"
+        if errors:
+            QMessageBox.warning(self, title, "\n".join(lines))
+        else:
+            QMessageBox.information(self, title, "\n".join(lines))
 
     def _reload_imported_layers(self):
         if not self._ensure_project_ready():

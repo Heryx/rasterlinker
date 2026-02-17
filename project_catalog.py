@@ -18,6 +18,21 @@ PROJECT_FOLDERS = (
     "exports",
     "metadata",
 )
+CATALOG_SCHEMA_VERSION = 2
+
+
+def _default_catalog(project_root):
+    now = utc_now_iso()
+    return {
+        "schema_version": CATALOG_SCHEMA_VERSION,
+        "project_root": project_root,
+        "created_at": now,
+        "updated_at": now,
+        "models_3d": [],
+        "radargrams": [],
+        "timeslices": [],
+        "links": [],
+    }
 
 
 def utc_now_iso():
@@ -44,20 +59,14 @@ def catalog_path(project_root):
 def load_catalog(project_root):
     path = catalog_path(project_root)
     if not os.path.exists(path):
-        return {
-            "project_root": project_root,
-            "created_at": utc_now_iso(),
-            "updated_at": utc_now_iso(),
-            "models_3d": [],
-            "radargrams": [],
-            "timeslices": [],
-            "links": [],
-        }
+        return _default_catalog(project_root)
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        loaded = json.load(f)
+    return ensure_catalog_schema(project_root, loaded)
 
 
 def save_catalog(project_root, data):
+    data = ensure_catalog_schema(project_root, data)
     data["updated_at"] = utc_now_iso()
     path = catalog_path(project_root)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -68,14 +77,203 @@ def save_catalog(project_root, data):
 
 def register_model_3d(project_root, model_record):
     data = load_catalog(project_root)
-    data["models_3d"].append(model_record)
+    data["models_3d"].append(normalize_model_record(model_record))
     return save_catalog(project_root, data)
 
 
 def register_radargram(project_root, radargram_record):
     data = load_catalog(project_root)
-    data["radargrams"].append(radargram_record)
+    data["radargrams"].append(normalize_radargram_record(radargram_record))
     return save_catalog(project_root, data)
+
+
+def register_link(project_root, link_record):
+    data = load_catalog(project_root)
+    data["links"].append(normalize_link_record(link_record))
+    return save_catalog(project_root, data)
+
+
+def ensure_catalog_schema(project_root, data):
+    if not isinstance(data, dict):
+        data = {}
+
+    default = _default_catalog(project_root)
+    for key, value in default.items():
+        if key not in data:
+            data[key] = value if not isinstance(value, list) else []
+
+    data["schema_version"] = int(data.get("schema_version") or CATALOG_SCHEMA_VERSION)
+    data["project_root"] = project_root
+    data["models_3d"] = [normalize_model_record(v) for v in data.get("models_3d", []) if isinstance(v, dict)]
+    data["radargrams"] = [normalize_radargram_record(v) for v in data.get("radargrams", []) if isinstance(v, dict)]
+    data["timeslices"] = [normalize_timeslice_record(v) for v in data.get("timeslices", []) if isinstance(v, dict)]
+    data["links"] = [normalize_link_record(v) for v in data.get("links", []) if isinstance(v, dict)]
+    return data
+
+
+def normalize_model_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"model_{utc_now_iso()}")
+    rec.setdefault("normalized_name", rec.get("file_name", ""))
+    rec.setdefault("source_path", "")
+    rec.setdefault("project_path", "")
+    rec.setdefault("imported_at", utc_now_iso())
+    rec.setdefault("crs", None)
+    return rec
+
+
+def normalize_radargram_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"radargram_{utc_now_iso()}")
+    rec.setdefault("normalized_name", rec.get("file_name", ""))
+    rec.setdefault("source_path", "")
+    rec.setdefault("project_path", "")
+    rec.setdefault("imported_at", utc_now_iso())
+    rec.setdefault("import_mode", "catalog_only")
+    rec.setdefault("georef_level", "none")
+    rec.setdefault("line_id", None)
+    rec.setdefault("timeslice_id", None)
+    rec.setdefault("trace_count", None)
+    rec.setdefault("trace_spacing", None)
+    rec.setdefault("sample_interval", None)
+    rec.setdefault("time_zero", None)
+    rec.setdefault("velocity", None)
+    rec.setdefault("crs", rec.get("crs", None))
+    rec.setdefault("notes", "")
+    return rec
+
+
+def normalize_timeslice_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"timeslice_{utc_now_iso()}")
+    rec.setdefault("name", rec.get("normalized_name", ""))
+    rec.setdefault("project_path", rec.get("path", ""))
+    rec.setdefault("depth_from", None)
+    rec.setdefault("depth_to", None)
+    rec.setdefault("unit", "m")
+    rec.setdefault("crs", None)
+    rec.setdefault("imported_at", utc_now_iso())
+    return rec
+
+
+def normalize_link_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"link_{utc_now_iso()}")
+    rec.setdefault("radargram_id", None)
+    rec.setdefault("timeslice_id", None)
+    rec.setdefault("line_id", None)
+    rec.setdefault("trace_from", None)
+    rec.setdefault("trace_to", None)
+    rec.setdefault("confidence", 1.0)
+    rec.setdefault("notes", "")
+    rec.setdefault("created_at", utc_now_iso())
+    return rec
+
+
+def validate_catalog(project_root, catalog_data=None):
+    data = ensure_catalog_schema(project_root, catalog_data or load_catalog(project_root))
+    errors = []
+    warnings = []
+
+    radargram_ids = set()
+    timeslice_ids = set()
+
+    for model in data.get("models_3d", []):
+        if not model.get("project_path"):
+            errors.append("Model missing project_path.")
+        elif not os.path.exists(model.get("project_path")):
+            errors.append(f"Missing model file: {model.get('project_path')}")
+        if not model.get("crs"):
+            warnings.append(f"Model without CRS: {model.get('normalized_name') or model.get('id')}")
+
+    for rg in data.get("radargrams", []):
+        rid = rg.get("id")
+        if rid:
+            if rid in radargram_ids:
+                errors.append(f"Duplicate radargram id: {rid}")
+            radargram_ids.add(rid)
+        else:
+            errors.append("Radargram missing id.")
+        if not rg.get("project_path"):
+            errors.append(f"Radargram without project_path: {rid}")
+        elif not os.path.exists(rg.get("project_path")):
+            errors.append(f"Missing radargram file: {rg.get('project_path')}")
+        if rg.get("import_mode") == "mapped" and rg.get("georef_level") == "none":
+            warnings.append(f"Radargram marked mapped but georef_level is none: {rid}")
+
+    for ts in data.get("timeslices", []):
+        tid = ts.get("id")
+        if tid:
+            if tid in timeslice_ids:
+                errors.append(f"Duplicate timeslice id: {tid}")
+            timeslice_ids.add(tid)
+        else:
+            errors.append("Timeslice missing id.")
+        pth = ts.get("project_path")
+        if pth and not os.path.exists(pth):
+            warnings.append(f"Missing timeslice file: {pth}")
+
+    for ln in data.get("links", []):
+        link_id = ln.get("id")
+        rid = ln.get("radargram_id")
+        tid = ln.get("timeslice_id")
+        lid = ln.get("line_id")
+
+        if not rid:
+            errors.append(f"Link without radargram_id: {link_id}")
+        elif rid not in radargram_ids:
+            warnings.append(f"Link references unknown radargram_id: {rid}")
+
+        if not tid and not lid:
+            warnings.append(f"Link without timeslice_id and line_id: {link_id}")
+        if tid and tid not in timeslice_ids:
+            warnings.append(f"Link references unknown timeslice_id: {tid}")
+
+    return {"errors": errors, "warnings": warnings, "catalog": data}
+
+
+def save_radargram_sidecar(project_root, radargram_record):
+    """
+    Save or update a radargram sidecar metadata JSON used for line/timeslice linking.
+    """
+    metadata_dir = os.path.join(project_root, "metadata", "radargram_sidecars")
+    os.makedirs(metadata_dir, exist_ok=True)
+
+    rid = radargram_record.get("id", f"radargram_{utc_now_iso()}").replace(":", "_")
+    sidecar_path = os.path.join(metadata_dir, f"{rid}.json")
+
+    payload = {
+        "schema_version": CATALOG_SCHEMA_VERSION,
+        "id": radargram_record.get("id"),
+        "normalized_name": radargram_record.get("normalized_name"),
+        "project_path": radargram_record.get("project_path"),
+        "source_path": radargram_record.get("source_path"),
+        "imported_at": radargram_record.get("imported_at"),
+        "import_mode": radargram_record.get("import_mode", "catalog_only"),
+        "georef_level": radargram_record.get("georef_level", "none"),
+        "line_id": radargram_record.get("line_id"),
+        "timeslice_id": radargram_record.get("timeslice_id"),
+        "start_xy": radargram_record.get("start_xy"),
+        "end_xy": radargram_record.get("end_xy"),
+        "trace_count": radargram_record.get("trace_count"),
+        "trace_spacing": radargram_record.get("trace_spacing"),
+        "sample_interval": radargram_record.get("sample_interval"),
+        "time_zero": radargram_record.get("time_zero"),
+        "velocity": radargram_record.get("velocity"),
+        "notes": radargram_record.get("notes", ""),
+        "auto_detected": {
+            "width": radargram_record.get("width"),
+            "height": radargram_record.get("height"),
+            "rows": radargram_record.get("rows"),
+            "cols": radargram_record.get("cols"),
+            "shape": radargram_record.get("shape"),
+            "crs": radargram_record.get("crs"),
+        },
+    }
+
+    with open(sidecar_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=True)
+    return sidecar_path
 
 
 def _slugify_filename(name):

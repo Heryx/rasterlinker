@@ -9,6 +9,17 @@ import os
 from PyQt5.QtGui import QImageReader
 
 
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+WORLDFILE_EXTENSIONS = {
+    ".png": [".pgw", ".pngw", ".wld"],
+    ".jpg": [".jgw", ".jpgw", ".wld"],
+    ".jpeg": [".jgw", ".jpegw", ".wld"],
+    ".tif": [".tfw", ".tifw", ".wld"],
+    ".tiff": [".tfw", ".tiffw", ".wld"],
+    ".bmp": [".bpw", ".bmpw", ".wld"],
+}
+
+
 def _inspect_image(file_path):
     reader = QImageReader(file_path)
     size = reader.size()
@@ -77,7 +88,7 @@ def inspect_radargram(file_path):
         "size_bytes": os.path.getsize(file_path),
     }
 
-    if ext in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}:
+    if ext in IMAGE_EXTENSIONS:
         meta.update(_inspect_image(file_path))
     elif ext == ".npy":
         meta.update(_inspect_npy(file_path))
@@ -85,3 +96,13 @@ def inspect_radargram(file_path):
         meta.update(_inspect_text_matrix(file_path))
 
     return meta
+
+
+def find_worldfile(file_path):
+    base, ext = os.path.splitext(file_path)
+    ext = ext.lower()
+    for wf_ext in WORLDFILE_EXTENSIONS.get(ext, []):
+        candidate = base + wf_ext
+        if os.path.exists(candidate):
+            return candidate
+    return None
