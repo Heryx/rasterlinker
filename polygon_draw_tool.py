@@ -1,4 +1,4 @@
-import math
+﻿import math
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
@@ -11,10 +11,10 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
     """
     Strumento per disegnare un poligono.
 
-    Modalita 1 (default): disegno libero con click sinistro e chiusura con destro/Invio.
-    Modalita 2 (orientata): click primo punto, orienta col mouse, poi tasto D
-    (o click centrale) per bloccare
-    orientamento e inserire lunghezza/larghezza numeriche del rettangolo.
+    Mode 1 (default): free drawing with left click and close with right click/Enter.
+    Mode 2 (oriented): click first point, orient with mouse, then press D
+    (or middle click) to lock
+    orientation and enter numeric rectangle length/width.
     """
 
     def __init__(self, canvas, parent_plugin):
@@ -41,7 +41,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         self.polygon_rubber_band.setWidth(1)
 
         if not self.canvas:
-            QMessageBox.critical(None, "Errore", "Canvas non valido.")
+            QMessageBox.critical(None, "Error", "Invalid canvas.")
 
     def canvasReleaseEvent(self, event):
         try:
@@ -72,7 +72,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             elif event.button() == Qt.RightButton:
                 self.finish_polygon()
         except Exception as e:
-            QMessageBox.critical(None, "Errore", f"Errore durante l'aggiunta del punto: {e}")
+            QMessageBox.critical(None, "Error", f"Error while adding point: {e}")
 
     def canvasMoveEvent(self, event):
         if not self.points:
@@ -103,7 +103,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
 
     def _lock_orientation_and_build_rectangle(self):
         if not self.points:
-            self._notify_info("Fai prima click sul punto di origine.")
+            self._notify_info("Click the origin point first.")
             return
 
         origin = self.points[0]
@@ -112,7 +112,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             reference = self.points[1]
 
         if reference is None:
-            self._notify_info("Muovi il mouse per orientare la base, poi premi D o click centrale.")
+            self._notify_info("Move the mouse to orient the base, then press D or middle-click.")
             return
 
         angle = self._compute_angle(origin, reference)
@@ -130,12 +130,12 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         if preferred_mode == "canvas":
             self.dimension_pick_mode = "length"
             self.pending_length = None
-            self._notify_info("Canvas mode: click 1 lunghezza, click 2 larghezza.")
+            self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
             return
 
         choice = QMessageBox(None)
         choice.setWindowTitle("Dimensioni area")
-        choice.setText("Come vuoi definire lunghezza e larghezza?")
+        choice.setText("How do you want to define length and width?")
         manual_btn = choice.addButton("Inserimento manuale", QMessageBox.AcceptRole)
         canvas_btn = choice.addButton("Da canvas", QMessageBox.ActionRole)
         cancel_btn = choice.addButton(QMessageBox.Cancel)
@@ -150,7 +150,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         if clicked == canvas_btn:
             self.dimension_pick_mode = "length"
             self.pending_length = None
-            self._notify_info("Canvas mode: click 1 lunghezza, click 2 larghezza.")
+            self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
 
     def _compute_angle(self, origin, reference):
         dx = reference.x() - origin.x()
@@ -208,7 +208,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         length, ok_len = QInputDialog.getDouble(
             None,
             "Lunghezza totale area",
-            "Inserisci lunghezza totale:",
+            "Enter total length:",
             self.last_total_length,
             0.0001,
             1e12,
@@ -220,7 +220,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         width, ok_wid = QInputDialog.getDouble(
             None,
             "Larghezza totale area",
-            "Inserisci larghezza totale:",
+            "Enter total width:",
             self.last_total_width,
             0.0001,
             1e12,
@@ -251,7 +251,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
                 return
             self.pending_length = length
             self.dimension_pick_mode = "width"
-            self._notify_info("Ora clicca per impostare la larghezza.")
+            self._notify_info("Now click to set width.")
             return
 
         if self.dimension_pick_mode == "width":
@@ -282,14 +282,14 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
 
     def finish_polygon(self):
         if len(self.points) < 3:
-            QMessageBox.warning(None, "Errore", "Un poligono deve avere almeno 3 vertici.")
+            QMessageBox.warning(None, "Error", "A polygon must have at least 3 vertices.")
             return
 
         try:
             project_crs = QgsProject.instance().crs()
             polygon_layer = QgsVectorLayer(f"Polygon?crs={project_crs.authid()}", "Poligono Disegnato", "memory")
             if not polygon_layer.isValid():
-                raise Exception("Errore nella creazione del layer poligonale.")
+                raise Exception("Error nella creazione del layer poligonale.")
 
             pr = polygon_layer.dataProvider()
             feature = QgsFeature()
@@ -301,9 +301,9 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             if hasattr(self.parent_plugin, "create_grid_from_drawn_polygon"):
                 self.parent_plugin.create_grid_from_drawn_polygon(polygon_layer)
 
-            self._notify_info("Poligono creato.")
+            self._notify_info("Polygon created.")
         except Exception as e:
-            QMessageBox.critical(None, "Errore", f"Errore durante la creazione del poligono: {e}")
+            QMessageBox.critical(None, "Error", f"Error durante la creazione del poligono: {e}")
         finally:
             self.reset()
             self.canvas.unsetMapTool(self)
@@ -424,3 +424,4 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
     def deactivate(self):
         self.reset()
         super().deactivate()
+

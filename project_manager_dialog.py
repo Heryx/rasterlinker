@@ -502,6 +502,38 @@ class ProjectManagerDialog(QDialog):
             },
         }
 
+    def _timeslice_georef_warnings(self, meta):
+        warnings = []
+        extent = meta.get("extent") or {}
+        xmin = extent.get("xmin")
+        xmax = extent.get("xmax")
+        ymin = extent.get("ymin")
+        ymax = extent.get("ymax")
+        crs_authid = (meta.get("crs") or "").strip()
+        project_crs = QgsProject.instance().crs()
+
+        if not crs_authid:
+            warnings.append("Missing CRS in raster metadata.")
+        elif project_crs.isValid() and crs_authid != project_crs.authid():
+            warnings.append(f"CRS mismatch: raster {crs_authid}, project {project_crs.authid()}.")
+
+        if None in (xmin, xmax, ymin, ymax):
+            return warnings
+
+        x_span = float(xmax) - float(xmin)
+        y_span = float(ymax) - float(ymin)
+        if x_span <= 0 or y_span <= 0:
+            warnings.append("Invalid extent (non-positive width/height).")
+            return warnings
+
+        if max(abs(float(xmin)), abs(float(xmax)), abs(float(ymin)), abs(float(ymax))) < 1.0:
+            warnings.append("Extent is very close to origin (0,0).")
+
+        if max(abs(float(xmin)), abs(float(xmax)), abs(float(ymin)), abs(float(ymax))) > 1e8:
+            warnings.append("Extent coordinates are unusually large.")
+
+        return warnings
+
     def _import_timeslices(self):
         if not self._ensure_project_ready():
             return
@@ -518,12 +550,14 @@ class ProjectManagerDialog(QDialog):
         imported = 0
         imported_ids = []
         imported_paths = []
+        georef_warnings = []
         for file_path in file_paths:
             try:
                 project_path, normalized_name = normalize_copy_into_project(
                     self.project_root, "timeslices_2d", file_path
                 )
                 meta = self._inspect_timeslice(project_path)
+                warn_list = self._timeslice_georef_warnings(meta)
                 meta.update(
                     {
                         "id": f"timeslice_{utc_now_iso()}_{normalized_name}",
@@ -534,6 +568,9 @@ class ProjectManagerDialog(QDialog):
                         "imported_at": utc_now_iso(),
                     }
                 )
+                if warn_list:
+                    meta["georef_warnings"] = warn_list
+                    georef_warnings.append((normalized_name, warn_list))
                 register_timeslice(self.project_root, meta)
                 imported_ids.append(meta.get("id"))
                 imported_paths.append(project_path)
@@ -542,6 +579,18 @@ class ProjectManagerDialog(QDialog):
                 QMessageBox.warning(self, "Import warning", f"{file_path}\n{e}")
 
         self.iface.messageBar().pushInfo("RasterLinker", f"Time-slices import completed ({imported}).")
+        if georef_warnings:
+            preview_lines = []
+            for name, warns in georef_warnings[:12]:
+                preview_lines.append(f"{name}: {'; '.join(warns)}")
+            more = len(georef_warnings) - len(preview_lines)
+            if more > 0:
+                preview_lines.append(f"... and {more} more.")
+            QMessageBox.warning(
+                self,
+                "Time-slice Georeference Warnings",
+                "Potential georeference issues detected:\n\n" + "\n".join(preview_lines),
+            )
         self._notify_project_updated()
 
         if imported <= 0:

@@ -1,7 +1,7 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 polygon_grid_creator.py
-Genera una griglia di celle poligonali orientate in base al poligono disegnato.
+Generate an oriented polygon-cell grid from the drawn polygon.
 """
 
 import math
@@ -19,7 +19,7 @@ from qgis.PyQt.QtCore import QVariant
 
 def _largest_edge_angle_rad(geometry):
     """
-    Calcola l'orientamento (radianti) dal lato più lungo del minimum rotated rectangle.
+    Compute orientation (radians) from the longest edge of the minimum rotated rectangle.
     """
     ombb = geometry.orientedMinimumBoundingBox()
     box_geom = ombb[0] if isinstance(ombb, (tuple, list)) else ombb
@@ -45,7 +45,7 @@ def _largest_edge_angle_rad(geometry):
 
 def _build_rotated_cell(u0, u1, v0, v1, ux, uy):
     """
-    Crea la geometria di una cella usando coordinate locali (u, v) ruotate.
+    Create a cell geometry using rotated local coordinates (u, v).
     """
     p1 = QgsPointXY(u0 * ux[0] + v0 * uy[0], u0 * ux[1] + v0 * uy[1])
     p2 = QgsPointXY(u1 * ux[0] + v0 * uy[0], u1 * ux[1] + v0 * uy[1])
@@ -56,7 +56,7 @@ def _build_rotated_cell(u0, u1, v0, v1, ux, uy):
 
 def _axis_breaks(min_value, max_value, step):
     """
-    Genera breakpoints ancorati al bordo minimo dell'area (no snap a griglia globale).
+    Generate breakpoints anchored to area min boundary (no global-grid snap).
     """
     if max_value <= min_value:
         return [min_value, max_value]
@@ -80,31 +80,31 @@ def create_grid_from_polygon(
     max_cells=120000,
 ):
     """
-    Crea celle poligonali orientate e ritagliate sul poligono di input.
+    Create oriented polygon cells clipped by the input polygon.
 
     Args:
-        polygon_layer (QgsVectorLayer): Layer poligonale.
-        distance_x (float): Passo lungo asse principale.
-        distance_y (float): Passo lungo asse secondario.
-        area_name (str): Nome area principale.
-        cell_prefix (str): Prefisso celle.
-        max_cells (int): Numero massimo di celle candidate prima del clip.
+        polygon_layer (QgsVectorLayer): Polygon layer.
+        distance_x (float): Step along main axis.
+        distance_y (float): Step along secondary axis.
+        area_name (str): Main area name.
+        cell_prefix (str): Cell prefix.
+        max_cells (int): Maximum number of candidate cells before clipping.
 
     Returns:
-        QgsVectorLayer: Layer poligonale delle celle.
+        QgsVectorLayer: Cell polygon layer.
     """
     if distance_x <= 0 or distance_y <= 0:
-        raise ValueError("X lenght e Y lenght devono essere maggiori di zero.")
+        raise ValueError("X length and Y length must be greater than zero.")
 
     input_geoms = [f.geometry() for f in polygon_layer.getFeatures() if f.geometry() and not f.geometry().isEmpty()]
     if not input_geoms:
-        raise ValueError("Nessuna geometria valida nel layer poligonale.")
+        raise ValueError("Nessuna geometria valida nel Polygon layer.")
 
     union_geom = QgsGeometry.unaryUnion(input_geoms)
     if union_geom is None or union_geom.isEmpty():
-        raise ValueError("Impossibile costruire la geometria unita dell'area.")
+        raise ValueError("Unable to build union geometry for area.")
 
-    area_name = (area_name or "Area_Indagine").strip()
+    area_name = (area_name or "SurveyArea").strip()
     cell_prefix = (cell_prefix or f"{area_name}_cell").strip()
 
     angle = _largest_edge_angle_rad(union_geom)
@@ -120,7 +120,7 @@ def create_grid_from_polygon(
         projections_v.append(x * uy[0] + y * uy[1])
 
     if not projections_u or not projections_v:
-        raise ValueError("Impossibile calcolare l'orientamento della griglia.")
+        raise ValueError("Unable to compute grid orientation.")
 
     u_min = min(projections_u)
     u_max = max(projections_u)
@@ -195,3 +195,4 @@ def create_grid_from_polygon(
     grid_layer.updateExtents()
     QgsProject.instance().addMapLayer(grid_layer)
     return grid_layer
+

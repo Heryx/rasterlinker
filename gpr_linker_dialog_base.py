@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 
 # Form implementation generated from reading ui file 'gpr_linker_dialog_base.ui'
 #
@@ -210,17 +210,18 @@ class Ui_Dialog(object):
         self.labelx_6.setText(_translate("Dialog", "Cell X (m)"))
         self.createGridButton.setText(_translate("Dialog", "Draw Polygon"))
         self.labelSelezionaRaster.setText(_translate("Dialog", "Lista raster"))
-        self.labelseleziona.setText(_translate("Dialog", "Lista gruppi"))
+        self.labelseleziona.setText(_translate("Dialog", "Group list"))
         self.textBrowser.setHtml(_translate("Dialog", "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n"
 "<html><head><meta name=\"qrichtext\" content=\"1\" /><style type=\"text/css\">\n"
 "p, li { white-space: pre-wrap; }\n"
 "</style></head><body style=\" font-family:\'MS Shell Dlg 2\'; font-size:8.25pt; font-weight:400; font-style:normal;\">\n"
-"<h3 style=\" margin-top:14px; margin-bottom:12px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-size:8pt; font-weight:600;\">Istruzioni:</span></h3>\n"
-"<ol style=\"margin-top: 0px; margin-bottom: 0px; margin-left: 0px; margin-right: 0px; -qt-list-indent: 1;\"><li style=\" font-size:8pt;\" style=\" margin-top:12px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-weight:600;\">Seleziona uno o più gruppi</span> per attivare il Dial.</li>\n"
-"<li style=\" font-size:8pt;\" style=\" margin-top:0px; margin-bottom:12px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-weight:600;\">Ruota la manopola</span> per scorrere le immagini in sequenza all\'interno dei gruppi selezionati.</li></ol></body></html>"))
+"<h3 style=\" margin-top:14px; margin-bottom:12px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-size:8pt; font-weight:600;\">Instructions:</span></h3>\n"
+"<ol style=\"margin-top: 0px; margin-bottom: 0px; margin-left: 0px; margin-right: 0px; -qt-list-indent: 1;\"><li style=\" font-size:8pt;\" style=\" margin-top:12px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-weight:600;\">Select one or more groups</span> to activate the dial.</li>\n"
+"<li style=\" font-size:8pt;\" style=\" margin-top:0px; margin-bottom:12px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-weight:600;\">Turn the dial</span> to browse images in sequence inside selected groups.</li></ol></body></html>"))
         self.lebelstep.setText(_translate("Dialog", "STEPS"))
         self.createGroupButton.setText(_translate("Dialog", "Create Group"))
         self.zoomSelectedGroupsButton.setText(_translate("Dialog", "Zoom to select"))
         self.nomeraster.setText(_translate("Dialog", "Name Raster: "))
         self.labelx.setText(_translate("Dialog", "x0"))
         self.labelx_2.setText(_translate("Dialog", "x1"))
+

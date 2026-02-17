@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
-Helpers per i controlli opzioni griglia nel dock.
+Helpers for grid option controls in the dock.
 """
 
-from PyQt5.QtWidgets import QCheckBox, QComboBox, QLabel, QHBoxLayout, QVBoxLayout, QWidget, QPushButton
+from PyQt5.QtWidgets import QCheckBox, QComboBox, QLabel, QHBoxLayout, QVBoxLayout, QWidget, QPushButton, QGroupBox
 
 
 def build_grid_options_controls(
@@ -15,7 +15,7 @@ def build_grid_options_controls(
     dimension_mode,
 ):
     """
-    Costruisce i controlli UI opzioni griglia e restituisce i widget creati.
+    Builds grid option UI controls and returns created widgets.
     """
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(0)
@@ -24,7 +24,12 @@ def build_grid_options_controls(
     wrapper = QWidget()
     wrapper_layout = QVBoxLayout(wrapper)
     wrapper_layout.setContentsMargins(0, 0, 0, 0)
-    wrapper_layout.setSpacing(2)
+    wrapper_layout.setSpacing(4)
+
+    group = QGroupBox("Drawing Options")
+    group_layout = QVBoxLayout(group)
+    group_layout.setContentsMargins(6, 8, 6, 6)
+    group_layout.setSpacing(4)
 
     top_row = QHBoxLayout()
     top_row.setContentsMargins(0, 0, 0, 0)
@@ -91,9 +96,10 @@ def build_grid_options_controls(
     footer_row.addWidget(length_label)
     footer_row.addStretch(1)
 
-    wrapper_layout.addLayout(top_row)
-    wrapper_layout.addLayout(bottom_row)
-    wrapper_layout.addLayout(footer_row)
+    group_layout.addLayout(top_row)
+    group_layout.addLayout(bottom_row)
+    group_layout.addLayout(footer_row)
+    wrapper_layout.addWidget(group)
     layout.addWidget(wrapper)
 
     return (
@@ -107,3 +113,4 @@ def build_grid_options_controls(
         angle_label,
         length_label,
     )
+

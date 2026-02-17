@@ -1,45 +1,46 @@
-from qgis.gui import QgsMapTool
+﻿from qgis.gui import QgsMapTool
 from qgis.core import QgsPointXY
 from PyQt5.QtWidgets import QMessageBox
 
 
 class GridSelectionTool(QgsMapTool):
     """
-    Tool per selezionare i punti della griglia cliccando sulla mappa.
+    Tool to select grid orientation points by clicking on the map.
     """
     def __init__(self, canvas, parent_plugin):
         super().__init__(canvas)
         self.canvas = canvas
         self.parent_plugin = parent_plugin  # Riferimento al plugin principale
-        self.points = []  # Lista per salvare i punti cliccati
+        self.points = []  # List used to store clicked points
 
     def canvasPressEvent(self, event):
         """
-        Gestisce l'evento di clic sulla mappa.
+        Handles map click events.
         """
-        # Ottieni le coordinate del clic
+        # Get click coordinates
         point = self.toMapCoordinates(event.pos())
 
         if len(self.points) == 0:
-            # Primo clic: definisce (x0, y0)
+            # First click: defines (x0, y0)
             self.points.append(point)
-            QMessageBox.information(None, "Selezione Punto", f"Punto origine (x0, y0): {point.x()}, {point.y()}")
+            QMessageBox.information(None, "Point Selection", f"Origin point (x0, y0): {point.x()}, {point.y()}")
         elif len(self.points) == 1:
-            # Secondo clic: definisce (x1, y0)
+            # Second click: defines (x1, y0)
             self.points.append(point)
-            QMessageBox.information(None, "Selezione Punto", f"Estremità asse X (x1, y0): {point.x()}, {point.y()}")
+            QMessageBox.information(None, "Point Selection", f"EstremitÃ  asse X (x1, y0): {point.x()}, {point.y()}")
         elif len(self.points) == 2:
-            # Terzo clic: definisce (x0, y1)
+            # Third click: defines (x0, y1)
             self.points.append(point)
-            QMessageBox.information(None, "Selezione Punto", f"Estremità asse Y (x0, y1): {point.x()}, {point.y()}")
+            QMessageBox.information(None, "Point Selection", f"EstremitÃ  asse Y (x0, y1): {point.x()}, {point.y()}")
 
-            # Passa i punti al plugin principale per generare la griglia
+            # Pass points to the main plugin to generate the grid
             self.parent_plugin.set_grid_points(self.points)
             self.points = []  # Resetta la lista per la prossima selezione
 
             # Disattiva il tool
             self.canvas.setMapTool(None)
         else:
-            QMessageBox.warning(None, "Errore", "Sono richiesti solo 3 clic per definire la griglia.")
+            QMessageBox.warning(None, "Error", "Only 3 clicks are required to define the grid.")
             self.points = []  # Resetta la lista in caso di errore
+
 

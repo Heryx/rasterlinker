@@ -201,6 +201,7 @@ def normalize_raster_group_record(rec):
     rec.setdefault("name", "Group")
     rec.setdefault("radargram_ids", [])
     rec.setdefault("timeslice_ids", [])
+    rec.setdefault("style_qml_path", "")
     rec["radargram_ids"] = [v for v in rec.get("radargram_ids", []) if v]
     rec["timeslice_ids"] = [v for v in rec.get("timeslice_ids", []) if v]
     rec.setdefault("created_at", utc_now_iso())
@@ -304,6 +305,16 @@ def add_timeslice_to_default_group(project_root, timeslice_id):
     if timeslice_id not in default_group["timeslice_ids"]:
         default_group["timeslice_ids"].append(timeslice_id)
         save_catalog(project_root, data)
+
+
+def update_raster_group(project_root, group_id, updates):
+    data = load_catalog(project_root)
+    group = next((g for g in data.get("raster_groups", []) if g.get("id") == group_id), None)
+    if group is None:
+        raise ValueError(f"Raster group not found: {group_id}")
+    group.update(dict(updates or {}))
+    save_catalog(project_root, data)
+    return group
 
 
 def validate_catalog(project_root, catalog_data=None):
