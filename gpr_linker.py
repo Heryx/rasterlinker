@@ -30,7 +30,16 @@ GPR - QGIS Plugin Implementation
 
 from qgis.PyQt.QtCore import QSettings, QCoreApplication, Qt, QSize
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction, QMessageBox, QFileDialog, QAbstractItemView, QDockWidget, QInputDialog
+from qgis.PyQt.QtWidgets import (
+    QAction,
+    QMessageBox,
+    QFileDialog,
+    QAbstractItemView,
+    QDockWidget,
+    QInputDialog,
+    QProgressDialog,
+    QApplication,
+)
 from qgis.core import (
     QgsPointXY,
     QgsPointLocator,
@@ -74,7 +83,16 @@ from .polygon_grid_creator import create_grid_from_polygon
 from .polygon_draw_tool import PolygonDrawTool
 from .grid_options_ui import build_grid_options_controls
 from .project_manager_dialog import ProjectManagerDialog
-from .project_catalog import load_catalog, create_raster_group, assign_timeslices_to_group, update_raster_group
+from .project_catalog import (
+    load_catalog,
+    create_raster_group,
+    assign_timeslices_to_group,
+    update_raster_group,
+    register_timeslice,
+    remove_timeslices_from_group,
+    normalize_copy_into_project,
+    utc_now_iso,
+)
 from .group_import_dialog import GroupImportDialog
 
 from .resources import *
@@ -127,6 +145,7 @@ class RasterLinkerPlugin:
         self.group_tools_label = None
         self.image_tools_label = None
         self.tools_tabs = None
+        self.load_groups_button = None
         self.bottom_controls_widget = None
         self.dialog_main_layout = None
         self.left_nav_widget = None
@@ -166,13 +185,9 @@ class RasterLinkerPlugin:
             callback=self.open_project_manager,
             parent=self.iface.mainWindow(),
         )
-        pm_icon = self._qgis_theme_icon(
-            "mActionProjectProperties.svg",
-            "mActionOptions.svg",
-            "mActionProjectOpen.svg",
-        )
-        if not pm_icon.isNull():
-            pm_action.setIcon(pm_icon)
+        pm_icon_path = os.path.join(self.plugin_dir, "icon2.png")
+        if os.path.exists(pm_icon_path):
+            pm_action.setIcon(QIcon(pm_icon_path))
         self.first_start = True
 
     def unload(self):
@@ -246,16 +261,21 @@ class RasterLinkerPlugin:
             self.dlg.createGridButton.clicked.connect(self.create_grid_from_polygon_layer)
 
             self.dlg.zoomSelectedGroupsButton.clicked.connect(self.zoom_to_selected_groups)
-            self.dlg.zoomSelectedGroupsButton.setText("Load Groups")
+            self.dlg.zoomSelectedGroupsButton.setText("Zoom Groups")
             self.dlg.zoomSelectedGroupsButton.setToolTip(
-                "Load selected plugin groups into the QGIS layer tree."
+                "Zoom map canvas to the extent of selected plugin groups."
             )
-            self.dlg.zoomSelectedGroupsButton.setStatusTip("Load selected plugin groups")
+            self.dlg.zoomSelectedGroupsButton.setStatusTip("Zoom selected plugin groups")
+            self.load_groups_button = QPushButton("Load Groups")
+            self.load_groups_button.setToolTip("Load selected plugin groups into the QGIS layer tree.")
+            self.load_groups_button.setStatusTip("Load selected plugin groups")
+            self.load_groups_button.clicked.connect(lambda: self.load_raster(show_message=True))
+            self.dlg.gridLayout.addWidget(self.load_groups_button, 8, 0, 1, 1)
             self.import_groups_button = QPushButton("Manage")
             self.import_groups_button.setToolTip("Open group manager to load/unload plugin groups.")
             self.import_groups_button.setStatusTip("Open group manager")
             self.import_groups_button.clicked.connect(self.open_group_import_dialog)
-            self.dlg.gridLayout.addWidget(self.import_groups_button, 1, 1, 1, 1)
+            self.dlg.gridLayout.addWidget(self.import_groups_button, 8, 1, 1, 1)
             self.enhance_minmax_button = QPushButton("Enhance Range")
             self.enhance_minmax_button.setToolTip("Apply Min/Max enhancement to loaded rasters.")
             self.enhance_minmax_button.setStatusTip("Apply min/max enhancement")
@@ -665,16 +685,19 @@ class RasterLinkerPlugin:
         group_layout.setContentsMargins(6, 6, 6, 6)
         group_layout.setHorizontalSpacing(8)
         group_layout.setVerticalSpacing(6)
-        group_layout.addWidget(self.dlg.zoomSelectedGroupsButton, 0, 0, 1, 1)
-        group_layout.addWidget(self.import_groups_button, 0, 1, 1, 1)
-        group_layout.addWidget(self.dlg.createGroupButton, 1, 0, 1, 1)
+        if self.load_groups_button is not None:
+            group_layout.addWidget(self.load_groups_button, 0, 0, 1, 1)
+        group_layout.addWidget(self.dlg.zoomSelectedGroupsButton, 0, 1, 1, 1)
+        group_layout.addWidget(self.import_groups_button, 1, 0, 1, 1)
+        group_layout.addWidget(self.dlg.createGroupButton, 1, 1, 1, 1)
         if hasattr(self.dlg, "groupNameEdit"):
-            group_layout.addWidget(self.dlg.groupNameEdit, 1, 1, 1, 1)
+            group_layout.addWidget(self.dlg.groupNameEdit, 2, 0, 1, 2)
         group_layout.setColumnStretch(0, 1)
         group_layout.setColumnStretch(1, 1)
         group_layout.setRowStretch(0, 0)
         group_layout.setRowStretch(1, 0)
         group_layout.setRowStretch(2, 0)
+        group_layout.setRowStretch(3, 1)
 
         image_tab = QWidget(tabs)
         image_layout = QGridLayout(image_tab)
@@ -858,6 +881,7 @@ class RasterLinkerPlugin:
 
         # Improve readability/consistency of layout-managed action buttons.
         for btn in [
+            getattr(self, "load_groups_button", None),
             getattr(self, "import_groups_button", None),
             getattr(self, "enhance_minmax_button", None),
             getattr(self, "enhance_batch_button", None),
@@ -878,6 +902,7 @@ class RasterLinkerPlugin:
 
         # Compact right-side tools block to leave more visual room for drawing options.
         for btn in [
+            getattr(self, "load_groups_button", None),
             self.dlg.zoomSelectedGroupsButton,
             getattr(self, "import_groups_button", None),
             self.dlg.createGroupButton,
@@ -1155,6 +1180,7 @@ class RasterLinkerPlugin:
     def _apply_button_icons(self):
         # Use QGIS native theme icons when available.
         self._set_button_icon(getattr(self.dlg, "createGroupButton", None), "mActionAddGroup.svg", "mActionNewVectorLayer.svg")
+        self._set_button_icon(getattr(self, "load_groups_button", None), "mActionAddRasterLayer.svg", "mActionOpenTable.svg")
         self._set_button_icon(getattr(self.dlg, "zoomSelectedGroupsButton", None), "mActionZoomToSelected.svg", "mActionZoomFullExtent.svg")
         self._set_button_icon(getattr(self, "import_groups_button", None), "mActionOptions.svg", "mActionPropertiesWidget.svg")
         self._set_button_icon(getattr(self.dlg, "createGridButton", None), "mActionCapturePolygon.svg", "mActionNewVectorLayer.svg")
@@ -1838,8 +1864,69 @@ class RasterLinkerPlugin:
         except Exception:
             return False
 
+    def _range_contains_zero(self, rng):
+        try:
+            min_attr = getattr(rng, "min", None)
+            if callable(min_attr):
+                mn = min_attr()
+            else:
+                min_attr = getattr(rng, "minimumValue", None)
+                mn = min_attr() if callable(min_attr) else min_attr
+
+            max_attr = getattr(rng, "max", None)
+            if callable(max_attr):
+                mx = max_attr()
+            else:
+                max_attr = getattr(rng, "maximumValue", None)
+                mx = max_attr() if callable(max_attr) else max_attr
+
+            mn = float(mn)
+            mx = float(mx)
+            return mn <= 0.0 <= mx
+        except Exception:
+            return False
+
+    def _disable_zero_nodata_on_layer(self, layer):
+        provider = layer.dataProvider()
+        if provider is None:
+            return False
+
+        changed = False
+        band_count = 0
+        try:
+            band_count = int(provider.bandCount())
+        except Exception:
+            band_count = 0
+
+        for band in range(1, band_count + 1):
+            try:
+                if hasattr(provider, "userNoDataValues") and hasattr(provider, "setUserNoDataValue"):
+                    ranges = list(provider.userNoDataValues(band) or [])
+                    filtered = [r for r in ranges if not self._range_contains_zero(r)]
+                    if len(filtered) != len(ranges):
+                        provider.setUserNoDataValue(band, filtered)
+                        changed = True
+            except Exception:
+                pass
+
+            try:
+                if hasattr(provider, "sourceNoDataValue") and hasattr(provider, "setUseSourceNoDataValue"):
+                    src_no_data = provider.sourceNoDataValue(band)
+                    if src_no_data is not None and abs(float(src_no_data)) < 1e-12:
+                        provider.setUseSourceNoDataValue(band, False)
+                        changed = True
+            except Exception:
+                pass
+
+        if changed:
+            try:
+                layer.triggerRepaint()
+            except Exception:
+                pass
+        return changed
+
     def enhance_batch_options(self):
-        options = ["Min/Max", "Percent Clip (2%)", "StdDev (2Ïƒ)"]
+        options = ["No enhancement (NoData only)", "Min/Max", "Percent Clip (2%)", "StdDev (2 sigma)"]
         mode, ok = QInputDialog.getItem(
             self.dlg,
             "Enhance Batch",
@@ -1850,6 +1937,19 @@ class RasterLinkerPlugin:
         )
         if not ok:
             return
+
+        nodata_options = ["Keep current NoData", "Disable NoData=0"]
+        nodata_mode, nodata_ok = QInputDialog.getItem(
+            self.dlg,
+            "Enhance Batch",
+            "NoData handling:",
+            nodata_options,
+            0,
+            False,
+        )
+        if not nodata_ok:
+            return
+        disable_zero_nodata = nodata_mode == "Disable NoData=0"
 
         selected_groups = self._selected_group_names()
         layers = []
@@ -1864,38 +1964,47 @@ class RasterLinkerPlugin:
             return
 
         enhanced = 0
+        nodata_updated = 0
         for layer in layers:
             provider = layer.dataProvider()
             if provider is None:
                 continue
-            try:
-                if mode == "StdDev (2Ïƒ)":
-                    stats = provider.bandStatistics(
-                        1,
-                        QgsRasterBandStats.Mean | QgsRasterBandStats.StdDev,
-                    )
-                    mn = float(stats.mean) - 2.0 * float(stats.stdDev)
-                    mx = float(stats.mean) + 2.0 * float(stats.stdDev)
-                else:
-                    stats = provider.bandStatistics(
-                        1,
-                        QgsRasterBandStats.Min | QgsRasterBandStats.Max,
-                    )
-                    mn = float(stats.minimumValue)
-                    mx = float(stats.maximumValue)
-                    if mode == "Percent Clip (2%)":
-                        span = mx - mn
-                        mn = mn + 0.02 * span
-                        mx = mx - 0.02 * span
-                if self._apply_value_range_to_layer(layer, mn, mx):
-                    enhanced += 1
-            except Exception:
-                continue
+            if mode != "No enhancement (NoData only)":
+                try:
+                    if mode == "StdDev (2 sigma)":
+                        stats = provider.bandStatistics(
+                            1,
+                            QgsRasterBandStats.Mean | QgsRasterBandStats.StdDev,
+                        )
+                        mn = float(stats.mean) - 2.0 * float(stats.stdDev)
+                        mx = float(stats.mean) + 2.0 * float(stats.stdDev)
+                    else:
+                        stats = provider.bandStatistics(
+                            1,
+                            QgsRasterBandStats.Min | QgsRasterBandStats.Max,
+                        )
+                        mn = float(stats.minimumValue)
+                        mx = float(stats.maximumValue)
+                        if mode == "Percent Clip (2%)":
+                            span = mx - mn
+                            mn = mn + 0.02 * span
+                            mx = mx - 0.02 * span
+                    if self._apply_value_range_to_layer(layer, mn, mx):
+                        enhanced += 1
+                except Exception:
+                    pass
 
-        self.iface.messageBar().pushInfo(
-            "RasterLinker",
-            f"Enhance Batch ({mode}) applied: {enhanced}/{len(layers)} layers.",
-        )
+            if disable_zero_nodata:
+                try:
+                    if self._disable_zero_nodata_on_layer(layer):
+                        nodata_updated += 1
+                except Exception:
+                    pass
+
+        msg = f"Enhance Batch ({mode}) applied: {enhanced}/{len(layers)} layers."
+        if disable_zero_nodata:
+            msg += f" NoData=0 disabled: {nodata_updated}/{len(layers)} layers."
+        self.iface.messageBar().pushInfo("RasterLinker", msg)
 
     def _active_group_item(self):
         if self.dlg is None:
@@ -2447,6 +2556,29 @@ class RasterLinkerPlugin:
         except Exception as e:
             QMessageBox.critical(self.dlg, "Error", f"Error while loading plugin groups: {e}")
 
+    def _format_timeslice_depth_range(self, rec):
+        if not isinstance(rec, dict):
+            return ""
+        depth_from = rec.get("depth_from")
+        depth_to = rec.get("depth_to")
+        unit = (rec.get("unit") or "m").strip() or "m"
+        if depth_from is None and depth_to is None:
+            return ""
+
+        def _fmt(v):
+            try:
+                txt = f"{float(v):.3f}"
+                txt = txt.rstrip("0").rstrip(".")
+                return txt
+            except Exception:
+                return str(v)
+
+        if depth_from is None:
+            return f"to {_fmt(depth_to)} {unit}"
+        if depth_to is None:
+            return f"from {_fmt(depth_from)} {unit}"
+        return f"{_fmt(depth_from)}-{_fmt(depth_to)} {unit}"
+
     def populate_raster_list_from_selected_groups(self):
         """Populate raster list from selected plugin groups and catalog-imported time-slices only."""
         try:
@@ -2480,8 +2612,14 @@ class RasterLinkerPlugin:
                     if not project_path:
                         continue
                     seen_timeslice_ids.add(timeslice_id)
-                    display = f"[{group_label}] {rec.get('normalized_name') or rec.get('name') or timeslice_id}"
+                    base_name = rec.get("normalized_name") or rec.get("name") or timeslice_id
+                    depth_txt = self._format_timeslice_depth_range(rec)
+                    display = f"[{group_label}] {base_name}"
+                    if depth_txt:
+                        display = f"{display} (Depth: {depth_txt})"
                     item = QListWidgetItem(display)
+                    if depth_txt:
+                        item.setToolTip(f"Depth range: {depth_txt}")
                     item.setData(
                         Qt.UserRole,
                         {
@@ -2489,6 +2627,7 @@ class RasterLinkerPlugin:
                             "project_path": project_path,
                             "group_id": group_id,
                             "group_name": group_label,
+                            "depth_range": depth_txt,
                         },
                     )
                     self.dlg.rasterListWidget.addItem(item)
@@ -2623,6 +2762,332 @@ class RasterLinkerPlugin:
         canvas.setExtent(combined_extent)
         canvas.refresh()
 
+    def _inspect_timeslice(self, file_path):
+        layer = QgsRasterLayer(file_path, os.path.basename(file_path))
+        if not layer.isValid():
+            return {"is_valid_raster": False}
+        extent = layer.extent()
+        return {
+            "is_valid_raster": True,
+            "crs": layer.crs().authid() if layer.crs().isValid() else None,
+            "width": layer.width(),
+            "height": layer.height(),
+            "band_count": layer.bandCount(),
+            "extent": {
+                "xmin": extent.xMinimum(),
+                "xmax": extent.xMaximum(),
+                "ymin": extent.yMinimum(),
+                "ymax": extent.yMaximum(),
+            },
+        }
+
+    def _timeslice_georef_warnings(self, meta):
+        warnings = []
+        extent = meta.get("extent") or {}
+        xmin = extent.get("xmin")
+        xmax = extent.get("xmax")
+        ymin = extent.get("ymin")
+        ymax = extent.get("ymax")
+        crs_authid = (meta.get("crs") or "").strip()
+        project_crs = QgsProject.instance().crs()
+
+        if not crs_authid:
+            warnings.append("Missing CRS in raster metadata.")
+        elif project_crs.isValid() and crs_authid != project_crs.authid():
+            warnings.append(f"CRS mismatch: raster {crs_authid}, project {project_crs.authid()}.")
+
+        if None in (xmin, xmax, ymin, ymax):
+            return warnings
+
+        x_span = float(xmax) - float(xmin)
+        y_span = float(ymax) - float(ymin)
+        if x_span <= 0 or y_span <= 0:
+            warnings.append("Invalid extent (non-positive width/height).")
+            return warnings
+
+        max_abs = max(abs(float(xmin)), abs(float(xmax)), abs(float(ymin)), abs(float(ymax)))
+        if max_abs < 1.0:
+            warnings.append("Extent is very close to origin (0,0).")
+        if max_abs > 1e8:
+            warnings.append("Extent coordinates are unusually large.")
+        return warnings
+
+    def _ensure_preferred_import_crs(self):
+        preferred = self._get_preferred_import_crs()
+        if preferred is not None and preferred.isValid():
+            return preferred
+
+        epsg_text, ok = QInputDialog.getText(
+            self.dlg,
+            "Set Import CRS",
+            "Enter EPSG code (example: 32633) or AUTHID (example: EPSG:32633):",
+            text="EPSG:32633",
+        )
+        if not ok or not epsg_text.strip():
+            return None
+
+        try:
+            from qgis.core import QgsCoordinateReferenceSystem
+            raw = epsg_text.strip().upper()
+            authid = raw if raw.startswith("EPSG:") else f"EPSG:{raw}"
+            selected = QgsCoordinateReferenceSystem(authid)
+        except Exception:
+            selected = None
+
+        if selected is None or not selected.isValid():
+            QMessageBox.warning(self.dlg, "Set Import CRS", "Invalid CRS selection.")
+            return None
+        self.settings.setValue(self.settings_key_default_import_crs, selected.authid())
+        return selected
+
+    def _select_group_item_by_id(self, group_id):
+        if self.dlg is None or not group_id:
+            return False
+        widget = self.dlg.groupListWidget
+        widget.blockSignals(True)
+        widget.clearSelection()
+        found = False
+        for idx in range(widget.count()):
+            item = widget.item(idx)
+            if item.data(Qt.UserRole) == group_id:
+                item.setSelected(True)
+                widget.setCurrentItem(item)
+                found = True
+                break
+        widget.blockSignals(False)
+        if found:
+            self.on_group_selection_changed()
+        return found
+
+    def _quick_import_timeslices_for_group(self, project_root, group):
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self.dlg,
+            "Select Time-slice raster files",
+            "",
+            "Rasters (*.tif *.tiff *.png *.jpg *.jpeg *.asc *.img);;All files (*.*)",
+        )
+        if not file_paths:
+            return {"cancelled": False, "imported": 0, "skipped": 0}
+
+        records = []
+        invalid = []
+        scan_total = len(file_paths)
+        scan_progress = QProgressDialog("Analyzing selected images...", "Cancel", 0, scan_total, self.dlg)
+        scan_progress.setWindowTitle("Create Group - Analyze Images")
+        scan_progress.setWindowModality(Qt.WindowModal)
+        scan_progress.setMinimumDuration(0)
+        scan_progress.setAutoClose(True)
+        scan_progress.setAutoReset(True)
+        scan_progress.setValue(0)
+        for idx, src_path in enumerate(file_paths, start=1):
+            if scan_progress.wasCanceled():
+                scan_progress.close()
+                return {"cancelled": True, "imported": 0, "skipped": 0}
+            scan_progress.setLabelText(f"Analyzing {idx}/{scan_total}: {os.path.basename(src_path)}")
+            QApplication.processEvents()
+            meta = self._inspect_timeslice(src_path)
+            if not meta.get("is_valid_raster"):
+                invalid.append(os.path.basename(src_path))
+                scan_progress.setValue(idx)
+                QApplication.processEvents()
+                continue
+            records.append(
+                {
+                    "source_path": src_path,
+                    "meta": meta,
+                    "warnings": self._timeslice_georef_warnings(meta),
+                    "assigned_crs": None,
+                }
+            )
+            scan_progress.setValue(idx)
+            QApplication.processEvents()
+        scan_progress.close()
+
+        skipped = 0
+        if invalid:
+            skipped += len(invalid)
+            preview = "\n".join(invalid[:10])
+            extra = len(invalid) - min(len(invalid), 10)
+            if extra > 0:
+                preview += f"\n... and {extra} more."
+            QMessageBox.warning(
+                self.dlg,
+                "Invalid raster files",
+                "Some selected files are not valid rasters and will be skipped:\n\n" + preview,
+            )
+
+        if not records:
+            return {"cancelled": False, "imported": 0, "skipped": skipped}
+
+        missing_crs = [r for r in records if not (r.get("meta", {}).get("crs") or "").strip()]
+        if missing_crs:
+            msg = QMessageBox(self.dlg)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Missing CRS")
+            msg.setText(f"{len(missing_crs)} image(s) have no CRS.")
+            msg.setInformativeText("Choose how to proceed:")
+            assign_btn = msg.addButton("Assign Default CRS", QMessageBox.AcceptRole)
+            keep_btn = msg.addButton("Keep Without CRS", QMessageBox.ActionRole)
+            skip_btn = msg.addButton("Skip Missing CRS", QMessageBox.DestructiveRole)
+            cancel_btn = msg.addButton(QMessageBox.Cancel)
+            msg.setDefaultButton(assign_btn)
+            msg.exec_()
+            clicked = msg.clickedButton()
+            if clicked == cancel_btn:
+                return {"cancelled": True, "imported": 0, "skipped": skipped}
+            if clicked == skip_btn:
+                records = [r for r in records if (r.get("meta", {}).get("crs") or "").strip()]
+                skipped += len(missing_crs)
+            elif clicked == assign_btn:
+                preferred = self._ensure_preferred_import_crs()
+                if preferred is None or not preferred.isValid():
+                    return {"cancelled": True, "imported": 0, "skipped": skipped}
+                authid = preferred.authid()
+                for rec in missing_crs:
+                    rec["assigned_crs"] = authid
+                    rec_meta = rec.get("meta") or {}
+                    rec_meta["crs"] = authid
+                    rec["warnings"] = self._timeslice_georef_warnings(rec_meta)
+            elif clicked == keep_btn:
+                pass
+
+        if not records:
+            return {"cancelled": False, "imported": 0, "skipped": skipped}
+
+        crs_values = sorted({(r.get("meta", {}).get("crs") or "").strip() for r in records if (r.get("meta", {}).get("crs") or "").strip()})
+        if len(crs_values) > 1:
+            preferred = self._get_preferred_import_crs()
+            target_authid = preferred.authid() if preferred and preferred.isValid() else crs_values[0]
+            msg = QMessageBox(self.dlg)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Mixed CRS detected")
+            msg.setText("Selected images have different CRS values.")
+            msg.setInformativeText(
+                "Detected CRS:\n- "
+                + "\n- ".join(crs_values)
+                + f"\n\nChoose how to proceed (target: {target_authid})."
+            )
+            import_all_btn = msg.addButton("Import All", QMessageBox.AcceptRole)
+            keep_target_btn = msg.addButton(f"Keep Only {target_authid}", QMessageBox.ActionRole)
+            cancel_btn = msg.addButton(QMessageBox.Cancel)
+            msg.setDefaultButton(import_all_btn)
+            msg.exec_()
+            clicked = msg.clickedButton()
+            if clicked == cancel_btn:
+                return {"cancelled": True, "imported": 0, "skipped": skipped}
+            if clicked == keep_target_btn:
+                before = len(records)
+                records = [r for r in records if (r.get("meta", {}).get("crs") or "").strip() == target_authid]
+                skipped += max(0, before - len(records))
+
+        if not records:
+            return {"cancelled": False, "imported": 0, "skipped": skipped}
+
+        with_warnings = [r for r in records if r.get("warnings")]
+        if with_warnings:
+            lines = []
+            for rec in with_warnings[:12]:
+                name = os.path.basename(rec.get("source_path") or "")
+                lines.append(f"{name}: {'; '.join(rec.get('warnings') or [])}")
+            extra = len(with_warnings) - len(lines)
+            if extra > 0:
+                lines.append(f"... and {extra} more.")
+            msg = QMessageBox(self.dlg)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Georeference warnings")
+            msg.setText("Potential georeference issues were detected.")
+            msg.setInformativeText("\n".join(lines))
+            import_all_btn = msg.addButton("Import All", QMessageBox.AcceptRole)
+            skip_warned_btn = msg.addButton("Skip Problematic", QMessageBox.ActionRole)
+            cancel_btn = msg.addButton(QMessageBox.Cancel)
+            msg.setDefaultButton(import_all_btn)
+            msg.exec_()
+            clicked = msg.clickedButton()
+            if clicked == cancel_btn:
+                return {"cancelled": True, "imported": 0, "skipped": skipped}
+            if clicked == skip_warned_btn:
+                before = len(records)
+                records = [r for r in records if not r.get("warnings")]
+                skipped += max(0, before - len(records))
+
+        if not records:
+            return {"cancelled": False, "imported": 0, "skipped": skipped}
+
+        imported_ids = []
+        imported_count = 0
+        failed = []
+        import_total = len(records)
+        import_progress = QProgressDialog("Importing selected images...", "Cancel", 0, import_total, self.dlg)
+        import_progress.setWindowTitle("Create Group - Import Images")
+        import_progress.setWindowModality(Qt.WindowModal)
+        import_progress.setMinimumDuration(0)
+        import_progress.setAutoClose(True)
+        import_progress.setAutoReset(True)
+        import_progress.setValue(0)
+        cancelled = False
+        for idx, rec in enumerate(records, start=1):
+            if import_progress.wasCanceled():
+                cancelled = True
+                break
+            source_path = rec.get("source_path")
+            import_progress.setLabelText(f"Importing {idx}/{import_total}: {os.path.basename(source_path or '')}")
+            QApplication.processEvents()
+            try:
+                project_path, normalized_name = normalize_copy_into_project(
+                    project_root, "timeslices_2d", source_path
+                )
+                meta = self._inspect_timeslice(project_path)
+                warn_list = self._timeslice_georef_warnings(meta)
+                record = {
+                    "id": f"timeslice_{utc_now_iso()}_{normalized_name}",
+                    "name": os.path.splitext(normalized_name)[0],
+                    "normalized_name": normalized_name,
+                    "source_path": source_path,
+                    "project_path": project_path,
+                    "imported_at": utc_now_iso(),
+                    "crs": meta.get("crs"),
+                    "width": meta.get("width"),
+                    "height": meta.get("height"),
+                    "band_count": meta.get("band_count"),
+                    "extent": meta.get("extent"),
+                }
+                assigned_authid = (rec.get("assigned_crs") or "").strip()
+                if assigned_authid:
+                    record["assigned_crs"] = assigned_authid
+                    if not record.get("crs"):
+                        record["crs"] = assigned_authid
+                if warn_list:
+                    record["georef_warnings"] = warn_list
+                register_timeslice(project_root, record)
+                imported_ids.append(record.get("id"))
+                imported_count += 1
+            except Exception as e:
+                failed.append(f"{os.path.basename(source_path)}: {e}")
+            import_progress.setValue(idx)
+            QApplication.processEvents()
+        import_progress.close()
+
+        if imported_ids:
+            assign_timeslices_to_group(project_root, group.get("id"), imported_ids)
+            try:
+                remove_timeslices_from_group(project_root, "grp_imported", imported_ids)
+            except Exception:
+                pass
+
+        if failed:
+            preview = "\n".join(failed[:10])
+            extra = len(failed) - min(len(failed), 10)
+            if extra > 0:
+                preview += f"\n... and {extra} more."
+            QMessageBox.warning(
+                self.dlg,
+                "Import warning",
+                "Some files could not be imported:\n\n" + preview,
+            )
+            skipped += len(failed)
+
+        return {"cancelled": cancelled, "imported": imported_count, "skipped": skipped}
+
     def create_group(self):
         group_name = self.dlg.groupNameEdit.text().strip()
         if not group_name:
@@ -2632,15 +3097,54 @@ class RasterLinkerPlugin:
         if not project_root:
             return
         try:
-            _, created = create_raster_group(project_root, group_name)
-            self._get_or_create_plugin_qgis_group(group_name)
+            group, created = create_raster_group(project_root, group_name)
+            result = self._quick_import_timeslices_for_group(project_root, group)
+            imported = int(result.get("imported", 0))
+            skipped = int(result.get("skipped", 0))
+            cancelled = bool(result.get("cancelled", False))
+
+            if imported > 0:
+                self._get_or_create_plugin_qgis_group(group_name)
             self.populate_group_list()
+            if imported > 0:
+                self._select_group_item_by_id(group.get("id"))
+                self.load_raster(show_message=False)
+                status = "cancelled after partial import" if cancelled else "completed"
+                self.iface.messageBar().pushInfo(
+                    "RasterLinker",
+                    f"Group '{group_name}' import {status}: imported {imported}, skipped {skipped}.",
+                )
+                return
+
+            if cancelled:
+                title = "Group created" if created else "Import cancelled"
+                QMessageBox.information(
+                    self.dlg,
+                    title,
+                    (
+                        f"Group '{group_name}' is available in the project catalog.\n"
+                        "No images were imported."
+                    ),
+                )
+                return
+
             if created:
-                QMessageBox.information(self.dlg, "Success", f"Group '{group_name}' created.")
+                QMessageBox.information(
+                    self.dlg,
+                    "Group created",
+                    (
+                        f"Group '{group_name}' was created in the project catalog.\n"
+                        "It will appear in the plugin list after you import images into it."
+                    ),
+                )
             else:
-                QMessageBox.information(self.dlg, "Information", f"Group '{group_name}' is already present.")
+                QMessageBox.information(
+                    self.dlg,
+                    "Information",
+                    f"Group '{group_name}' is already present. No images imported.",
+                )
         except Exception as e:
-            QMessageBox.critical(self.dlg, "Error", f"Error while creating group: {e}")
+            QMessageBox.critical(self.dlg, "Error", f"Error while creating group or importing images: {e}")
 
     def add_group_with_button(self, group_name):
         self.populate_group_list()
@@ -2684,7 +3188,16 @@ class RasterLinkerPlugin:
                     raster_layer = QgsRasterLayer(path, layer_name)
                     if not raster_layer.isValid():
                         continue
-                    if not raster_layer.crs().isValid() and target_crs.isValid():
+                    assigned_authid = (rec.get("assigned_crs") or "").strip()
+                    if assigned_authid:
+                        try:
+                            from qgis.core import QgsCoordinateReferenceSystem
+                            assigned_crs = QgsCoordinateReferenceSystem(assigned_authid)
+                            if assigned_crs.isValid():
+                                raster_layer.setCrs(assigned_crs)
+                        except Exception:
+                            pass
+                    elif not raster_layer.crs().isValid() and target_crs.isValid():
                         raster_layer.setCrs(target_crs)
                     if style_path and os.path.exists(style_path):
                         try:

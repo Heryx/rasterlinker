@@ -20,8 +20,10 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QInputDialog,
     QDialog,
+    QProgressDialog,
+    QApplication,
 )
-from qgis.PyQt.QtCore import QSettings
+from qgis.PyQt.QtCore import QSettings, Qt
 from qgis.core import QgsProject, QgsPointCloudLayer, QgsRasterLayer
 from qgis.gui import QgsProjectionSelectionDialog
 
@@ -47,6 +49,7 @@ from .pointcloud_metadata import inspect_las_laz
 from .radargram_metadata import inspect_radargram, find_worldfile
 from .catalog_editor_dialog import CatalogEditorDialog
 from .link_editor_dialog import LinkEditorDialog
+from .timeslice_group_manager_dialog import TimesliceGroupManagerDialog
 
 
 class ProjectManagerDialog(QDialog):
@@ -154,7 +157,12 @@ class ProjectManagerDialog(QDialog):
         links_btn = QPushButton("Link Editor")
         links_btn.clicked.connect(self._open_link_editor)
         links_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(links_btn, 3, 0, 1, 2)
+        catalog_layout.addWidget(links_btn, 3, 0)
+
+        ts_mgr_btn = QPushButton("Time-slice Manager")
+        ts_mgr_btn.clicked.connect(self._open_timeslice_group_manager)
+        ts_mgr_btn.setMinimumHeight(28)
+        catalog_layout.addWidget(ts_mgr_btn, 3, 1)
 
         package_box = QGroupBox("Package")
         package_layout = QGridLayout(package_box)
@@ -551,7 +559,23 @@ class ProjectManagerDialog(QDialog):
         imported_ids = []
         imported_paths = []
         georef_warnings = []
-        for file_path in file_paths:
+        total = len(file_paths)
+        progress = QProgressDialog("Importing time-slices...", "Cancel", 0, total, self)
+        progress.setWindowTitle("Import Time-slices")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(True)
+        progress.setAutoReset(True)
+        progress.setValue(0)
+
+        cancelled = False
+        failures = []
+        for idx, file_path in enumerate(file_paths, start=1):
+            if progress.wasCanceled():
+                cancelled = True
+                break
+            progress.setLabelText(f"Importing {idx}/{total}: {os.path.basename(file_path)}")
+            QApplication.processEvents()
             try:
                 project_path, normalized_name = normalize_copy_into_project(
                     self.project_root, "timeslices_2d", file_path
@@ -576,9 +600,22 @@ class ProjectManagerDialog(QDialog):
                 imported_paths.append(project_path)
                 imported += 1
             except Exception as e:
-                QMessageBox.warning(self, "Import warning", f"{file_path}\n{e}")
+                failures.append(f"{os.path.basename(file_path)}: {e}")
+            progress.setValue(idx)
+            QApplication.processEvents()
+
+        progress.close()
+
+        if failures:
+            preview = "\n".join(failures[:10])
+            more = len(failures) - min(len(failures), 10)
+            if more > 0:
+                preview += f"\n... and {more} more."
+            QMessageBox.warning(self, "Import warning", preview)
 
         self.iface.messageBar().pushInfo("RasterLinker", f"Time-slices import completed ({imported}).")
+        if cancelled:
+            self.iface.messageBar().pushWarning("RasterLinker", "Time-slice import cancelled by user.")
         if georef_warnings:
             preview_lines = []
             for name, warns in georef_warnings[:12]:
@@ -1010,6 +1047,17 @@ class ProjectManagerDialog(QDialog):
             return
         dlg = LinkEditorDialog(self.project_root, self)
         dlg.exec_()
+
+    def _open_timeslice_group_manager(self):
+        if not self._ensure_project_ready():
+            return
+        dlg = TimesliceGroupManagerDialog(
+            self.project_root,
+            self,
+            on_updated=self._notify_project_updated,
+        )
+        dlg.exec_()
+        self._notify_project_updated()
 
     def _view_catalog_summary(self):
         if not self._ensure_project_ready():
