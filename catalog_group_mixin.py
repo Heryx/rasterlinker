@@ -32,6 +32,53 @@ from .background_tasks import (
 
 
 class CatalogGroupMixin:
+    def _restore_group_selection_from_settings(self, trigger_update=True):
+        if self.dlg is None or not hasattr(self.dlg, "groupListWidget"):
+            return False
+        widget = self.dlg.groupListWidget
+        if widget.count() <= 0:
+            return False
+
+        selected_ids = list(getattr(self, "_saved_group_selection_ids", []) or [])
+        current_id = str(getattr(self, "_saved_current_group_id", "") or "").strip()
+        selected_set = {str(v).strip() for v in selected_ids if str(v).strip()}
+
+        selected_items = []
+        widget.blockSignals(True)
+        try:
+            widget.clearSelection()
+            for idx in range(widget.count()):
+                item = widget.item(idx)
+                gid = str(item.data(Qt.UserRole) or "").strip()
+                if gid and gid in selected_set:
+                    item.setSelected(True)
+                    selected_items.append(item)
+
+            if not selected_items and current_id:
+                for idx in range(widget.count()):
+                    item = widget.item(idx)
+                    gid = str(item.data(Qt.UserRole) or "").strip()
+                    if gid == current_id:
+                        item.setSelected(True)
+                        selected_items.append(item)
+                        break
+
+            if selected_items:
+                widget.setCurrentItem(selected_items[0])
+        finally:
+            widget.blockSignals(False)
+
+        if selected_items and trigger_update:
+            self.on_group_selection_changed()
+            nav_value = self.settings.value(self._settings_key("ui/navigation_index"), 0)
+            try:
+                nav_value = int(nav_value)
+            except Exception:
+                nav_value = 0
+            self._update_navigation_controls(nav_value)
+            self.update_visibility_with_dial(nav_value)
+        return bool(selected_items)
+
     def populate_group_list(self):
         """Populate group list using only groups currently present in QGIS dock."""
         try:
@@ -52,6 +99,7 @@ class CatalogGroupMixin:
                 item = QListWidgetItem(group_name)
                 item.setData(Qt.UserRole, group.get("id"))
                 self.dlg.groupListWidget.addItem(item)
+            self._restore_group_selection_from_settings(trigger_update=True)
         except Exception as e:
             QMessageBox.critical(self.dlg, "Error", f"Error while loading plugin groups: {e}")
 
@@ -166,12 +214,16 @@ class CatalogGroupMixin:
             self.dlg.rasterListWidget.clear()
             self._set_name_raster_label(None)
             self._update_navigation_controls(0)
+            if hasattr(self, "_save_ui_settings"):
+                self._save_ui_settings()
             return
         self.populate_raster_list_from_selected_groups()
         self._update_navigation_controls()
         lines = self._build_name_lines_for_selected_groups()
         self._render_name_raster_lines(lines)
         self.load_raster(show_message=False)
+        if hasattr(self, "_save_ui_settings"):
+            self._save_ui_settings()
 
     def _update_navigation_controls(self, value=None):
         if self.dlg is None:

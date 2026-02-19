@@ -84,6 +84,14 @@ class ProjectManagerDialog(QDialog):
         self.resize(760, 300)
         self._build_ui()
         self._apply_styles()
+        try:
+            stored_root = (self.settings.value(self.settings_key_active_project, "", type=str) or "").strip()
+            if stored_root:
+                self.path_edit.setText(stored_root)
+                if os.path.isdir(stored_root):
+                    self.project_root = stored_root
+        except Exception:
+            pass
 
     def _build_ui(self):
         root_layout = QVBoxLayout(self)

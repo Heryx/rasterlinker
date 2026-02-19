@@ -7,6 +7,16 @@ from .project_manager_dialog import ProjectManagerDialog
 
 
 class AppRuntimeMixin:
+    def _split_setting_list(self, value):
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            return [str(v).strip() for v in value if str(v).strip()]
+        text = str(value).strip()
+        if not text:
+            return []
+        return [v.strip() for v in text.split("||") if v.strip()]
+
     def run(self):
         """Esegue il plugin."""
         if self.first_start:
@@ -129,6 +139,11 @@ class AppRuntimeMixin:
             self._swap_drawing_and_navigation_sections()
             self._sync_grid_options_from_controls()
             self._connect_persistent_fields()
+            if hasattr(self, "_restore_group_selection_from_settings"):
+                try:
+                    self._restore_group_selection_from_settings(trigger_update=True)
+                except Exception:
+                    pass
             self._tune_visual_layout()
             self._apply_responsive_main_layout(self.dlg.width())
             self._apply_button_icons()
@@ -339,6 +354,30 @@ class AppRuntimeMixin:
             self.settings.value(self._settings_key("grid/area_names"), "")
         )
 
+        # Persisted UI state (groups/navigation/tools tab).
+        self._saved_group_selection_ids = self._split_setting_list(
+            self.settings.value(self._settings_key("ui/selected_group_ids"), "")
+        )
+        self._saved_current_group_id = str(
+            self.settings.value(self._settings_key("ui/current_group_id"), "") or ""
+        ).strip()
+        nav_index = self.settings.value(self._settings_key("ui/navigation_index"), 0)
+        try:
+            nav_index = int(nav_index)
+        except Exception:
+            nav_index = 0
+        nav_index = max(0, nav_index)
+        self.dlg.Dial.setValue(nav_index)
+        self.dlg.dial2.setValue(nav_index)
+
+        tools_tab_index = self.settings.value(self._settings_key("ui/tools_tab_index"), 0)
+        try:
+            tools_tab_index = int(tools_tab_index)
+        except Exception:
+            tools_tab_index = 0
+        if self.tools_tabs is not None and self.tools_tabs.count() > 0:
+            self.tools_tabs.setCurrentIndex(max(0, min(tools_tab_index, self.tools_tabs.count() - 1)))
+
     def _save_ui_settings(self):
         self._sync_grid_options_from_controls()
         self.settings.setValue(self._settings_key("grid/distance_x"), self.dlg.lineEditDistanceX.text().strip())
@@ -353,6 +392,32 @@ class AppRuntimeMixin:
         self.settings.setValue(self._settings_key("grid/keep_source_polygon"), self.keep_source_polygon)
         self.settings.setValue(self._settings_key("grid/dimension_mode"), self.grid_dimension_mode)
         self.settings.setValue(self._settings_key("grid/internal_enabled"), self.grid_internal_enabled)
+
+        selected_group_ids = []
+        current_group_id = ""
+        if self.dlg is not None and hasattr(self.dlg, "groupListWidget"):
+            selected_group_ids = [
+                str(item.data(Qt.UserRole)).strip()
+                for item in self.dlg.groupListWidget.selectedItems()
+                if item is not None and str(item.data(Qt.UserRole) or "").strip()
+            ]
+            current_item = self.dlg.groupListWidget.currentItem()
+            if current_item is not None:
+                current_group_id = str(current_item.data(Qt.UserRole) or "").strip()
+        self.settings.setValue(
+            self._settings_key("ui/selected_group_ids"),
+            "||".join(dict.fromkeys(selected_group_ids)),
+        )
+        self.settings.setValue(self._settings_key("ui/current_group_id"), current_group_id)
+        if self.dlg is not None:
+            self.settings.setValue(self._settings_key("ui/navigation_index"), int(self.dlg.Dial.value()))
+        if self.tools_tabs is not None:
+            self.settings.setValue(self._settings_key("ui/tools_tab_index"), int(self.tools_tabs.currentIndex()))
+        if hasattr(self, "_save_trace_info_ui_state"):
+            try:
+                self._save_trace_info_ui_state()
+            except Exception:
+                pass
 
     def _connect_persistent_fields(self):
         self.dlg.lineEditDistanceX.editingFinished.connect(self._save_ui_settings)
@@ -380,4 +445,12 @@ class AppRuntimeMixin:
             self.help_button.clicked.connect(self.show_grid_help)
         if self.export_button is not None:
             self.export_button.clicked.connect(self.export_last_grid_to_gpkg)
+        if self.tools_tabs is not None:
+            self.tools_tabs.currentChanged.connect(self._save_ui_settings)
+        if hasattr(self.dlg, "groupListWidget"):
+            self.dlg.groupListWidget.itemSelectionChanged.connect(self._save_ui_settings)
+        if hasattr(self.dlg, "Dial"):
+            self.dlg.Dial.valueChanged.connect(self._save_ui_settings)
+        if hasattr(self.dlg, "dial2"):
+            self.dlg.dial2.valueChanged.connect(self._save_ui_settings)
 

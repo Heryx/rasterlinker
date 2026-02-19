@@ -20,7 +20,113 @@ from PyQt5.QtWidgets import (
 
 
 class TraceInfoMixin:
-    def _set_trace_info_view_mode(self, mode):
+    def _trace_info_settings_key(self, key):
+        if hasattr(self, "_settings_key"):
+            return self._settings_key(f"trace_info/{key}")
+        return f"RasterLinker/trace_info/{key}"
+
+    def _save_trace_info_ui_state(self):
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return
+        view_mode = "table"
+        if self.trace_info_stack is not None and self.trace_info_stack.currentIndex() == 1:
+            view_mode = "form"
+        settings.setValue(self._trace_info_settings_key("view_mode"), view_mode)
+
+        filter_text = ""
+        if self.trace_info_filter_edit is not None:
+            filter_text = self.trace_info_filter_edit.text() or ""
+        settings.setValue(self._trace_info_settings_key("filter_text"), filter_text)
+
+        mode_filter = "all"
+        if self.trace_info_mode_combo is not None:
+            mode_filter = self.trace_info_mode_combo.currentData() or "all"
+        settings.setValue(self._trace_info_settings_key("mode_filter"), mode_filter)
+
+        sort_field = "fid"
+        if self.trace_info_sort_field_combo is not None:
+            sort_field = self.trace_info_sort_field_combo.currentData() or "fid"
+        settings.setValue(self._trace_info_settings_key("sort_field"), sort_field)
+
+        sort_order = "asc"
+        if self.trace_info_sort_order_combo is not None:
+            sort_order = "desc" if self.trace_info_sort_order_combo.currentData() == Qt.DescendingOrder else "asc"
+        settings.setValue(self._trace_info_settings_key("sort_order"), sort_order)
+
+        query_visible = bool(self.trace_info_query_panel is not None and self.trace_info_query_panel.isVisible())
+        help_visible = bool(self.trace_info_help_panel is not None and self.trace_info_help_panel.isVisible())
+        settings.setValue(self._trace_info_settings_key("query_visible"), query_visible)
+        settings.setValue(self._trace_info_settings_key("help_visible"), help_visible)
+
+        if self.trace_info_dock is not None:
+            try:
+                is_floating = bool(self.trace_info_dock.isFloating())
+                settings.setValue(self._trace_info_settings_key("dock/floating"), is_floating)
+                if not is_floating:
+                    area = self.iface.mainWindow().dockWidgetArea(self.trace_info_dock)
+                    area_text = {
+                        Qt.LeftDockWidgetArea: "left",
+                        Qt.RightDockWidgetArea: "right",
+                        Qt.TopDockWidgetArea: "top",
+                        Qt.BottomDockWidgetArea: "bottom",
+                    }.get(area, "right")
+                    settings.setValue(self._trace_info_settings_key("dock/area"), area_text)
+            except Exception:
+                pass
+
+    def _apply_trace_info_ui_state(self):
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return
+
+        view_mode = str(settings.value(self._trace_info_settings_key("view_mode"), "table") or "table").strip().lower()
+        filter_text = str(settings.value(self._trace_info_settings_key("filter_text"), "") or "")
+        mode_filter = str(settings.value(self._trace_info_settings_key("mode_filter"), "all") or "all").strip()
+        sort_field = str(settings.value(self._trace_info_settings_key("sort_field"), "fid") or "fid").strip()
+        sort_order_txt = str(settings.value(self._trace_info_settings_key("sort_order"), "asc") or "asc").strip().lower()
+        query_visible = settings.value(self._trace_info_settings_key("query_visible"), False, type=bool)
+        help_visible = settings.value(self._trace_info_settings_key("help_visible"), False, type=bool)
+        dock_floating = settings.value(self._trace_info_settings_key("dock/floating"), True, type=bool)
+        dock_area_txt = str(settings.value(self._trace_info_settings_key("dock/area"), "right") or "right").strip().lower()
+
+        if self.trace_info_filter_edit is not None:
+            self.trace_info_filter_edit.setText(filter_text)
+        if self.trace_info_mode_combo is not None:
+            idx = self.trace_info_mode_combo.findData(mode_filter)
+            if idx >= 0:
+                self.trace_info_mode_combo.setCurrentIndex(idx)
+        if self.trace_info_sort_field_combo is not None:
+            idx = self.trace_info_sort_field_combo.findData(sort_field)
+            if idx >= 0:
+                self.trace_info_sort_field_combo.setCurrentIndex(idx)
+        if self.trace_info_sort_order_combo is not None:
+            order_value = Qt.DescendingOrder if sort_order_txt == "desc" else Qt.AscendingOrder
+            idx = self.trace_info_sort_order_combo.findData(order_value)
+            if idx >= 0:
+                self.trace_info_sort_order_combo.setCurrentIndex(idx)
+
+        self._toggle_trace_query_panel(bool(query_visible))
+        self._toggle_trace_help_panel(bool(help_visible))
+        self._set_trace_info_view_mode(view_mode, persist=False)
+
+        if self.trace_info_dock is not None:
+            area_map = {
+                "left": Qt.LeftDockWidgetArea,
+                "right": Qt.RightDockWidgetArea,
+                "top": Qt.TopDockWidgetArea,
+                "bottom": Qt.BottomDockWidgetArea,
+            }
+            target_area = area_map.get(dock_area_txt, Qt.RightDockWidgetArea)
+            try:
+                if dock_floating:
+                    self.trace_info_dock.setFloating(True)
+                else:
+                    self._dock_trace_info_to(target_area)
+            except Exception:
+                pass
+
+    def _set_trace_info_view_mode(self, mode, persist=True):
         if self.trace_info_stack is None:
             return
         use_form = str(mode).strip().lower() == "form"
@@ -31,6 +137,8 @@ class TraceInfoMixin:
             self.trace_info_view_table_btn.setEnabled(use_form)
         if use_form:
             self._update_trace_info_form_from_table_selection()
+        if persist:
+            self._save_trace_info_ui_state()
 
     def _on_trace_info_table_selection_changed(self):
         if self.trace_info_selection_guard:
@@ -87,6 +195,7 @@ class TraceInfoMixin:
 
     def _on_trace_info_top_level_changed(self, is_floating):
         self.trace_info_is_docked = not bool(is_floating)
+        self._save_trace_info_ui_state()
 
     def _dock_trace_info_to(self, area):
         if self.trace_info_dock is None:
@@ -97,10 +206,12 @@ class TraceInfoMixin:
             self.trace_info_dock.show()
             self.trace_info_dock.raise_()
             self.trace_info_is_docked = True
+            self._save_trace_info_ui_state()
         except Exception:
             try:
                 self.trace_info_dock.setFloating(True)
                 self.trace_info_is_docked = False
+                self._save_trace_info_ui_state()
             except Exception:
                 pass
 
@@ -112,6 +223,7 @@ class TraceInfoMixin:
             self.trace_info_dock.show()
             self.trace_info_dock.raise_()
             self.trace_info_is_docked = False
+            self._save_trace_info_ui_state()
         except Exception:
             pass
 
@@ -121,6 +233,7 @@ class TraceInfoMixin:
             self.trace_info_query_panel.setVisible(visible)
         if self.trace_info_query_btn is not None:
             self.trace_info_query_btn.setChecked(visible)
+        self._save_trace_info_ui_state()
 
     def _toggle_trace_help_panel(self, checked):
         visible = bool(checked)
@@ -128,6 +241,7 @@ class TraceInfoMixin:
             self.trace_info_help_panel.setVisible(visible)
         if self.trace_info_help_btn is not None and self.trace_info_help_btn.isChecked() != visible:
             self.trace_info_help_btn.setChecked(visible)
+        self._save_trace_info_ui_state()
 
     def _show_build3d_modes_help(self):
         # Backward compatibility: if called, open the inline help panel.
@@ -491,9 +605,13 @@ class TraceInfoMixin:
         left_layout.addLayout(view_switch_row, 0)
 
         filter_edit.returnPressed.connect(self.refresh_trace_info_table)
+        filter_edit.textChanged.connect(self._save_trace_info_ui_state)
         mode_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
+        mode_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
         sort_field_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
+        sort_field_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
         sort_order_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
+        sort_order_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
         table.itemSelectionChanged.connect(self._on_trace_info_table_selection_changed)
         form_list.itemSelectionChanged.connect(self._on_trace_info_form_list_selection_changed)
 
@@ -525,7 +643,8 @@ class TraceInfoMixin:
         self.trace_info_query_panel = query_panel
         self.trace_info_help_btn = help_btn
         self.trace_info_help_panel = help_panel
-        self._set_trace_info_view_mode("table")
+        self._set_trace_info_view_mode("table", persist=False)
+        self._apply_trace_info_ui_state()
 
     def open_trace_info_tab(self, checked=False):
         self._ensure_trace_info_dock()
@@ -675,4 +794,3 @@ class TraceInfoMixin:
             self._select_trace_info_row(target_row)
         else:
             self._update_trace_info_form_from_table_selection()
-
