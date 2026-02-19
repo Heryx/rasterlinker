@@ -112,6 +112,12 @@ class TraceInfoMixin:
         help_visible = settings.value(self._trace_info_settings_key("help_visible"), False, type=bool)
         dock_floating = settings.value(self._trace_info_settings_key("dock/floating"), True, type=bool)
         dock_area_txt = str(settings.value(self._trace_info_settings_key("dock/area"), "right") or "right").strip().lower()
+        # Safety default: do not auto-dock on open to avoid breaking QGIS layout.
+        restore_dock_on_open = settings.value(
+            self._trace_info_settings_key("dock/restore_on_open"),
+            False,
+            type=bool,
+        )
 
         if self.trace_info_filter_edit is not None:
             self.trace_info_filter_edit.setText(filter_text)
@@ -142,10 +148,11 @@ class TraceInfoMixin:
             }
             target_area = area_map.get(dock_area_txt, Qt.RightDockWidgetArea)
             try:
-                if dock_floating:
-                    self.trace_info_dock.setFloating(True)
-                else:
+                if restore_dock_on_open and not dock_floating:
                     self._dock_trace_info_to(target_area)
+                else:
+                    self.trace_info_dock.setFloating(True)
+                    self.trace_info_is_docked = False
             except Exception:
                 pass
 
@@ -199,6 +206,7 @@ class TraceInfoMixin:
         try:
             self.iface.addDockWidget(area, self.trace_info_dock)
             self.trace_info_dock.setFloating(False)
+            self._tabify_trace_info_with_existing_dock(area)
             self.trace_info_dock.show()
             self.trace_info_dock.raise_()
             self.trace_info_is_docked = True
@@ -210,6 +218,57 @@ class TraceInfoMixin:
                 self._save_trace_info_ui_state()
             except Exception:
                 pass
+
+    def _tabify_trace_info_with_existing_dock(self, area):
+        if self.trace_info_dock is None:
+            return
+        main_window = self.iface.mainWindow()
+        try:
+            main_window.setDockNestingEnabled(True)
+        except Exception:
+            pass
+
+        candidates = []
+        for dock in main_window.findChildren(QDockWidget):
+            if dock is self.trace_info_dock:
+                continue
+            try:
+                if dock.isFloating():
+                    continue
+                if main_window.dockWidgetArea(dock) != area:
+                    continue
+            except Exception:
+                continue
+            candidates.append(dock)
+
+        if not candidates:
+            return
+
+        tokens = (
+            "browser",
+            "processing",
+            "style",
+            "layer",
+            "raster linker",
+            "strumenti di processing",
+            "stile layer",
+        )
+
+        def _dock_score(dock):
+            text = f"{dock.windowTitle()} {dock.objectName()}".lower()
+            score = 0
+            for token in tokens:
+                if token in text:
+                    score += 10
+            if dock.isVisible():
+                score += 3
+            return score
+
+        target = sorted(candidates, key=_dock_score, reverse=True)[0]
+        try:
+            main_window.tabifyDockWidget(target, self.trace_info_dock)
+        except Exception:
+            pass
 
     def _undock_trace_info(self):
         if self.trace_info_dock is None:
@@ -259,7 +318,7 @@ class TraceInfoMixin:
                 (
                     "1) Open/create a project in Project Manager.\n"
                     "2) Import time-slices and load the target group.\n"
-                    "3) Open Line Info from the pencil icon.\n"
+                    "3) Open 2D/3D Draw Panel from the pencil icon.\n"
                     "4) Use Draw 2D Line to capture traces."
                 ),
             ),
@@ -382,7 +441,7 @@ class TraceInfoMixin:
         self._ensure_trace_actions()
 
         main_window = self.iface.mainWindow()
-        dock = QDockWidget("RasterLinker Line Info", main_window)
+        dock = QDockWidget("2D/3D Draw Panel", main_window)
         dock.setObjectName("RasterLinkerTraceInfoDock")
         dock.setFeatures(
             QDockWidget.DockWidgetMovable

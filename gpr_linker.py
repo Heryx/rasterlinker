@@ -172,7 +172,7 @@ class RasterLinkerPlugin(
         self._ensure_trace_actions()
         self.trace_info_action = self.add_action(
             icon_path,
-            text=self.tr(u'RasterLinker Line Info'),
+            text=self.tr(u'2D/3D Draw Panel'),
             callback=self.open_trace_info_tab,
             parent=self.iface.mainWindow(),
         )

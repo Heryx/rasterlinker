@@ -283,7 +283,7 @@ class TraceToolsMixin:
         )
         self._add_trace_toolbar_action(
             None,
-            "Line Info",
+            "Draw Panel",
             self.open_trace_info_tab,
             "mActionOpenTable.svg",
             "mActionOpenTable.svg",
@@ -333,7 +333,7 @@ class TraceToolsMixin:
             "Copy",
             "Paste",
             "Delete",
-            "Line Info",
+            "Draw Panel",
             "Workflow Check",
         ):
             action = self.trace_toolbar_actions.get(name)
