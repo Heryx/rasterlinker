@@ -18,14 +18,17 @@ PROJECT_FOLDERS = (
     "exports",
     "metadata",
 )
-CATALOG_SCHEMA_VERSION = 2
+CATALOG_VERSION = 3
+# Legacy alias kept for backward compatibility with older code/sidecars.
+CATALOG_SCHEMA_VERSION = CATALOG_VERSION
 SURFER_GRID_EXTENSIONS = (".grd", ".gsag", ".gsbg")
 
 
 def _default_catalog(project_root):
     now = utc_now_iso()
     return {
-        "schema_version": CATALOG_SCHEMA_VERSION,
+        "catalog_version": CATALOG_VERSION,
+        "schema_version": CATALOG_VERSION,
         "project_root": project_root,
         "created_at": now,
         "updated_at": now,
@@ -58,23 +61,132 @@ def catalog_path(project_root):
     return os.path.join(project_root, "metadata", "project_catalog.json")
 
 
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _detect_catalog_version(data):
+    if not isinstance(data, dict):
+        return 0
+    if "catalog_version" in data:
+        return max(0, _safe_int(data.get("catalog_version"), 0))
+    if "schema_version" in data:
+        return max(0, _safe_int(data.get("schema_version"), 0))
+    # Legacy fallback: existing dict without explicit version.
+    return 1 if data else 0
+
+
+def _write_catalog_file(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=True)
+    return path
+
+
+def _migrate_catalog_v0_to_v1(project_root, data):
+    data = dict(data or {})
+    now = utc_now_iso()
+    data.setdefault("project_root", project_root)
+    data.setdefault("created_at", now)
+    data.setdefault("updated_at", now)
+    data.setdefault("models_3d", [])
+    data.setdefault("radargrams", [])
+    data.setdefault("timeslices", [])
+    data.setdefault("links", [])
+    data.setdefault("raster_groups", [])
+    data["catalog_version"] = 1
+    data["schema_version"] = 1
+    return data
+
+
+def _migrate_catalog_v1_to_v2(project_root, data):
+    data = dict(data or {})
+    data.setdefault("raster_groups", [])
+    if not data["raster_groups"]:
+        data["raster_groups"] = [
+            {
+                "id": "grp_imported",
+                "name": "Imported",
+                "radargram_ids": [r.get("id") for r in data.get("radargrams", []) if isinstance(r, dict) and r.get("id")],
+                "timeslice_ids": [t.get("id") for t in data.get("timeslices", []) if isinstance(t, dict) and t.get("id")],
+                "created_at": utc_now_iso(),
+            }
+        ]
+    data["catalog_version"] = 2
+    data["schema_version"] = 2
+    return data
+
+
+def _migrate_catalog_v2_to_v3(project_root, data):
+    data = dict(data or {})
+    # Formalize catalog_version while keeping schema_version compatibility key.
+    data["catalog_version"] = 3
+    data["schema_version"] = 3
+    return data
+
+
+_CATALOG_MIGRATIONS = {
+    0: _migrate_catalog_v0_to_v1,
+    1: _migrate_catalog_v1_to_v2,
+    2: _migrate_catalog_v2_to_v3,
+}
+
+
+def _apply_catalog_migrations(project_root, data):
+    migrated = dict(data or {})
+    source_version = _detect_catalog_version(migrated)
+    applied = []
+    current = source_version
+
+    # Keep forward compatibility: do not downgrade unknown future versions.
+    if current > CATALOG_VERSION:
+        return migrated, source_version, current, applied
+
+    while current < CATALOG_VERSION:
+        prev = current
+        fn = _CATALOG_MIGRATIONS.get(current)
+        if fn is None:
+            break
+        migrated = fn(project_root, migrated)
+        next_version = _detect_catalog_version(migrated)
+        if next_version <= prev:
+            # Safety net for malformed migration functions.
+            next_version = prev + 1
+            migrated["catalog_version"] = next_version
+            migrated["schema_version"] = next_version
+        current = next_version
+        applied.append(current)
+
+    if current < CATALOG_VERSION:
+        migrated["catalog_version"] = CATALOG_VERSION
+        migrated["schema_version"] = CATALOG_VERSION
+        current = CATALOG_VERSION
+        applied.append(current)
+
+    return migrated, source_version, current, applied
+
+
 def load_catalog(project_root):
     path = catalog_path(project_root)
     if not os.path.exists(path):
         return _default_catalog(project_root)
     with open(path, "r", encoding="utf-8") as f:
         loaded = json.load(f)
-    return ensure_catalog_schema(project_root, loaded)
+
+    normalized, info = ensure_catalog_schema(project_root, loaded, return_info=True)
+    if info.get("changed"):
+        _write_catalog_file(path, normalized)
+    return normalized
 
 
 def save_catalog(project_root, data):
     data = ensure_catalog_schema(project_root, data)
     data["updated_at"] = utc_now_iso()
     path = catalog_path(project_root)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=True)
-    return path
+    return _write_catalog_file(path, data)
 
 
 def register_model_3d(project_root, model_record):
@@ -112,7 +224,10 @@ def register_link(project_root, link_record):
     return save_catalog(project_root, data)
 
 
-def ensure_catalog_schema(project_root, data):
+def ensure_catalog_schema(project_root, data, return_info=False):
+    raw_input = dict(data or {}) if isinstance(data, dict) else {}
+    migrated, raw_version, final_version, applied_migrations = _apply_catalog_migrations(project_root, raw_input)
+    data = dict(migrated or {})
     if not isinstance(data, dict):
         data = {}
 
@@ -121,7 +236,11 @@ def ensure_catalog_schema(project_root, data):
         if key not in data:
             data[key] = value if not isinstance(value, list) else []
 
-    data["schema_version"] = int(data.get("schema_version") or CATALOG_SCHEMA_VERSION)
+    detected_version = _detect_catalog_version(data)
+    if detected_version < CATALOG_VERSION:
+        detected_version = CATALOG_VERSION
+    data["catalog_version"] = detected_version
+    data["schema_version"] = detected_version
     data["project_root"] = project_root
     data["models_3d"] = [normalize_model_record(v) for v in data.get("models_3d", []) if isinstance(v, dict)]
     data["radargrams"] = [normalize_radargram_record(v) for v in data.get("radargrams", []) if isinstance(v, dict)]
@@ -145,6 +264,19 @@ def ensure_catalog_schema(project_root, data):
         for group in data["raster_groups"]:
             group["radargram_ids"] = [rid for rid in group.get("radargram_ids", []) if rid in known_radargrams]
             group["timeslice_ids"] = [tid for tid in group.get("timeslice_ids", []) if tid in known_timeslices]
+
+    info = {
+        "raw_version": raw_version,
+        "final_version": data.get("catalog_version"),
+        "applied_migrations": applied_migrations,
+        "changed": bool(
+            applied_migrations
+            or raw_input != data
+            or final_version != data.get("catalog_version")
+        ),
+    }
+    if return_info:
+        return data, info
     return data
 
 
@@ -410,7 +542,8 @@ def save_radargram_sidecar(project_root, radargram_record):
     sidecar_path = os.path.join(metadata_dir, f"{rid}.json")
 
     payload = {
-        "schema_version": CATALOG_SCHEMA_VERSION,
+        "catalog_version": CATALOG_VERSION,
+        "schema_version": CATALOG_VERSION,
         "id": radargram_record.get("id"),
         "normalized_name": radargram_record.get("normalized_name"),
         "project_path": radargram_record.get("project_path"),
