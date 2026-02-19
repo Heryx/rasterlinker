@@ -1,13 +1,213 @@
 # -*- coding: utf-8 -*-
 """Trace tools mixin for RasterLinker plugin."""
 
+import os
+
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
-from PyQt5.QtWidgets import QWidget, QHBoxLayout, QToolButton
+from PyQt5.QtWidgets import QWidget, QHBoxLayout, QToolButton, QMessageBox
+from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes
+
+from .project_catalog import load_catalog
 
 
 class TraceToolsMixin:
+    def _safe_feature_count(self, layer):
+        if layer is None:
+            return 0
+        try:
+            return int(layer.featureCount())
+        except Exception:
+            return 0
+
+    def _line_layers_in_project(self):
+        layers = []
+        for lyr in QgsProject.instance().mapLayers().values():
+            if not isinstance(lyr, QgsVectorLayer):
+                continue
+            try:
+                if lyr.geometryType() != QgsWkbTypes.LineGeometry:
+                    continue
+            except Exception:
+                continue
+            if not lyr.isValid():
+                continue
+            layers.append(lyr)
+        return layers
+
+    def _is_trace_related_line_layer(self, layer):
+        if layer is None:
+            return False
+        try:
+            field_names = {f.name() for f in layer.fields()}
+        except Exception:
+            return False
+        return "trace_id" in field_names or ("z_mode" in field_names and "z_source" in field_names)
+
+    def _layer_source_file_exists(self, layer):
+        if layer is None:
+            return False
+        src = (layer.source() or "").strip()
+        if not src or src.lower().startswith("memory:"):
+            return False
+        base = src.split("|", 1)[0].strip()
+        if not base:
+            return False
+        return os.path.exists(base)
+
+    def _collect_end_to_end_workflow_status(self):
+        status = []
+
+        project_root = self._require_project_root(notify=False) if hasattr(self, "_require_project_root") else None
+        project_ok = bool(project_root and os.path.isdir(project_root))
+        status.append(
+            {
+                "step": "1) Project Manager",
+                "ok": project_ok,
+                "details": (
+                    f"Project linked: {project_root}"
+                    if project_ok
+                    else "No active RasterLinker project. Open Project Manager first."
+                ),
+            }
+        )
+
+        groups_with_images = 0
+        loaded_rasters = 0
+        active_ts_id = ""
+        if project_ok:
+            try:
+                catalog = load_catalog(project_root)
+                groups_with_images = len([g for g in catalog.get("raster_groups", []) if g.get("timeslice_ids")])
+            except Exception:
+                groups_with_images = 0
+            try:
+                loaded_rasters = len(list(self._iter_plugin_raster_layers() or []))
+            except Exception:
+                loaded_rasters = 0
+            try:
+                payload = self._active_timeslice_payload() if hasattr(self, "_active_timeslice_payload") else None
+                if isinstance(payload, dict):
+                    active_ts_id = (payload.get("timeslice_id") or "").strip()
+            except Exception:
+                active_ts_id = ""
+
+        import_ok = bool(project_ok and groups_with_images > 0 and loaded_rasters > 0 and active_ts_id)
+        status.append(
+            {
+                "step": "2) Import Group",
+                "ok": import_ok,
+                "details": (
+                    f"Groups with images: {groups_with_images}, loaded rasters: {loaded_rasters}, active time-slice: {active_ts_id}"
+                    if import_ok
+                    else (
+                        f"Need imported/loaded group and active time-slice. "
+                        f"(groups with images: {groups_with_images}, loaded rasters: {loaded_rasters}, active time-slice: {'yes' if active_ts_id else 'no'})"
+                    )
+                ),
+            }
+        )
+
+        trace_layer = self._current_trace_layer(prefer_active=True, require_trace=True) if hasattr(self, "_current_trace_layer") else None
+        trace_layer_name = trace_layer.name() if trace_layer is not None else ""
+        trace_feature_count = self._safe_feature_count(trace_layer)
+        draw_ok = bool(trace_layer is not None and trace_feature_count > 0)
+        status.append(
+            {
+                "step": "3) Draw 2D",
+                "ok": draw_ok,
+                "details": (
+                    f"Trace layer: {trace_layer_name}, features: {trace_feature_count}"
+                    if draw_ok
+                    else "No trace features detected yet. Draw at least one 2D line."
+                ),
+            }
+        )
+
+        has_pending_edits = False
+        if trace_layer is not None:
+            try:
+                has_pending_edits = bool(trace_layer.isEditable() and trace_layer.isModified())
+            except Exception:
+                has_pending_edits = False
+        save_ok = bool(draw_ok and not has_pending_edits)
+        status.append(
+            {
+                "step": "4) Save Edits",
+                "ok": save_ok,
+                "details": (
+                    "No pending edits on active trace layer."
+                    if save_ok
+                    else "Pending edits detected. Use 'Save Edits' before Build 3D."
+                ),
+            }
+        )
+
+        line_layers = self._line_layers_in_project()
+        trace_line_layers = [lyr for lyr in line_layers if self._is_trace_related_line_layer(lyr)]
+        built3d_layers = [lyr for lyr in trace_line_layers if QgsWkbTypes.hasZ(lyr.wkbType())]
+        build_ok = len(built3d_layers) > 0
+        status.append(
+            {
+                "step": "5) Build 3D",
+                "ok": build_ok,
+                "details": (
+                    f"3D line layers found: {len(built3d_layers)}"
+                    if build_ok
+                    else "No 3D line layer detected. Run 'Build 3D' first."
+                ),
+            }
+        )
+
+        exported_layers = [lyr for lyr in trace_line_layers if self._layer_source_file_exists(lyr)]
+        export_ok = len(exported_layers) > 0
+        status.append(
+            {
+                "step": "6) Export",
+                "ok": export_ok,
+                "details": (
+                    f"Exported file-backed line layers: {len(exported_layers)}"
+                    if export_ok
+                    else "No exported line file detected in project. Use 'Export Layer'."
+                ),
+            }
+        )
+
+        return status
+
+    def run_end_to_end_workflow_check(self, checked=False):
+        status = self._collect_end_to_end_workflow_status()
+        total = len(status)
+        passed = len([s for s in status if s.get("ok")])
+        first_missing = next((s for s in status if not s.get("ok")), None)
+
+        lines = [
+            "RasterLinker End-to-End Workflow Check",
+            "",
+            f"Passed: {passed}/{total}",
+            "",
+        ]
+        for item in status:
+            state = "OK" if item.get("ok") else "MISSING"
+            lines.append(f"[{state}] {item.get('step')}")
+            lines.append(f"    {item.get('details')}")
+        if first_missing is not None:
+            lines.extend(
+                [
+                    "",
+                    f"First blocking step: {first_missing.get('step')}",
+                    "Complete it, then run Workflow Check again.",
+                ]
+            )
+
+        title = "Workflow Check"
+        text = "\n".join(lines)
+        if passed == total:
+            QMessageBox.information(self._ui_parent(), title, text)
+        else:
+            QMessageBox.warning(self._ui_parent(), title, text)
+
     def _add_trace_toolbar_action(self, toolbar, text, callback, *icon_names):
         icon = self._qgis_theme_icon(*icon_names)
         if icon is None or icon.isNull():
@@ -90,6 +290,13 @@ class TraceToolsMixin:
         )
         self._add_trace_toolbar_action(
             None,
+            "Workflow Check",
+            self.run_end_to_end_workflow_check,
+            "mActionCheckValidity.svg",
+            "mActionOptions.svg",
+        )
+        self._add_trace_toolbar_action(
+            None,
             "Build 3D",
             self.build_trace_3d_from_depth,
             "mActionTransform.svg",
@@ -127,6 +334,7 @@ class TraceToolsMixin:
             "Paste",
             "Delete",
             "Line Info",
+            "Workflow Check",
         ):
             action = self.trace_toolbar_actions.get(name)
             if action is not None:
@@ -169,6 +377,7 @@ class TraceToolsMixin:
             "Copy",
             "Paste",
             "Delete",
+            "Workflow Check",
             "Build 3D",
             "Orthometric 3D",
             "Export Layer",
@@ -187,4 +396,3 @@ class TraceToolsMixin:
 
         tools_layout.addStretch(1)
         return tools_widget
-

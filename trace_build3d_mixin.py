@@ -17,6 +17,39 @@ from qgis.core import (
 
 
 class TraceBuild3DMixin:
+    def _ensure_saved_before_next_step(self, layer, action_title):
+        if layer is None:
+            return False
+        try:
+            pending = bool(layer.isEditable() and layer.isModified())
+        except Exception:
+            pending = False
+        if not pending:
+            return True
+
+        answer = QMessageBox.question(
+            self._ui_parent(),
+            action_title,
+            (
+                "The active line layer has unsaved edits.\n"
+                "Save edits now before continuing?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+
+        try:
+            self.save_trace_layer_edits()
+        except Exception:
+            return False
+
+        try:
+            return not bool(layer.isEditable() and layer.isModified())
+        except Exception:
+            return True
+
     def _feature_depth_value(self, layer, feat):
         def _get(field_name):
             idx = layer.fields().indexOf(field_name)
@@ -365,6 +398,9 @@ class TraceBuild3DMixin:
         if not self._is_line_layer(source_layer):
             QMessageBox.warning(self._ui_parent(), "Build 3D", "Active layer is not a line layer.")
             return
+        if not self._ensure_saved_before_next_step(source_layer, "Build 3D"):
+            self._notify_info("Build 3D cancelled: save edits first.", duration=5)
+            return
 
         mode, output_name = self._choose_build_3d_mode(source_layer, default_mode=default_mode)
         if not mode or not output_name:
@@ -469,6 +505,9 @@ class TraceBuild3DMixin:
             layer = self._select_line_layer_dialog(require_trace=False)
         if layer is None:
             return
+        if not self._ensure_saved_before_next_step(layer, "Export Line Layer"):
+            self._notify_info("Export cancelled: save edits first.", duration=5)
+            return
 
         output_path, selected_filter = QFileDialog.getSaveFileName(
             self._ui_parent(),
@@ -511,4 +550,3 @@ class TraceBuild3DMixin:
         if exported.isValid():
             QgsProject.instance().addMapLayer(exported)
         self._notify_info(f"Layer exported: {output_path}", duration=7)
-
