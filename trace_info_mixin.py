@@ -2,7 +2,14 @@
 """Trace info panel mixin for RasterLinker plugin."""
 
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QMessageBox, QDockWidget, QTableWidget, QTableWidgetItem, QAbstractItemView
+from qgis.PyQt.QtWidgets import (
+    QMessageBox,
+    QDockWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QTableView,
+    QAbstractItemView,
+)
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -18,8 +25,26 @@ from PyQt5.QtWidgets import (
     QTabWidget,
 )
 
+from .trace_info_table_model import TraceInfoTableModel
+
 
 class TraceInfoMixin:
+    def _trace_info_payload_from_table_row(self, row):
+        if self.trace_info_table is None:
+            return None
+        model = self.trace_info_table.model()
+        if model is None:
+            return None
+        if row < 0 or row >= model.rowCount():
+            return None
+        index = model.index(row, 0)
+        if not index.isValid():
+            return None
+        payload = model.data(index, Qt.UserRole)
+        if isinstance(payload, dict):
+            return payload
+        return None
+
     def _trace_info_settings_key(self, key):
         if hasattr(self, "_settings_key"):
             return self._settings_key(f"trace_info/{key}")
@@ -174,7 +199,12 @@ class TraceInfoMixin:
             return
         self.trace_info_selection_guard = True
         try:
-            if self.trace_info_table is not None and row >= 0 and row < self.trace_info_table.rowCount():
+            if (
+                self.trace_info_table is not None
+                and self.trace_info_table.model() is not None
+                and row >= 0
+                and row < self.trace_info_table.model().rowCount()
+            ):
                 self.trace_info_table.selectRow(row)
         finally:
             self.trace_info_selection_guard = False
@@ -185,7 +215,11 @@ class TraceInfoMixin:
             return
         self.trace_info_selection_guard = True
         try:
-            if self.trace_info_table is not None and row_idx < self.trace_info_table.rowCount():
+            if (
+                self.trace_info_table is not None
+                and self.trace_info_table.model() is not None
+                and row_idx < self.trace_info_table.model().rowCount()
+            ):
                 self.trace_info_table.selectRow(row_idx)
             if self.trace_info_form_list is not None and row_idx < self.trace_info_form_list.rowCount():
                 self.trace_info_form_list.selectRow(row_idx)
@@ -330,16 +364,14 @@ class TraceInfoMixin:
             selected_rows = self.trace_info_table.selectionModel().selectedRows() if self.trace_info_table.selectionModel() else []
             if selected_rows:
                 row = selected_rows[0].row()
-            elif self.trace_info_table.rowCount() > 0 and self.trace_info_form_list is None:
+            elif self.trace_info_table.model() is not None and self.trace_info_table.model().rowCount() > 0 and self.trace_info_form_list is None:
                 row = 0
             if row is not None and row >= 0:
-                item0 = self.trace_info_table.item(row, 0)
-                if item0 is not None:
-                    payload = item0.data(Qt.UserRole)
-                    if isinstance(payload, dict):
-                        row_data = payload
-                    if not selected_rows and self.trace_info_form_list is None:
-                        self._select_trace_info_row(row)
+                payload = self._trace_info_payload_from_table_row(row)
+                if isinstance(payload, dict):
+                    row_data = payload
+                if not selected_rows and self.trace_info_form_list is None:
+                    self._select_trace_info_row(row)
 
         # In form view, allow picking from the left list even when table page is hidden.
         if row_data is None and self.trace_info_form_list is not None:
@@ -356,13 +388,16 @@ class TraceInfoMixin:
                         row_data = payload
 
         # Ensure one selected row when data exists.
-        if row_data is None and self.trace_info_table is not None and self.trace_info_table.rowCount() > 0:
+        if (
+            row_data is None
+            and self.trace_info_table is not None
+            and self.trace_info_table.model() is not None
+            and self.trace_info_table.model().rowCount() > 0
+        ):
             self._select_trace_info_row(0)
-            item0 = self.trace_info_table.item(0, 0)
-            if item0 is not None:
-                payload = item0.data(Qt.UserRole)
-                if isinstance(payload, dict):
-                    row_data = payload
+            payload = self._trace_info_payload_from_table_row(0)
+            if isinstance(payload, dict):
+                row_data = payload
 
         key_map = {
             "FID": "fid",
@@ -531,8 +566,9 @@ class TraceInfoMixin:
         table_page_layout.setContentsMargins(0, 0, 0, 0)
         table_page_layout.setSpacing(0)
 
-        table = QTableWidget(0, 6, table_page)
-        table.setHorizontalHeaderLabels(["FID", "Trace ID", "Time-slice", "Depth", "Z mode", "Length"])
+        table = QTableView(table_page)
+        table_model = TraceInfoTableModel(table)
+        table.setModel(table_model)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -630,6 +666,7 @@ class TraceInfoMixin:
         self.trace_info_dock = dock
         self.trace_info_is_docked = False
         self.trace_info_table = table
+        self.trace_info_model = table_model
         self.trace_info_filter_edit = filter_edit
         self.trace_info_mode_combo = mode_combo
         self.trace_info_sort_field_combo = sort_field_combo
@@ -655,7 +692,7 @@ class TraceInfoMixin:
         self.refresh_trace_info_table()
 
     def refresh_trace_info_table(self, checked=False):
-        if self.trace_info_table is None:
+        if self.trace_info_table is None or self.trace_info_model is None:
             return
         layer = self._current_trace_layer(prefer_active=True, require_trace=False)
         selected_fid = None
@@ -663,12 +700,10 @@ class TraceInfoMixin:
             selected_rows = self.trace_info_table.selectionModel().selectedRows()
             if selected_rows:
                 row = selected_rows[0].row()
-                item0 = self.trace_info_table.item(row, 0)
-                if item0 is not None:
-                    payload = item0.data(Qt.UserRole)
-                    if isinstance(payload, dict):
-                        selected_fid = payload.get("fid")
-        self.trace_info_table.setRowCount(0)
+                payload = self._trace_info_payload_from_table_row(row)
+                if isinstance(payload, dict):
+                    selected_fid = payload.get("fid")
+        self.trace_info_model.set_rows([])
         if self.trace_info_form_list is not None:
             self.trace_info_form_list.setRowCount(0)
         if not self._is_line_layer(layer):
@@ -760,24 +795,10 @@ class TraceInfoMixin:
             value_key = {"trace_id": "trace_id", "timeslice": "timeslice", "z_mode": "z_mode"}.get(sort_field, "trace_id")
             rows.sort(key=lambda r: str(r.get(value_key) or "").lower(), reverse=sort_desc)
 
-        self.trace_info_table.setRowCount(len(rows))
+        self.trace_info_model.set_rows(rows)
         if self.trace_info_form_list is not None:
             self.trace_info_form_list.setRowCount(len(rows))
-        for row_idx, row_data in enumerate(rows):
-            row_vals = (
-                row_data.get("fid"),
-                row_data.get("trace_id"),
-                row_data.get("timeslice"),
-                row_data.get("depth_text"),
-                row_data.get("z_mode"),
-                f"{row_data.get('length_num', 0.0):.2f}",
-            )
-            for col_idx, val in enumerate(row_vals):
-                item = QTableWidgetItem(str(val))
-                if col_idx == 0:
-                    item.setData(Qt.UserRole, row_data)
-                self.trace_info_table.setItem(row_idx, col_idx, item)
-            if self.trace_info_form_list is not None:
+            for row_idx, row_data in enumerate(rows):
                 fid_item = QTableWidgetItem(str(row_data.get("fid")))
                 fid_item.setData(Qt.UserRole, row_data)
                 trace_item = QTableWidgetItem(str(row_data.get("trace_id")))

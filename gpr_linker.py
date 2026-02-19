@@ -122,6 +122,7 @@ class RasterLinkerPlugin(
         self.trace_capture_context = None
         self.trace_info_dock = None
         self.trace_info_table = None
+        self.trace_info_model = None
         self.trace_info_filter_edit = None
         self.trace_info_mode_combo = None
         self.trace_info_sort_field_combo = None
@@ -208,6 +209,7 @@ class RasterLinkerPlugin(
             self.trace_info_dock.deleteLater()
             self.trace_info_dock = None
             self.trace_info_table = None
+            self.trace_info_model = None
             self.trace_info_filter_edit = None
             self.trace_info_mode_combo = None
             self.trace_info_sort_field_combo = None
