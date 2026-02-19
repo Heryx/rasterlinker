@@ -146,50 +146,57 @@ class ProjectManagerDialog(QDialog):
         self.import_manifest_btn.setMinimumHeight(28)
         import_layout.addWidget(self.import_manifest_btn, 1, 1)
 
-        catalog_box = QGroupBox("Catalog & QA")
+        catalog_box = QGroupBox("Data Catalog & QA")
         catalog_layout = QGridLayout(catalog_box)
         catalog_layout.setHorizontalSpacing(8)
         catalog_layout.setVerticalSpacing(8)
 
+        catalog_scope_label = QLabel(
+            "3D/Radargram Editor manages volumes and radargrams.\n"
+            "Time-slice Manager handles time-slices and raster groups."
+        )
+        catalog_scope_label.setWordWrap(True)
+        catalog_layout.addWidget(catalog_scope_label, 0, 0, 1, 2)
+
         view_catalog_btn = QPushButton("View Catalog")
         view_catalog_btn.clicked.connect(self._view_catalog_summary)
         view_catalog_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(view_catalog_btn, 0, 0)
+        catalog_layout.addWidget(view_catalog_btn, 1, 0)
 
-        edit_catalog_btn = QPushButton("Catalog Editor")
+        edit_catalog_btn = QPushButton("3D/Radargram Editor")
         edit_catalog_btn.clicked.connect(self._open_catalog_editor)
         edit_catalog_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(edit_catalog_btn, 0, 1)
+        catalog_layout.addWidget(edit_catalog_btn, 1, 1)
 
         validate_btn = QPushButton("Validate")
         validate_btn.clicked.connect(self._validate_project)
         validate_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(validate_btn, 1, 0)
+        catalog_layout.addWidget(validate_btn, 2, 0)
 
         crs_btn = QPushButton("Set Import CRS")
         crs_btn.clicked.connect(self._choose_default_import_crs)
         crs_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(crs_btn, 1, 1)
+        catalog_layout.addWidget(crs_btn, 2, 1)
 
         self.cleanup_btn = QPushButton("Cleanup Catalog")
         self.cleanup_btn.clicked.connect(self._cleanup_catalog)
         self.cleanup_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(self.cleanup_btn, 2, 0)
+        catalog_layout.addWidget(self.cleanup_btn, 3, 0)
 
         reload_btn = QPushButton("Reload Layers")
         reload_btn.clicked.connect(self._reload_imported_layers)
         reload_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(reload_btn, 2, 1)
+        catalog_layout.addWidget(reload_btn, 3, 1)
 
         links_btn = QPushButton("Link Editor")
         links_btn.clicked.connect(self._open_link_editor)
         links_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(links_btn, 3, 0)
+        catalog_layout.addWidget(links_btn, 4, 0)
 
-        ts_mgr_btn = QPushButton("Time-slice Manager")
+        ts_mgr_btn = QPushButton("Time-slice/Group Manager")
         ts_mgr_btn.clicked.connect(self._open_timeslice_group_manager)
         ts_mgr_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(ts_mgr_btn, 3, 1)
+        catalog_layout.addWidget(ts_mgr_btn, 4, 1)
 
         package_box = QGroupBox("Package")
         package_layout = QGridLayout(package_box)
@@ -1724,7 +1731,11 @@ class ProjectManagerDialog(QDialog):
     def _open_catalog_editor(self):
         if not self._ensure_project_ready():
             return
-        dlg = CatalogEditorDialog(self.project_root, self)
+        dlg = CatalogEditorDialog(
+            self.project_root,
+            self,
+            open_timeslice_manager_callback=self._open_timeslice_group_manager,
+        )
         dlg.exec_()
 
     def _open_link_editor(self):
@@ -1740,6 +1751,7 @@ class ProjectManagerDialog(QDialog):
             self.project_root,
             self,
             on_updated=self._notify_project_updated,
+            open_catalog_editor_callback=self._open_catalog_editor,
         )
         dlg.exec_()
         self._notify_project_updated()

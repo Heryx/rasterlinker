@@ -30,10 +30,11 @@ from .timeslice_group_table_models import TimesliceTableModel, GroupTableModel
 
 
 class TimesliceGroupManagerDialog(QDialog):
-    def __init__(self, project_root, parent=None, on_updated=None):
+    def __init__(self, project_root, parent=None, on_updated=None, open_catalog_editor_callback=None):
         super().__init__(parent)
         self.project_root = project_root
         self.on_updated = on_updated
+        self.open_catalog_editor_callback = open_catalog_editor_callback
         self._catalog = {}
         self.setWindowTitle("RasterLinker Time-slice / Group Manager")
         self.resize(1180, 560)
@@ -182,6 +183,10 @@ class TimesliceGroupManagerDialog(QDialog):
         tabs.addTab(grp_tab, "Groups")
 
         footer = QHBoxLayout()
+        if callable(self.open_catalog_editor_callback):
+            open_catalog_btn = QPushButton("Open 3D/Radargram Editor")
+            open_catalog_btn.clicked.connect(self._open_catalog_editor)
+            footer.addWidget(open_catalog_btn)
         footer.addStretch(1)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
@@ -990,3 +995,16 @@ class TimesliceGroupManagerDialog(QDialog):
         idx = self.filter_group_combo.findData(gid)
         if idx >= 0:
             self.filter_group_combo.setCurrentIndex(idx)
+
+    def _open_catalog_editor(self):
+        if not callable(self.open_catalog_editor_callback):
+            return
+        self.close()
+        try:
+            self.open_catalog_editor_callback()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Time-slice Manager",
+                f"Unable to open 3D/Radargram Editor:\n{e}",
+            )

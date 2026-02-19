@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QComboBox,
     QTableWidget,
@@ -21,16 +22,24 @@ from .project_catalog import load_catalog, save_catalog, sanitize_filename
 
 
 class CatalogEditorDialog(QDialog):
-    def __init__(self, project_root, parent=None):
+    def __init__(self, project_root, parent=None, open_timeslice_manager_callback=None):
         super().__init__(parent)
         self.project_root = project_root
-        self.setWindowTitle("RasterLinker Catalog Editor")
+        self.open_timeslice_manager_callback = open_timeslice_manager_callback
+        self.setWindowTitle("RasterLinker 3D/Radargram Editor")
         self.resize(880, 420)
         self._build_ui()
         self._refresh()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+
+        scope_info = QLabel(
+            "This editor manages only 3D models and radargrams. "
+            "Use Time-slice Manager for time-slices and groups."
+        )
+        scope_info.setWordWrap(True)
+        layout.addWidget(scope_info)
 
         top = QHBoxLayout()
         self.kind_combo = QComboBox()
@@ -54,6 +63,11 @@ class CatalogEditorDialog(QDialog):
         delete_btn = QPushButton("Delete File + Remove")
         delete_btn.clicked.connect(self._delete_file_and_remove_selected)
         top.addWidget(delete_btn)
+
+        if callable(self.open_timeslice_manager_callback):
+            switch_btn = QPushButton("Open Time-slice Manager")
+            switch_btn.clicked.connect(self._open_timeslice_manager)
+            top.addWidget(switch_btn)
 
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
@@ -93,14 +107,14 @@ class CatalogEditorDialog(QDialog):
     def _rename_selected(self):
         row = self._selected_row()
         if row is None:
-            QMessageBox.information(self, "Catalog Editor", "Select a row first.")
+            QMessageBox.information(self, "3D/Radargram Editor", "Select a row first.")
             return
 
         data, kind, records = self._records()
         rec = records[row]
         old_path = rec.get("project_path")
         if not old_path or not os.path.exists(old_path):
-            QMessageBox.warning(self, "Catalog Editor", "Selected file does not exist on disk.")
+            QMessageBox.warning(self, "3D/Radargram Editor", "Selected file does not exist on disk.")
             return
 
         old_name = os.path.basename(old_path)
@@ -111,7 +125,7 @@ class CatalogEditorDialog(QDialog):
         new_name = sanitize_filename(new_name.strip())
         new_path = os.path.join(os.path.dirname(old_path), new_name)
         if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(old_path):
-            QMessageBox.warning(self, "Catalog Editor", "A file with this name already exists.")
+            QMessageBox.warning(self, "3D/Radargram Editor", "A file with this name already exists.")
             return
 
         try:
@@ -122,12 +136,12 @@ class CatalogEditorDialog(QDialog):
             save_catalog(self.project_root, data)
             self._refresh()
         except Exception as e:
-            QMessageBox.critical(self, "Catalog Editor", f"Rename failed:\n{e}")
+            QMessageBox.critical(self, "3D/Radargram Editor", f"Rename failed:\n{e}")
 
     def _remove_selected(self):
         row = self._selected_row()
         if row is None:
-            QMessageBox.information(self, "Catalog Editor", "Select a row first.")
+            QMessageBox.information(self, "3D/Radargram Editor", "Select a row first.")
             return
 
         data, kind, records = self._records()
@@ -151,7 +165,7 @@ class CatalogEditorDialog(QDialog):
     def _delete_file_and_remove_selected(self):
         row = self._selected_row()
         if row is None:
-            QMessageBox.information(self, "Catalog Editor", "Select a row first.")
+            QMessageBox.information(self, "3D/Radargram Editor", "Select a row first.")
             return
 
         data, kind, records = self._records()
@@ -159,7 +173,7 @@ class CatalogEditorDialog(QDialog):
         pth = rec.get("project_path")
         name = rec.get("normalized_name") or rec.get("id") or "record"
         if not pth or not os.path.exists(pth):
-            QMessageBox.warning(self, "Catalog Editor", "Selected file is missing on disk.")
+            QMessageBox.warning(self, "3D/Radargram Editor", "Selected file is missing on disk.")
             return
 
         first = QMessageBox.question(
@@ -189,4 +203,17 @@ class CatalogEditorDialog(QDialog):
             save_catalog(self.project_root, data)
             self._refresh()
         except Exception as e:
-            QMessageBox.critical(self, "Catalog Editor", f"Delete failed:\n{e}")
+            QMessageBox.critical(self, "3D/Radargram Editor", f"Delete failed:\n{e}")
+
+    def _open_timeslice_manager(self):
+        if not callable(self.open_timeslice_manager_callback):
+            return
+        self.close()
+        try:
+            self.open_timeslice_manager_callback()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "3D/Radargram Editor",
+                f"Unable to open Time-slice Manager:\n{e}",
+            )
