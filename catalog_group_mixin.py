@@ -20,12 +20,14 @@ from qgis.core import (
 from .project_catalog import (
     assign_timeslices_to_group,
     create_raster_group,
-    link_surfer_grid_into_project,
     load_catalog,
-    normalize_copy_into_project,
-    register_timeslice,
+    register_timeslices_batch,
     remove_timeslices_from_group,
-    utc_now_iso,
+)
+from .background_tasks import (
+    TimesliceImportTask,
+    run_task_with_progress_dialog,
+    start_task_with_progress_dialog,
 )
 
 
@@ -364,7 +366,16 @@ class CatalogGroupMixin:
             self.on_group_selection_changed()
         return found
 
-    def _quick_import_timeslices_for_group(self, project_root, group):
+    def _quick_import_timeslices_for_group(self, project_root, group, on_finished=None):
+        def _finish(result):
+            if callable(on_finished):
+                try:
+                    on_finished(result)
+                except Exception:
+                    pass
+                return None
+            return result
+
         file_paths, _ = QFileDialog.getOpenFileNames(
             self.dlg,
             "Select Time-slice raster files",
@@ -372,7 +383,7 @@ class CatalogGroupMixin:
             "Rasters (*.tif *.tiff *.png *.jpg *.jpeg *.asc *.img);;All files (*.*)",
         )
         if not file_paths:
-            return {"cancelled": False, "imported": 0, "skipped": 0}
+            return _finish({"cancelled": False, "imported": 0, "skipped": 0})
 
         records = []
         invalid = []
@@ -387,7 +398,7 @@ class CatalogGroupMixin:
         for idx, src_path in enumerate(file_paths, start=1):
             if scan_progress.wasCanceled():
                 scan_progress.close()
-                return {"cancelled": True, "imported": 0, "skipped": 0}
+                return _finish({"cancelled": True, "imported": 0, "skipped": 0})
             scan_progress.setLabelText(f"Analyzing {idx}/{scan_total}: {os.path.basename(src_path)}")
             QApplication.processEvents()
             meta = self._inspect_timeslice(src_path)
@@ -422,7 +433,7 @@ class CatalogGroupMixin:
             )
 
         if not records:
-            return {"cancelled": False, "imported": 0, "skipped": skipped}
+            return _finish({"cancelled": False, "imported": 0, "skipped": skipped})
 
         missing_crs = [r for r in records if not (r.get("meta", {}).get("crs") or "").strip()]
         if missing_crs:
@@ -439,14 +450,14 @@ class CatalogGroupMixin:
             msg.exec_()
             clicked = msg.clickedButton()
             if clicked == cancel_btn:
-                return {"cancelled": True, "imported": 0, "skipped": skipped}
+                return _finish({"cancelled": True, "imported": 0, "skipped": skipped})
             if clicked == skip_btn:
                 records = [r for r in records if (r.get("meta", {}).get("crs") or "").strip()]
                 skipped += len(missing_crs)
             elif clicked == assign_btn:
                 preferred = self._ensure_preferred_import_crs()
                 if preferred is None or not preferred.isValid():
-                    return {"cancelled": True, "imported": 0, "skipped": skipped}
+                    return _finish({"cancelled": True, "imported": 0, "skipped": skipped})
                 authid = preferred.authid()
                 for rec in missing_crs:
                     rec["assigned_crs"] = authid
@@ -457,7 +468,7 @@ class CatalogGroupMixin:
                 pass
 
         if not records:
-            return {"cancelled": False, "imported": 0, "skipped": skipped}
+            return _finish({"cancelled": False, "imported": 0, "skipped": skipped})
 
         crs_values = sorted({(r.get("meta", {}).get("crs") or "").strip() for r in records if (r.get("meta", {}).get("crs") or "").strip()})
         if len(crs_values) > 1:
@@ -479,14 +490,14 @@ class CatalogGroupMixin:
             msg.exec_()
             clicked = msg.clickedButton()
             if clicked == cancel_btn:
-                return {"cancelled": True, "imported": 0, "skipped": skipped}
+                return _finish({"cancelled": True, "imported": 0, "skipped": skipped})
             if clicked == keep_target_btn:
                 before = len(records)
                 records = [r for r in records if (r.get("meta", {}).get("crs") or "").strip() == target_authid]
                 skipped += max(0, before - len(records))
 
         if not records:
-            return {"cancelled": False, "imported": 0, "skipped": skipped}
+            return _finish({"cancelled": False, "imported": 0, "skipped": skipped})
 
         with_warnings = [r for r in records if r.get("warnings")]
         if with_warnings:
@@ -509,103 +520,102 @@ class CatalogGroupMixin:
             msg.exec_()
             clicked = msg.clickedButton()
             if clicked == cancel_btn:
-                return {"cancelled": True, "imported": 0, "skipped": skipped}
+                return _finish({"cancelled": True, "imported": 0, "skipped": skipped})
             if clicked == skip_warned_btn:
                 before = len(records)
                 records = [r for r in records if not r.get("warnings")]
                 skipped += max(0, before - len(records))
 
         if not records:
-            return {"cancelled": False, "imported": 0, "skipped": skipped}
+            return _finish({"cancelled": False, "imported": 0, "skipped": skipped})
 
-        imported_ids = []
-        imported_count = 0
-        linked_grids = 0
-        failed = []
-        import_total = len(records)
-        import_progress = QProgressDialog("Importing selected images...", "Cancel", 0, import_total, self.dlg)
-        import_progress.setWindowTitle("Create Group - Import Images")
-        import_progress.setWindowModality(Qt.WindowModal)
-        import_progress.setMinimumDuration(0)
-        import_progress.setAutoClose(True)
-        import_progress.setAutoReset(True)
-        import_progress.setValue(0)
-        cancelled = False
-        for idx, rec in enumerate(records, start=1):
-            if import_progress.wasCanceled():
-                cancelled = True
-                break
-            source_path = rec.get("source_path")
-            import_progress.setLabelText(f"Importing {idx}/{import_total}: {os.path.basename(source_path or '')}")
-            QApplication.processEvents()
-            try:
-                project_path, normalized_name = normalize_copy_into_project(
-                    project_root, "timeslices_2d", source_path
+        import_task = TimesliceImportTask(
+            project_root,
+            records,
+            description="RasterLinker: Importing selected images",
+        )
+        def _finalize(done_task):
+            cancelled = bool(done_task.cancelled)
+            linked_grids = int(done_task.linked_grids)
+            failed = list(done_task.failed)
+            imported_records = list(done_task.imported_records)
+            imported_ids = []
+            imported_count = 0
+
+            if imported_records:
+                try:
+                    register_timeslices_batch(project_root, imported_records)
+                    imported_ids = [rec.get("id") for rec in imported_records if rec.get("id")]
+                    imported_count = len(imported_ids)
+                except Exception as e:
+                    failed.append(f"catalog write: {e}")
+                    imported_ids = []
+                    imported_count = 0
+
+            if imported_ids:
+                assign_timeslices_to_group(project_root, group.get("id"), imported_ids)
+                try:
+                    remove_timeslices_from_group(project_root, "grp_imported", imported_ids)
+                except Exception:
+                    pass
+
+            local_skipped = skipped
+            if failed:
+                preview = "\n".join(failed[:10])
+                extra = len(failed) - min(len(failed), 10)
+                if extra > 0:
+                    preview += f"\n... and {extra} more."
+                QMessageBox.warning(
+                    self.dlg,
+                    "Import warning",
+                    "Some files could not be imported:\n\n" + preview,
                 )
-                meta = self._inspect_timeslice(project_path)
-                warn_list = self._timeslice_georef_warnings(meta)
-                record = {
-                    "id": f"timeslice_{utc_now_iso()}_{normalized_name}",
-                    "name": os.path.splitext(normalized_name)[0],
-                    "normalized_name": normalized_name,
-                    "source_path": source_path,
-                    "project_path": project_path,
-                    "imported_at": utc_now_iso(),
-                    "crs": meta.get("crs"),
-                    "width": meta.get("width"),
-                    "height": meta.get("height"),
-                    "band_count": meta.get("band_count"),
-                    "extent": meta.get("extent"),
-                }
-                link_info = link_surfer_grid_into_project(
-                    project_root,
-                    reference_raster_path=project_path,
-                    source_raster_path=source_path,
-                )
-                if link_info:
-                    record.update(link_info)
-                    linked_grids += 1
-                assigned_authid = (rec.get("assigned_crs") or "").strip()
-                if assigned_authid:
-                    record["assigned_crs"] = assigned_authid
-                    if not record.get("crs"):
-                        record["crs"] = assigned_authid
-                if warn_list:
-                    record["georef_warnings"] = warn_list
-                register_timeslice(project_root, record)
-                imported_ids.append(record.get("id"))
-                imported_count += 1
-            except Exception as e:
-                failed.append(f"{os.path.basename(source_path)}: {e}")
-            import_progress.setValue(idx)
-            QApplication.processEvents()
-        import_progress.close()
+                local_skipped += len(failed)
 
-        if imported_ids:
-            assign_timeslices_to_group(project_root, group.get("id"), imported_ids)
-            try:
-                remove_timeslices_from_group(project_root, "grp_imported", imported_ids)
-            except Exception:
-                pass
+            return {
+                "cancelled": cancelled,
+                "imported": imported_count,
+                "skipped": local_skipped,
+                "linked_grids": linked_grids,
+            }
 
-        if failed:
-            preview = "\n".join(failed[:10])
-            extra = len(failed) - min(len(failed), 10)
-            if extra > 0:
-                preview += f"\n... and {extra} more."
-            QMessageBox.warning(
+        if callable(on_finished):
+            if getattr(self, "_group_import_active", False):
+                QMessageBox.warning(self.dlg, "Import running", "A group import is already running.")
+                return _finish({"cancelled": True, "imported": 0, "skipped": skipped})
+            self._group_import_active = True
+            if hasattr(self.dlg, "createGroupButton"):
+                self.dlg.createGroupButton.setEnabled(False)
+
+            def _on_task_done(done_task, _ok):
+                try:
+                    result = _finalize(done_task)
+                    _finish(result)
+                finally:
+                    self._group_import_active = False
+                    if hasattr(self.dlg, "createGroupButton"):
+                        self.dlg.createGroupButton.setEnabled(True)
+
+            start_task_with_progress_dialog(
+                import_task,
                 self.dlg,
-                "Import warning",
-                "Some files could not be imported:\n\n" + preview,
+                "Importing selected images...",
+                "Create Group - Import Images",
+                on_finished=_on_task_done,
             )
-            skipped += len(failed)
+            self.iface.messageBar().pushInfo(
+                "RasterLinker",
+                "Group image import started in background.",
+            )
+            return None
 
-        return {
-            "cancelled": cancelled,
-            "imported": imported_count,
-            "skipped": skipped,
-            "linked_grids": linked_grids,
-        }
+        run_task_with_progress_dialog(
+            import_task,
+            self.dlg,
+            "Importing selected images...",
+            "Create Group - Import Images",
+        )
+        return _finish(_finalize(import_task))
 
     def create_group(self):
         group_name = self.dlg.groupNameEdit.text().strip()
@@ -617,55 +627,58 @@ class CatalogGroupMixin:
             return
         try:
             group, created = create_raster_group(project_root, group_name)
-            result = self._quick_import_timeslices_for_group(project_root, group)
-            imported = int(result.get("imported", 0))
-            skipped = int(result.get("skipped", 0))
-            linked_grids = int(result.get("linked_grids", 0))
-            cancelled = bool(result.get("cancelled", False))
 
-            if imported > 0:
-                self._get_or_create_plugin_qgis_group(group_name)
-            self.populate_group_list()
-            if imported > 0:
-                self._select_group_item_by_id(group.get("id"))
-                self.load_raster(show_message=False)
-                status = "cancelled after partial import" if cancelled else "completed"
-                self.iface.messageBar().pushInfo(
-                    "RasterLinker",
-                    (
-                        f"Group '{group_name}' import {status}: "
-                        f"imported {imported}, skipped {skipped}, linked z-grids {linked_grids}."
-                    ),
-                )
-                return
+            def _on_result(result):
+                imported = int((result or {}).get("imported", 0))
+                skipped = int((result or {}).get("skipped", 0))
+                linked_grids = int((result or {}).get("linked_grids", 0))
+                cancelled = bool((result or {}).get("cancelled", False))
 
-            if cancelled:
-                title = "Group created" if created else "Import cancelled"
-                QMessageBox.information(
-                    self.dlg,
-                    title,
-                    (
-                        f"Group '{group_name}' is available in the project catalog.\n"
-                        "No images were imported."
-                    ),
-                )
-                return
+                if imported > 0:
+                    self._get_or_create_plugin_qgis_group(group_name)
+                self.populate_group_list()
+                if imported > 0:
+                    self._select_group_item_by_id(group.get("id"))
+                    self.load_raster(show_message=False)
+                    status = "cancelled after partial import" if cancelled else "completed"
+                    self.iface.messageBar().pushInfo(
+                        "RasterLinker",
+                        (
+                            f"Group '{group_name}' import {status}: "
+                            f"imported {imported}, skipped {skipped}, linked z-grids {linked_grids}."
+                        ),
+                    )
+                    return
 
-            if created:
-                QMessageBox.information(
-                    self.dlg,
-                    "Group created",
-                    (
-                        f"Group '{group_name}' was created in the project catalog.\n"
-                        "It will appear in the plugin list after you import images into it."
-                    ),
-                )
-            else:
-                QMessageBox.information(
-                    self.dlg,
-                    "Information",
-                    f"Group '{group_name}' is already present. No images imported.",
-                )
+                if cancelled:
+                    title = "Group created" if created else "Import cancelled"
+                    QMessageBox.information(
+                        self.dlg,
+                        title,
+                        (
+                            f"Group '{group_name}' is available in the project catalog.\n"
+                            "No images were imported."
+                        ),
+                    )
+                    return
+
+                if created:
+                    QMessageBox.information(
+                        self.dlg,
+                        "Group created",
+                        (
+                            f"Group '{group_name}' was created in the project catalog.\n"
+                            "It will appear in the plugin list after you import images into it."
+                        ),
+                    )
+                else:
+                    QMessageBox.information(
+                        self.dlg,
+                        "Information",
+                        f"Group '{group_name}' is already present. No images imported.",
+                    )
+
+            self._quick_import_timeslices_for_group(project_root, group, on_finished=_on_result)
         except Exception as e:
             QMessageBox.critical(self.dlg, "Error", f"Error while creating group or importing images: {e}")
 

@@ -95,6 +95,17 @@ def register_timeslice(project_root, timeslice_record):
     return save_catalog(project_root, data)
 
 
+def register_timeslices_batch(project_root, timeslice_records):
+    records = [r for r in (timeslice_records or []) if isinstance(r, dict)]
+    if not records:
+        return
+    data = load_catalog(project_root)
+    data.setdefault("timeslices", [])
+    for rec in records:
+        data["timeslices"].append(normalize_timeslice_record(rec))
+    return save_catalog(project_root, data)
+
+
 def register_link(project_root, link_record):
     data = load_catalog(project_root)
     data["links"].append(normalize_link_record(link_record))

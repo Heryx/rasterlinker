@@ -34,17 +34,25 @@ from .project_catalog import (
     register_model_3d,
     register_radargram,
     register_timeslice,
+    register_timeslices_batch,
     save_radargram_sidecar,
     add_radargram_to_default_group,
     create_raster_group,
     assign_timeslices_to_group,
     remove_timeslices_from_group,
+    add_timeslice_to_default_group,
     validate_catalog,
-    normalize_copy_into_project,
     link_surfer_grid_into_project,
     export_project_package,
     import_project_package,
     utc_now_iso,
+)
+from .background_tasks import (
+    TimesliceImportTask,
+    LasLazImportTask,
+    RadargramImportTask,
+    CatalogCleanupTask,
+    start_task_with_progress_dialog,
 )
 from .pointcloud_metadata import inspect_las_laz
 from .radargram_metadata import inspect_radargram, find_worldfile
@@ -62,6 +70,16 @@ class ProjectManagerDialog(QDialog):
         self.settings = QSettings()
         self.settings_key_active_project = "RasterLinker/active_project_root"
         self.settings_key_default_import_crs = "RasterLinker/default_import_crs_authid"
+        self._timeslice_import_active = False
+        self._las_import_active = False
+        self._radargram_import_active = False
+        self._cleanup_active = False
+        self._manifest_import_active = False
+        self.import_las_btn = None
+        self.import_rg_btn = None
+        self.import_ts_btn = None
+        self.import_manifest_btn = None
+        self.cleanup_btn = None
         self.setWindowTitle("RasterLinker Project Manager")
         self.resize(760, 300)
         self._build_ui()
@@ -100,25 +118,25 @@ class ProjectManagerDialog(QDialog):
         import_layout.setHorizontalSpacing(8)
         import_layout.setVerticalSpacing(8)
 
-        import_las_btn = QPushButton("Import LAS/LAZ")
-        import_las_btn.clicked.connect(self._import_las_laz)
-        import_las_btn.setMinimumHeight(28)
-        import_layout.addWidget(import_las_btn, 0, 0)
+        self.import_las_btn = QPushButton("Import LAS/LAZ")
+        self.import_las_btn.clicked.connect(self._import_las_laz)
+        self.import_las_btn.setMinimumHeight(28)
+        import_layout.addWidget(self.import_las_btn, 0, 0)
 
-        import_rg_btn = QPushButton("Import Radargrams")
-        import_rg_btn.clicked.connect(self._import_radargrams)
-        import_rg_btn.setMinimumHeight(28)
-        import_layout.addWidget(import_rg_btn, 0, 1)
+        self.import_rg_btn = QPushButton("Import Radargrams")
+        self.import_rg_btn.clicked.connect(self._import_radargrams)
+        self.import_rg_btn.setMinimumHeight(28)
+        import_layout.addWidget(self.import_rg_btn, 0, 1)
 
-        import_ts_btn = QPushButton("Import Time-slices")
-        import_ts_btn.clicked.connect(self._import_timeslices)
-        import_ts_btn.setMinimumHeight(28)
-        import_layout.addWidget(import_ts_btn, 1, 0)
+        self.import_ts_btn = QPushButton("Import Time-slices")
+        self.import_ts_btn.clicked.connect(self._import_timeslices)
+        self.import_ts_btn.setMinimumHeight(28)
+        import_layout.addWidget(self.import_ts_btn, 1, 0)
 
-        import_manifest_btn = QPushButton("Import Manifest")
-        import_manifest_btn.clicked.connect(self._import_manifest)
-        import_manifest_btn.setMinimumHeight(28)
-        import_layout.addWidget(import_manifest_btn, 1, 1)
+        self.import_manifest_btn = QPushButton("Import Manifest")
+        self.import_manifest_btn.clicked.connect(self._import_manifest)
+        self.import_manifest_btn.setMinimumHeight(28)
+        import_layout.addWidget(self.import_manifest_btn, 1, 1)
 
         catalog_box = QGroupBox("Catalog & QA")
         catalog_layout = QGridLayout(catalog_box)
@@ -145,10 +163,10 @@ class ProjectManagerDialog(QDialog):
         crs_btn.setMinimumHeight(28)
         catalog_layout.addWidget(crs_btn, 1, 1)
 
-        cleanup_btn = QPushButton("Cleanup Catalog")
-        cleanup_btn.clicked.connect(self._cleanup_catalog)
-        cleanup_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(cleanup_btn, 2, 0)
+        self.cleanup_btn = QPushButton("Cleanup Catalog")
+        self.cleanup_btn.clicked.connect(self._cleanup_catalog)
+        self.cleanup_btn.setMinimumHeight(28)
+        catalog_layout.addWidget(self.cleanup_btn, 2, 0)
 
         reload_btn = QPushButton("Reload Layers")
         reload_btn.clicked.connect(self._reload_imported_layers)
@@ -553,6 +571,12 @@ class ProjectManagerDialog(QDialog):
     def _import_timeslices(self):
         if not self._ensure_project_ready():
             return
+        if self._timeslice_import_active:
+            self.iface.messageBar().pushWarning(
+                "RasterLinker",
+                "A time-slice import is already running.",
+            )
+            return
 
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
@@ -563,132 +587,179 @@ class ProjectManagerDialog(QDialog):
         if not file_paths:
             return
 
-        imported = 0
-        linked_grids = 0
-        imported_ids = []
-        imported_paths = []
-        georef_warnings = []
-        total = len(file_paths)
-        progress = QProgressDialog("Importing time-slices...", "Cancel", 0, total, self)
-        progress.setWindowTitle("Import Time-slices")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(True)
-        progress.setAutoReset(True)
-        progress.setValue(0)
-
-        cancelled = False
-        failures = []
-        for idx, file_path in enumerate(file_paths, start=1):
-            if progress.wasCanceled():
-                cancelled = True
-                break
-            progress.setLabelText(f"Importing {idx}/{total}: {os.path.basename(file_path)}")
+        records = []
+        invalid = []
+        scan_total = len(file_paths)
+        scan_progress = QProgressDialog("Analyzing selected images...", "Cancel", 0, scan_total, self)
+        scan_progress.setWindowTitle("Import Time-slices - Analyze")
+        scan_progress.setWindowModality(Qt.WindowModal)
+        scan_progress.setMinimumDuration(0)
+        scan_progress.setAutoClose(True)
+        scan_progress.setAutoReset(True)
+        scan_progress.setValue(0)
+        for idx, src_path in enumerate(file_paths, start=1):
+            if scan_progress.wasCanceled():
+                scan_progress.close()
+                self.iface.messageBar().pushWarning("RasterLinker", "Time-slice import cancelled by user.")
+                return
+            scan_progress.setLabelText(f"Analyzing {idx}/{scan_total}: {os.path.basename(src_path)}")
             QApplication.processEvents()
-            try:
-                project_path, normalized_name = normalize_copy_into_project(
-                    self.project_root, "timeslices_2d", file_path
-                )
-                meta = self._inspect_timeslice(project_path)
-                warn_list = self._timeslice_georef_warnings(meta)
-                meta.update(
-                    {
-                        "id": f"timeslice_{utc_now_iso()}_{normalized_name}",
-                        "name": os.path.splitext(normalized_name)[0],
-                        "normalized_name": normalized_name,
-                        "source_path": file_path,
-                        "project_path": project_path,
-                        "imported_at": utc_now_iso(),
-                    }
-                )
-                link_info = link_surfer_grid_into_project(
-                    self.project_root,
-                    reference_raster_path=project_path,
-                    source_raster_path=file_path,
-                )
-                if link_info:
-                    meta.update(link_info)
-                    if meta.get("z_grid_project_path"):
-                        linked_grids += 1
-                if warn_list:
-                    meta["georef_warnings"] = warn_list
-                    georef_warnings.append((normalized_name, warn_list))
-                register_timeslice(self.project_root, meta)
-                imported_ids.append(meta.get("id"))
-                imported_paths.append(project_path)
-                imported += 1
-            except Exception as e:
-                failures.append(f"{os.path.basename(file_path)}: {e}")
-            progress.setValue(idx)
+            meta = self._inspect_timeslice(src_path)
+            if not meta.get("is_valid_raster"):
+                invalid.append(os.path.basename(src_path))
+                scan_progress.setValue(idx)
+                QApplication.processEvents()
+                continue
+            records.append(
+                {
+                    "source_path": src_path,
+                    "meta": meta,
+                    "warnings": self._timeslice_georef_warnings(meta),
+                    "assigned_crs": None,
+                }
+            )
+            scan_progress.setValue(idx)
             QApplication.processEvents()
+        scan_progress.close()
 
-        progress.close()
-
-        if failures:
-            preview = "\n".join(failures[:10])
-            more = len(failures) - min(len(failures), 10)
+        if invalid:
+            preview = "\n".join(invalid[:10])
+            more = len(invalid) - min(len(invalid), 10)
             if more > 0:
                 preview += f"\n... and {more} more."
-            QMessageBox.warning(self, "Import warning", preview)
-
-        self.iface.messageBar().pushInfo(
-            "RasterLinker",
-            f"Time-slices import completed ({imported}) - linked z-grids: {linked_grids}.",
-        )
-        if cancelled:
-            self.iface.messageBar().pushWarning("RasterLinker", "Time-slice import cancelled by user.")
-        if georef_warnings:
-            preview_lines = []
-            for name, warns in georef_warnings[:12]:
-                preview_lines.append(f"{name}: {'; '.join(warns)}")
-            more = len(georef_warnings) - len(preview_lines)
-            if more > 0:
-                preview_lines.append(f"... and {more} more.")
             QMessageBox.warning(
                 self,
-                "Time-slice Georeference Warnings",
-                "Potential georeference issues detected:\n\n" + "\n".join(preview_lines),
+                "Invalid raster files",
+                "Some selected files are not valid rasters and will be skipped:\n\n" + preview,
             )
-        self._notify_project_updated()
 
-        if imported <= 0:
+        if not records:
+            self.iface.messageBar().pushWarning("RasterLinker", "No valid time-slice files to import.")
             return
 
-        group_name, ok = QInputDialog.getText(
-            self,
-            "New Image Group",
-            (
-                f"{imported} time-slice image(s) imported successfully.\n"
-                "Enter the group name to assign and load them:"
-            ),
-            text="TimeSlices",
+        target_project_root = self.project_root
+        import_task = TimesliceImportTask(
+            target_project_root,
+            records,
+            description="RasterLinker: Importing time-slices",
         )
-        if not ok or not group_name.strip():
-            QMessageBox.information(
-                self,
-                "Group assignment required",
-                (
-                    "Time-slices were imported into the project folder and catalog,\n"
-                    "but not assigned to a visible group."
-                ),
-            )
-            return
+        self._timeslice_import_active = True
+        if self.import_ts_btn is not None:
+            self.import_ts_btn.setEnabled(False)
 
-        try:
-            group, _ = create_raster_group(self.project_root, group_name.strip())
-            assign_timeslices_to_group(self.project_root, group.get("id"), imported_ids)
-            remove_timeslices_from_group(self.project_root, "grp_imported", imported_ids)
-            loaded_now = self._load_timeslice_paths_into_qgis_group(imported_paths, group.get("name", "TimeSlices"))
-            self.iface.messageBar().pushInfo(
-                "RasterLinker",
-                f"Imported time-slices assigned to group: {group.get('name')} (loaded: {loaded_now}).",
-            )
-            self._notify_project_updated()
-        except Exception as e:
-            QMessageBox.warning(self, "Group assignment warning", str(e))
+        def _on_import_finished(done_task, _ok):
+            imported = 0
+            linked_grids = int(done_task.linked_grids)
+            imported_ids = []
+            imported_paths = []
+            georef_warnings = []
+            cancelled = bool(done_task.cancelled)
+            failures = list(done_task.failed)
+
+            try:
+                imported_records = list(done_task.imported_records)
+                if imported_records:
+                    try:
+                        register_timeslices_batch(target_project_root, imported_records)
+                        imported = len(imported_records)
+                        imported_ids = [rec.get("id") for rec in imported_records if rec.get("id")]
+                        imported_paths = [rec.get("project_path") for rec in imported_records if rec.get("project_path")]
+                        for rec in imported_records:
+                            warn_list = list(rec.get("georef_warnings") or [])
+                            if warn_list:
+                                name = rec.get("normalized_name") or os.path.basename(rec.get("project_path") or "")
+                                georef_warnings.append((name, warn_list))
+                    except Exception as e:
+                        failures.append(f"catalog write: {e}")
+                        imported = 0
+                        imported_ids = []
+                        imported_paths = []
+
+                if failures:
+                    preview = "\n".join(failures[:10])
+                    more = len(failures) - min(len(failures), 10)
+                    if more > 0:
+                        preview += f"\n... and {more} more."
+                    QMessageBox.warning(self, "Import warning", preview)
+
+                self.iface.messageBar().pushInfo(
+                    "RasterLinker",
+                    f"Time-slices import completed ({imported}) - linked z-grids: {linked_grids}.",
+                )
+                if cancelled:
+                    self.iface.messageBar().pushWarning("RasterLinker", "Time-slice import cancelled by user.")
+                if georef_warnings:
+                    preview_lines = []
+                    for name, warns in georef_warnings[:12]:
+                        preview_lines.append(f"{name}: {'; '.join(warns)}")
+                    more = len(georef_warnings) - len(preview_lines)
+                    if more > 0:
+                        preview_lines.append(f"... and {more} more.")
+                    QMessageBox.warning(
+                        self,
+                        "Time-slice Georeference Warnings",
+                        "Potential georeference issues detected:\n\n" + "\n".join(preview_lines),
+                    )
+                self._notify_project_updated()
+
+                if imported <= 0:
+                    return
+
+                group_name, ok = QInputDialog.getText(
+                    self,
+                    "New Image Group",
+                    (
+                        f"{imported} time-slice image(s) imported successfully.\n"
+                        "Enter the group name to assign and load them:"
+                    ),
+                    text="TimeSlices",
+                )
+                if not ok or not group_name.strip():
+                    QMessageBox.information(
+                        self,
+                        "Group assignment required",
+                        (
+                            "Time-slices were imported into the project folder and catalog,\n"
+                            "but not assigned to a visible group."
+                        ),
+                    )
+                    return
+
+                try:
+                    group, _ = create_raster_group(target_project_root, group_name.strip())
+                    assign_timeslices_to_group(target_project_root, group.get("id"), imported_ids)
+                    remove_timeslices_from_group(target_project_root, "grp_imported", imported_ids)
+                    loaded_now = self._load_timeslice_paths_into_qgis_group(imported_paths, group.get("name", "TimeSlices"))
+                    self.iface.messageBar().pushInfo(
+                        "RasterLinker",
+                        f"Imported time-slices assigned to group: {group.get('name')} (loaded: {loaded_now}).",
+                    )
+                    self._notify_project_updated()
+                except Exception as e:
+                    QMessageBox.warning(self, "Group assignment warning", str(e))
+            finally:
+                self._timeslice_import_active = False
+                if self.import_ts_btn is not None:
+                    self.import_ts_btn.setEnabled(True)
+
+        start_task_with_progress_dialog(
+            import_task,
+            self,
+            "Importing time-slices...",
+            "Import Time-slices",
+            on_finished=_on_import_finished,
+        )
+        self.iface.messageBar().pushInfo("RasterLinker", "Time-slice import started in background.")
+        return
 
     def _import_las_laz(self):
         if not self._ensure_project_ready():
+            return
+        if self._las_import_active:
+            self.iface.messageBar().pushWarning(
+                "RasterLinker",
+                "A LAS/LAZ import is already running.",
+            )
             return
 
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -700,42 +771,94 @@ class ProjectManagerDialog(QDialog):
         if not file_paths:
             return
 
-        for file_path in file_paths:
+        target_project_root = self.project_root
+        import_task = LasLazImportTask(
+            target_project_root,
+            file_paths,
+            description="RasterLinker: Importing LAS/LAZ",
+        )
+        self._las_import_active = True
+        if self.import_las_btn is not None:
+            self.import_las_btn.setEnabled(False)
+
+        def _on_import_finished(done_task, _ok):
+            imported = 0
+            loaded = 0
+            failed = list(done_task.failed)
+            cancelled = bool(done_task.cancelled)
+
             try:
-                project_path, normalized_name = normalize_copy_into_project(
-                    self.project_root, "volumes_3d", file_path
-                )
-                meta = inspect_las_laz(project_path)
-                meta.update(
-                    {
-                        "id": f"model_{utc_now_iso()}_{normalized_name}",
-                        "normalized_name": normalized_name,
-                        "source_path": file_path,
-                        "project_path": project_path,
-                        "imported_at": utc_now_iso(),
-                    }
-                )
-                register_model_3d(self.project_root, meta)
+                for rec in done_task.imported_files:
+                    source_path = rec.get("source_path") or ""
+                    project_path = rec.get("project_path") or ""
+                    normalized_name = rec.get("normalized_name") or os.path.basename(project_path)
+                    imported_at = rec.get("imported_at") or utc_now_iso()
+                    try:
+                        meta = inspect_las_laz(project_path)
+                        meta.update(
+                            {
+                                "id": f"model_{imported_at}_{normalized_name}",
+                                "normalized_name": normalized_name,
+                                "source_path": source_path,
+                                "project_path": project_path,
+                                "imported_at": imported_at,
+                            }
+                        )
+                        register_model_3d(target_project_root, meta)
+                        imported += 1
 
-                layer_name = os.path.basename(project_path)
-                pc_layer = QgsPointCloudLayer(project_path, layer_name, "pdal")
-                if pc_layer.isValid():
-                    QgsProject.instance().addMapLayer(pc_layer)
-                else:
-                    self.iface.messageBar().pushWarning(
-                        "RasterLinker",
-                        (
-                            "Point cloud copied and cataloged, but not loaded in canvas. "
-                            "Try exporting as uncompressed LAS (recommended 1.2/1.4) and re-import."
-                        ),
-                    )
-            except Exception as e:
-                QMessageBox.warning(self, "Import warning", f"{file_path}\n{e}")
+                        layer_name = os.path.basename(project_path)
+                        pc_layer = QgsPointCloudLayer(project_path, layer_name, "pdal")
+                        if pc_layer.isValid():
+                            QgsProject.instance().addMapLayer(pc_layer)
+                            loaded += 1
+                        else:
+                            failed.append(
+                                (
+                                    f"{layer_name}: copied and cataloged, but not loaded in canvas. "
+                                    "Try exporting as uncompressed LAS (recommended 1.2/1.4) and re-import."
+                                )
+                            )
+                    except Exception as e:
+                        label = os.path.basename(source_path) if source_path else normalized_name
+                        failed.append(f"{label}: {e}")
 
-        self.iface.messageBar().pushInfo("RasterLinker", "LAS/LAZ import completed.")
+                if failed:
+                    preview = "\n".join(failed[:10])
+                    more = len(failed) - min(len(failed), 10)
+                    if more > 0:
+                        preview += f"\n... and {more} more."
+                    QMessageBox.warning(self, "Import warning", preview)
+
+                self.iface.messageBar().pushInfo(
+                    "RasterLinker",
+                    f"LAS/LAZ import completed ({imported}) - loaded in canvas: {loaded}.",
+                )
+                if cancelled:
+                    self.iface.messageBar().pushWarning("RasterLinker", "LAS/LAZ import cancelled by user.")
+                self._notify_project_updated()
+            finally:
+                self._las_import_active = False
+                if self.import_las_btn is not None:
+                    self.import_las_btn.setEnabled(True)
+
+        start_task_with_progress_dialog(
+            import_task,
+            self,
+            "Importing LAS/LAZ files...",
+            "Import LAS/LAZ",
+            on_finished=_on_import_finished,
+        )
+        self.iface.messageBar().pushInfo("RasterLinker", "LAS/LAZ import started in background.")
 
     def _import_radargrams(self):
         if not self._ensure_project_ready():
+            return
+        if self._radargram_import_active:
+            self.iface.messageBar().pushWarning(
+                "RasterLinker",
+                "A radargram import is already running.",
+            )
             return
 
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -751,45 +874,92 @@ class ProjectManagerDialog(QDialog):
         if not proceed:
             return
 
-        imported = 0
-        mapped = 0
-        catalog_only = 0
-        for file_path in file_paths:
-            try:
-                project_path, normalized_name = normalize_copy_into_project(
-                    self.project_root, "radargrams", file_path
-                )
-                self._copy_radargram_worldfile_if_present(file_path, project_path)
-                meta = inspect_radargram(project_path)
-                meta.update(
-                    {
-                        "id": f"radargram_{utc_now_iso()}_{normalized_name}",
-                        "normalized_name": normalized_name,
-                        "source_path": file_path,
-                        "project_path": project_path,
-                        "imported_at": utc_now_iso(),
-                    }
-                )
-                geo_info = self._classify_radargram_georef(project_path)
-                meta.update(geo_info)
-                register_radargram(self.project_root, meta)
-                save_radargram_sidecar(self.project_root, meta)
-                add_radargram_to_default_group(self.project_root, meta.get("id"))
-                if meta.get("import_mode") == "mapped":
-                    mapped += 1
-                else:
-                    catalog_only += 1
-                imported += 1
-            except Exception as e:
-                QMessageBox.warning(self, "Import warning", f"{file_path}\n{e}")
-
-        self.iface.messageBar().pushInfo(
-            "RasterLinker",
-            f"Radargrams import completed ({imported}) - mapped: {mapped}, catalog-only: {catalog_only}.",
+        target_project_root = self.project_root
+        import_task = RadargramImportTask(
+            target_project_root,
+            file_paths,
+            description="RasterLinker: Importing radargrams",
         )
+        self._radargram_import_active = True
+        if self.import_rg_btn is not None:
+            self.import_rg_btn.setEnabled(False)
+
+        def _on_import_finished(done_task, _ok):
+            imported = 0
+            mapped = 0
+            catalog_only = 0
+            failed = list(done_task.failed)
+            cancelled = bool(done_task.cancelled)
+
+            try:
+                for rec in done_task.imported_files:
+                    source_path = rec.get("source_path") or ""
+                    project_path = rec.get("project_path") or ""
+                    normalized_name = rec.get("normalized_name") or os.path.basename(project_path)
+                    imported_at = rec.get("imported_at") or utc_now_iso()
+                    try:
+                        meta = inspect_radargram(project_path)
+                        meta.update(
+                            {
+                                "id": f"radargram_{imported_at}_{normalized_name}",
+                                "normalized_name": normalized_name,
+                                "source_path": source_path,
+                                "project_path": project_path,
+                                "imported_at": imported_at,
+                            }
+                        )
+                        geo_info = self._classify_radargram_georef(project_path)
+                        meta.update(geo_info)
+                        if rec.get("worldfile_path") and not meta.get("worldfile_path"):
+                            meta["worldfile_path"] = rec.get("worldfile_path")
+                        register_radargram(target_project_root, meta)
+                        save_radargram_sidecar(target_project_root, meta)
+                        add_radargram_to_default_group(target_project_root, meta.get("id"))
+                        if meta.get("import_mode") == "mapped":
+                            mapped += 1
+                        else:
+                            catalog_only += 1
+                        imported += 1
+                    except Exception as e:
+                        label = os.path.basename(source_path) if source_path else normalized_name
+                        failed.append(f"{label}: {e}")
+
+                if failed:
+                    preview = "\n".join(failed[:10])
+                    more = len(failed) - min(len(failed), 10)
+                    if more > 0:
+                        preview += f"\n... and {more} more."
+                    QMessageBox.warning(self, "Import warning", preview)
+
+                self.iface.messageBar().pushInfo(
+                    "RasterLinker",
+                    (
+                        f"Radargrams import completed ({imported}) - "
+                        f"mapped: {mapped}, catalog-only: {catalog_only}."
+                    ),
+                )
+                if cancelled:
+                    self.iface.messageBar().pushWarning("RasterLinker", "Radargram import cancelled by user.")
+                self._notify_project_updated()
+            finally:
+                self._radargram_import_active = False
+                if self.import_rg_btn is not None:
+                    self.import_rg_btn.setEnabled(True)
+
+        start_task_with_progress_dialog(
+            import_task,
+            self,
+            "Importing radargrams...",
+            "Import Radargrams",
+            on_finished=_on_import_finished,
+        )
+        self.iface.messageBar().pushInfo("RasterLinker", "Radargram import started in background.")
 
     def _import_manifest(self):
         if not self._ensure_project_ready():
+            return
+        if self._manifest_import_active:
+            self.iface.messageBar().pushWarning("RasterLinker", "Manifest import is already running.")
             return
 
         manifest_path, _ = QFileDialog.getOpenFileName(
@@ -808,110 +978,265 @@ class ProjectManagerDialog(QDialog):
             QMessageBox.critical(self, "Manifest Error", f"Invalid manifest file:\n{e}")
             return
 
-        imported_models = 0
-        imported_radargrams = 0
-        imported_timeslices = 0
+        target_project_root = self.project_root
+        model_sources = []
+        radar_sources = []
+        timeslice_items = []
+        failures = []
 
         for item in manifest.get("models_3d", []):
             source_path = item.get("path") or item.get("source_path")
             if not source_path or not os.path.isfile(source_path):
+                if source_path:
+                    failures.append(f"models_3d missing source: {source_path}")
                 continue
-            try:
-                project_path, normalized_name = normalize_copy_into_project(
-                    self.project_root, "volumes_3d", source_path
-                )
-                meta = inspect_las_laz(project_path)
-                meta.update(
-                    {
-                        "id": f"model_{utc_now_iso()}_{normalized_name}",
-                        "normalized_name": normalized_name,
-                        "source_path": source_path,
-                        "project_path": project_path,
-                        "imported_at": utc_now_iso(),
-                        "manifest_source": manifest_path,
-                    }
-                )
-                register_model_3d(self.project_root, meta)
-                imported_models += 1
-            except Exception:
-                continue
+            model_sources.append(source_path)
 
         for item in manifest.get("radargrams", []):
             source_path = item.get("path") or item.get("source_path")
             if not source_path or not os.path.isfile(source_path):
+                if source_path:
+                    failures.append(f"radargrams missing source: {source_path}")
                 continue
-            try:
-                project_path, normalized_name = normalize_copy_into_project(
-                    self.project_root, "radargrams", source_path
-                )
-                self._copy_radargram_worldfile_if_present(source_path, project_path)
-                meta = inspect_radargram(project_path)
-                meta.update(
-                    {
-                        "id": f"radargram_{utc_now_iso()}_{normalized_name}",
-                        "normalized_name": normalized_name,
-                        "source_path": source_path,
-                        "project_path": project_path,
-                        "imported_at": utc_now_iso(),
-                        "manifest_source": manifest_path,
-                    }
-                )
-                geo_info = self._classify_radargram_georef(project_path)
-                meta.update(geo_info)
-                register_radargram(self.project_root, meta)
-                save_radargram_sidecar(self.project_root, meta)
-                add_radargram_to_default_group(self.project_root, meta.get("id"))
-                imported_radargrams += 1
-            except Exception:
-                continue
+            radar_sources.append(source_path)
 
+        ts_name_by_source = {}
         for item in manifest.get("timeslices", []):
             source_path = item.get("path") or item.get("source_path")
             if not source_path or not os.path.isfile(source_path):
+                if source_path:
+                    failures.append(f"timeslices missing source: {source_path}")
                 continue
+            timeslice_items.append(item)
+            ts_name = (item.get("name") or "").strip()
+            if ts_name:
+                ts_name_by_source[os.path.normcase(os.path.abspath(source_path))] = ts_name
+
+        counters = {
+            "models": 0,
+            "radargrams": 0,
+            "timeslices": 0,
+        }
+        state = {"cancelled": False}
+
+        self._manifest_import_active = True
+        if self.import_manifest_btn is not None:
+            self.import_manifest_btn.setEnabled(False)
+
+        def _finish_manifest():
             try:
-                project_path, normalized_name = normalize_copy_into_project(
-                    self.project_root, "timeslices_2d", source_path
-                )
-                meta = self._inspect_timeslice(project_path)
-                meta.update(
+                if manifest.get("links"):
+                    catalog = load_catalog(target_project_root)
+                    catalog["links"].extend(manifest.get("links", []))
+                    save_catalog(target_project_root, catalog)
+            except Exception as e:
+                failures.append(f"manifest links merge: {e}")
+
+            if failures:
+                preview = "\n".join(failures[:15])
+                more = len(failures) - min(len(failures), 15)
+                if more > 0:
+                    preview += f"\n... and {more} more."
+                QMessageBox.warning(self, "Manifest import warnings", preview)
+
+            self.iface.messageBar().pushInfo(
+                "RasterLinker",
+                (
+                    f"Manifest import completed (models: {counters['models']}, "
+                    f"radargrams: {counters['radargrams']}, timeslices: {counters['timeslices']})."
+                ),
+            )
+            if state["cancelled"]:
+                self.iface.messageBar().pushWarning("RasterLinker", "Manifest import cancelled by user.")
+            self._notify_project_updated()
+            self._manifest_import_active = False
+            if self.import_manifest_btn is not None:
+                self.import_manifest_btn.setEnabled(True)
+
+        def _start_timeslice_stage():
+            records = []
+            for item in timeslice_items:
+                source_path = item.get("path") or item.get("source_path")
+                if not source_path:
+                    continue
+                meta = self._inspect_timeslice(source_path)
+                if not meta.get("is_valid_raster"):
+                    failures.append(f"timeslice invalid raster: {source_path}")
+                    continue
+                records.append(
                     {
-                        "id": f"timeslice_{utc_now_iso()}_{normalized_name}",
-                        "name": item.get("name") or os.path.splitext(normalized_name)[0],
-                        "normalized_name": normalized_name,
                         "source_path": source_path,
-                        "project_path": project_path,
-                        "imported_at": utc_now_iso(),
-                        "manifest_source": manifest_path,
+                        "meta": meta,
+                        "warnings": self._timeslice_georef_warnings(meta),
+                        "assigned_crs": None,
                     }
                 )
-                link_info = link_surfer_grid_into_project(
-                    self.project_root,
-                    reference_raster_path=project_path,
-                    source_raster_path=source_path,
-                )
-                if link_info:
-                    meta.update(link_info)
-                register_timeslice(self.project_root, meta)
-                add_timeslice_to_default_group(self.project_root, meta.get("id"))
-                imported_timeslices += 1
-            except Exception:
-                continue
 
-        # Optional passthrough of links/timeslices if present.
-        if any(k in manifest for k in ("links", "timeslices")):
-            catalog = load_catalog(self.project_root)
-            catalog["links"].extend(manifest.get("links", []))
-            catalog["timeslices"].extend(manifest.get("timeslices", []))
-            save_catalog(self.project_root, catalog)
+            if not records:
+                _finish_manifest()
+                return
 
-        self.iface.messageBar().pushInfo(
-            "RasterLinker",
-            (
-                f"Manifest import completed (models: {imported_models}, "
-                f"radargrams: {imported_radargrams}, timeslices: {imported_timeslices})."
-            ),
-        )
+            ts_task = TimesliceImportTask(
+                target_project_root,
+                records,
+                description="RasterLinker: Manifest import - time-slices",
+            )
+
+            def _on_timeslice_done(done_task, _ok):
+                try:
+                    if done_task.cancelled:
+                        state["cancelled"] = True
+                    failures.extend(list(done_task.failed))
+                    imported_records = list(done_task.imported_records)
+                    for rec in imported_records:
+                        src_key = os.path.normcase(os.path.abspath(rec.get("source_path") or ""))
+                        ts_name = ts_name_by_source.get(src_key)
+                        if ts_name:
+                            rec["name"] = ts_name
+                        rec["manifest_source"] = manifest_path
+                    if imported_records:
+                        register_timeslices_batch(target_project_root, imported_records)
+                        for rec in imported_records:
+                            tid = rec.get("id")
+                            if tid:
+                                add_timeslice_to_default_group(target_project_root, tid)
+                        counters["timeslices"] += len(imported_records)
+                except Exception as e:
+                    failures.append(f"timeslice stage: {e}")
+                finally:
+                    _finish_manifest()
+
+            start_task_with_progress_dialog(
+                ts_task,
+                self,
+                "Manifest import: importing time-slices...",
+                "Import Manifest - Time-slices",
+                on_finished=_on_timeslice_done,
+            )
+
+        def _start_radar_stage():
+            if not radar_sources:
+                if state["cancelled"]:
+                    _finish_manifest()
+                else:
+                    _start_timeslice_stage()
+                return
+
+            rg_task = RadargramImportTask(
+                target_project_root,
+                radar_sources,
+                description="RasterLinker: Manifest import - radargrams",
+            )
+
+            def _on_radar_done(done_task, _ok):
+                try:
+                    if done_task.cancelled:
+                        state["cancelled"] = True
+                    failures.extend(list(done_task.failed))
+                    for rec in done_task.imported_files:
+                        source_path = rec.get("source_path") or ""
+                        project_path = rec.get("project_path") or ""
+                        normalized_name = rec.get("normalized_name") or os.path.basename(project_path)
+                        imported_at = rec.get("imported_at") or utc_now_iso()
+                        try:
+                            meta = inspect_radargram(project_path)
+                            meta.update(
+                                {
+                                    "id": f"radargram_{imported_at}_{normalized_name}",
+                                    "normalized_name": normalized_name,
+                                    "source_path": source_path,
+                                    "project_path": project_path,
+                                    "imported_at": imported_at,
+                                    "manifest_source": manifest_path,
+                                }
+                            )
+                            geo_info = self._classify_radargram_georef(project_path)
+                            meta.update(geo_info)
+                            if rec.get("worldfile_path") and not meta.get("worldfile_path"):
+                                meta["worldfile_path"] = rec.get("worldfile_path")
+                            register_radargram(target_project_root, meta)
+                            save_radargram_sidecar(target_project_root, meta)
+                            add_radargram_to_default_group(target_project_root, meta.get("id"))
+                            counters["radargrams"] += 1
+                        except Exception as e:
+                            label = os.path.basename(source_path) if source_path else normalized_name
+                            failures.append(f"radargram {label}: {e}")
+                except Exception as e:
+                    failures.append(f"radargram stage: {e}")
+                finally:
+                    if state["cancelled"]:
+                        _finish_manifest()
+                    else:
+                        _start_timeslice_stage()
+
+            start_task_with_progress_dialog(
+                rg_task,
+                self,
+                "Manifest import: importing radargrams...",
+                "Import Manifest - Radargrams",
+                on_finished=_on_radar_done,
+            )
+
+        def _start_model_stage():
+            if not model_sources:
+                _start_radar_stage()
+                return
+
+            model_task = LasLazImportTask(
+                target_project_root,
+                model_sources,
+                description="RasterLinker: Manifest import - models",
+            )
+
+            def _on_model_done(done_task, _ok):
+                try:
+                    if done_task.cancelled:
+                        state["cancelled"] = True
+                    failures.extend(list(done_task.failed))
+                    for rec in done_task.imported_files:
+                        source_path = rec.get("source_path") or ""
+                        project_path = rec.get("project_path") or ""
+                        normalized_name = rec.get("normalized_name") or os.path.basename(project_path)
+                        imported_at = rec.get("imported_at") or utc_now_iso()
+                        try:
+                            meta = inspect_las_laz(project_path)
+                            meta.update(
+                                {
+                                    "id": f"model_{imported_at}_{normalized_name}",
+                                    "normalized_name": normalized_name,
+                                    "source_path": source_path,
+                                    "project_path": project_path,
+                                    "imported_at": imported_at,
+                                    "manifest_source": manifest_path,
+                                }
+                            )
+                            register_model_3d(target_project_root, meta)
+                            counters["models"] += 1
+                        except Exception as e:
+                            label = os.path.basename(source_path) if source_path else normalized_name
+                            failures.append(f"model {label}: {e}")
+                except Exception as e:
+                    failures.append(f"model stage: {e}")
+                finally:
+                    if state["cancelled"]:
+                        _finish_manifest()
+                    else:
+                        _start_radar_stage()
+
+            start_task_with_progress_dialog(
+                model_task,
+                self,
+                "Manifest import: importing models...",
+                "Import Manifest - Models",
+                on_finished=_on_model_done,
+            )
+
+        try:
+            _start_model_stage()
+            self.iface.messageBar().pushInfo("RasterLinker", "Manifest import started in background.")
+        except Exception as e:
+            failures.append(f"manifest pipeline start: {e}")
+            _finish_manifest()
 
     def _classify_radargram_georef(self, project_path):
         """
@@ -1159,25 +1484,40 @@ class ProjectManagerDialog(QDialog):
     def _cleanup_catalog(self):
         if not self._ensure_project_ready():
             return
-        catalog = load_catalog(self.project_root)
+        if self._cleanup_active:
+            self.iface.messageBar().pushWarning("RasterLinker", "Catalog cleanup is already running.")
+            return
+        cleanup_task = CatalogCleanupTask(self.project_root)
+        self._cleanup_active = True
+        if self.cleanup_btn is not None:
+            self.cleanup_btn.setEnabled(False)
 
-        before_models = len(catalog.get("models_3d", []))
-        before_radargrams = len(catalog.get("radargrams", []))
+        def _on_cleanup_finished(done_task, _ok):
+            try:
+                if done_task.cancelled:
+                    self.iface.messageBar().pushWarning("RasterLinker", "Catalog cleanup cancelled by user.")
+                    return
+                if done_task.error_message:
+                    QMessageBox.warning(self, "Catalog cleanup", done_task.error_message)
+                    return
 
-        catalog["models_3d"] = [
-            m for m in catalog.get("models_3d", [])
-            if m.get("project_path") and os.path.exists(m.get("project_path"))
-        ]
-        catalog["radargrams"] = [
-            r for r in catalog.get("radargrams", [])
-            if r.get("project_path") and os.path.exists(r.get("project_path"))
-        ]
+                removed_models = int(done_task.removed_models)
+                removed_radargrams = int(done_task.removed_radargrams)
+                self.iface.messageBar().pushInfo(
+                    "RasterLinker",
+                    f"Catalog cleanup done. Removed models: {removed_models}, radargrams: {removed_radargrams}",
+                )
+                self._notify_project_updated()
+            finally:
+                self._cleanup_active = False
+                if self.cleanup_btn is not None:
+                    self.cleanup_btn.setEnabled(True)
 
-        save_catalog(self.project_root, catalog)
-
-        removed_models = before_models - len(catalog["models_3d"])
-        removed_radargrams = before_radargrams - len(catalog["radargrams"])
-        self.iface.messageBar().pushInfo(
-            "RasterLinker",
-            f"Catalog cleanup done. Removed models: {removed_models}, radargrams: {removed_radargrams}",
+        start_task_with_progress_dialog(
+            cleanup_task,
+            self,
+            "Cleaning catalog...",
+            "Catalog Cleanup",
+            on_finished=_on_cleanup_finished,
         )
+        self.iface.messageBar().pushInfo("RasterLinker", "Catalog cleanup started in background.")

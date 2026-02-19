@@ -6,6 +6,7 @@ from qgis.PyQt.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 from qgis.core import (
     QgsContrastEnhancement,
     QgsCoordinateTransform,
+    Qgis,
     QgsLayoutExporter,
     QgsLayoutItemLabel,
     QgsLayoutItemMap,
@@ -17,6 +18,7 @@ from qgis.core import (
     QgsProject,
     QgsRasterBandStats,
     QgsRasterLayer,
+    QgsMessageLog,
     QgsRectangle,
     QgsUnitTypes,
 )
@@ -127,60 +129,119 @@ class CatalogToolsMixin:
                 if isinstance(layer, QgsRasterLayer):
                     yield layer
 
-    def _apply_minmax_to_layer(self, layer):
+    def _apply_minmax_to_layer(self, layer, return_reason=False):
+        def _result(ok, reason):
+            if return_reason:
+                return bool(ok), str(reason or "")
+            return bool(ok)
+
+        if layer is None:
+            return _result(False, "Layer is None.")
+
+        direct_error = ""
         # Try direct layer API first (best compatibility when available).
         if hasattr(layer, "setContrastEnhancement"):
             try:
                 layer.setContrastEnhancement(
                     QgsContrastEnhancement.StretchToMinimumMaximum,
-                    QgsRasterMinMaxOrigin.MinMax,
                 )
                 layer.triggerRepaint()
-                return True
-            except Exception:
-                pass
+                return _result(True, "Applied via layer.setContrastEnhancement().")
+            except Exception as e1:
+                direct_error = str(e1)
+                try:
+                    from qgis.core import QgsRasterMinMaxOrigin
+                    layer.setContrastEnhancement(
+                        QgsContrastEnhancement.StretchToMinimumMaximum,
+                        QgsRasterMinMaxOrigin.MinMax,
+                    )
+                    layer.triggerRepaint()
+                    return _result(True, "Applied via setContrastEnhancement(..., MinMax).")
+                except Exception as e2:
+                    direct_error = f"{direct_error} | fallback MinMax failed: {e2}"
 
         # Fallback: set renderer min/max based on band statistics.
         provider = layer.dataProvider()
         if provider is None:
-            return False
-
-        try:
-            stats = provider.bandStatistics(1, QgsRasterBandStats.Min | QgsRasterBandStats.Max)
-            minimum = stats.minimumValue
-            maximum = stats.maximumValue
-        except Exception:
-            return False
-
-        if minimum is None or maximum is None:
-            return False
+            return _result(False, f"No data provider. Direct API error: {direct_error}")
 
         renderer = layer.renderer()
         if renderer is None:
-            return False
+            return _result(False, f"No renderer. Direct API error: {direct_error}")
+
+        def _band_minmax(band_idx):
+            try:
+                stats = provider.bandStatistics(int(band_idx), QgsRasterBandStats.Min | QgsRasterBandStats.Max)
+                mn = float(stats.minimumValue)
+                mx = float(stats.maximumValue)
+                if mx <= mn:
+                    return None
+                return mn, mx
+            except Exception:
+                return None
 
         applied = False
+
+        first_band_range = _band_minmax(1)
         try:
-            if hasattr(renderer, "setClassificationMin"):
-                renderer.setClassificationMin(float(minimum))
-                applied = True
-            if hasattr(renderer, "setClassificationMax"):
-                renderer.setClassificationMax(float(maximum))
-                applied = True
+            if first_band_range is not None:
+                minimum, maximum = first_band_range
+                if hasattr(renderer, "setClassificationMin"):
+                    renderer.setClassificationMin(float(minimum))
+                    applied = True
+                if hasattr(renderer, "setClassificationMax"):
+                    renderer.setClassificationMax(float(maximum))
+                    applied = True
 
             if hasattr(renderer, "contrastEnhancement"):
                 ce = renderer.contrastEnhancement()
-                if ce is not None:
+                if ce is not None and first_band_range is not None:
+                    minimum, maximum = first_band_range
                     ce.setMinimumValue(float(minimum))
                     ce.setMaximumValue(float(maximum))
                     ce.setContrastEnhancementAlgorithm(QgsContrastEnhancement.StretchToMinimumMaximum, True)
                     applied = True
-        except Exception:
-            return False
+
+            rgb_defs = (
+                ("redBand", "redContrastEnhancement", "setRedContrastEnhancement"),
+                ("greenBand", "greenContrastEnhancement", "setGreenContrastEnhancement"),
+                ("blueBand", "blueContrastEnhancement", "setBlueContrastEnhancement"),
+            )
+            for band_getter_name, ce_getter_name, ce_setter_name in rgb_defs:
+                if not hasattr(renderer, band_getter_name) or not hasattr(renderer, ce_getter_name):
+                    continue
+                try:
+                    band_idx = int(getattr(renderer, band_getter_name)())
+                except Exception:
+                    continue
+                if band_idx <= 0:
+                    continue
+                rng = _band_minmax(band_idx)
+                if rng is None:
+                    continue
+                ce = getattr(renderer, ce_getter_name)()
+                if ce is None:
+                    continue
+                mn, mx = rng
+                ce.setMinimumValue(float(mn))
+                ce.setMaximumValue(float(mx))
+                ce.setContrastEnhancementAlgorithm(QgsContrastEnhancement.StretchToMinimumMaximum, True)
+                setter = getattr(renderer, ce_setter_name, None)
+                if callable(setter):
+                    setter(ce)
+                applied = True
+        except Exception as e:
+            return _result(False, f"Renderer enhancement error: {e}")
 
         if applied:
             layer.triggerRepaint()
-        return applied
+            return _result(True, "Applied via renderer contrast enhancement.")
+        reason = "No supported renderer enhancement path."
+        if first_band_range is None:
+            reason = "Unable to compute valid min/max statistics (band 1)."
+        if direct_error:
+            reason = f"{reason} Direct API error: {direct_error}"
+        return _result(False, reason)
 
     def _catalog_groups_by_name(self, project_root):
         catalog = load_catalog(project_root)
@@ -230,10 +291,17 @@ class CatalogToolsMixin:
     def enhance_loaded_images_minmax(self):
         total = 0
         enhanced = 0
+        failed = []
         for layer in self._iter_plugin_raster_layers() or []:
             total += 1
-            if self._apply_minmax_to_layer(layer):
+            ok, reason = self._apply_minmax_to_layer(layer, return_reason=True)
+            if ok:
                 enhanced += 1
+            else:
+                layer_name = layer.name() if layer is not None else "Unknown layer"
+                detail = f"{layer_name}: {reason or 'unknown reason'}"
+                failed.append(detail)
+                QgsMessageLog.logMessage(detail, "RasterLinker", level=Qgis.Warning)
 
         if total == 0:
             QMessageBox.information(
@@ -247,6 +315,11 @@ class CatalogToolsMixin:
             "RasterLinker",
             f"Enhance Min/Max applied: {enhanced}/{total} layers.",
         )
+        if failed:
+            self.iface.messageBar().pushWarning(
+                "RasterLinker",
+                f"Enhance Min/Max skipped {len(failed)} layer(s). See Log Messages for details.",
+            )
 
     def _iter_group_raster_layers(self, group_name):
         group = self._get_or_create_plugin_qgis_group(group_name)
