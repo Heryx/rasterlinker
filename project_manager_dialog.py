@@ -59,6 +59,7 @@ from .radargram_metadata import inspect_radargram, find_worldfile
 from .catalog_editor_dialog import CatalogEditorDialog
 from .link_editor_dialog import LinkEditorDialog
 from .timeslice_group_manager_dialog import TimesliceGroupManagerDialog
+from .project_health_dialog import ProjectHealthDialog
 
 
 class ProjectManagerDialog(QDialog):
@@ -197,6 +198,11 @@ class ProjectManagerDialog(QDialog):
         ts_mgr_btn.clicked.connect(self._open_timeslice_group_manager)
         ts_mgr_btn.setMinimumHeight(28)
         catalog_layout.addWidget(ts_mgr_btn, 4, 1)
+
+        health_btn = QPushButton("Project Health")
+        health_btn.clicked.connect(self._open_project_health)
+        health_btn.setMinimumHeight(28)
+        catalog_layout.addWidget(health_btn, 5, 0, 1, 2)
 
         package_box = QGroupBox("Package")
         package_layout = QGridLayout(package_box)
@@ -2061,6 +2067,17 @@ class ProjectManagerDialog(QDialog):
         )
         dlg.exec_()
         self._notify_project_updated()
+
+    def _open_project_health(self):
+        if not self._ensure_project_ready():
+            return
+        dlg = ProjectHealthDialog(
+            self.iface,
+            self.project_root,
+            self,
+            on_updated=self._notify_project_updated,
+        )
+        dlg.exec_()
 
     def _view_catalog_summary(self):
         if not self._ensure_project_ready():
