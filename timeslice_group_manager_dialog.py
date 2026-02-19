@@ -5,7 +5,7 @@ Time-slice and group manager for RasterLinker projects.
 
 import os
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QItemSelectionModel
 from PyQt5.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -16,8 +16,7 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QLineEdit,
     QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QAbstractItemView,
     QMessageBox,
     QInputDialog,
@@ -27,6 +26,7 @@ from PyQt5.QtWidgets import (
 from qgis.core import QgsCoordinateReferenceSystem
 
 from .project_catalog import load_catalog, save_catalog, sanitize_filename, create_raster_group
+from .timeslice_group_table_models import TimesliceTableModel, GroupTableModel
 
 
 class TimesliceGroupManagerDialog(QDialog):
@@ -129,13 +129,13 @@ class TimesliceGroupManagerDialog(QDialog):
         actions_row2.addWidget(self.sequence_depth_btn, 2, 2, 1, 2)
         ts_layout.addLayout(actions_row2)
 
-        self.ts_table = QTableWidget(0, 8)
-        self.ts_table.setHorizontalHeaderLabels(
-            ["ID", "Name", "Depth Range", "Groups", "CRS", "Assigned CRS", "Project path", "Exists"]
-        )
+        self.ts_table = QTableView(self)
+        self.ts_model = TimesliceTableModel(self)
+        self.ts_table.setModel(self.ts_model)
         self.ts_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.ts_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.ts_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.ts_table.setSortingEnabled(True)
         self.ts_table.horizontalHeader().setStretchLastSection(True)
         ts_layout.addWidget(self.ts_table)
 
@@ -164,13 +164,19 @@ class TimesliceGroupManagerDialog(QDialog):
         grp_actions.addWidget(grp_refresh_btn)
         grp_layout.addLayout(grp_actions)
 
-        self.group_table = QTableWidget(0, 3)
-        self.group_table.setHorizontalHeaderLabels(["ID", "Name", "Time-slices"])
+        self.group_table = QTableView(self)
+        self.group_model = GroupTableModel(self)
+        self.group_table.setModel(self.group_model)
         self.group_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.group_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.group_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.group_table.setSortingEnabled(True)
         self.group_table.horizontalHeader().setStretchLastSection(True)
-        self.group_table.itemSelectionChanged.connect(self._sync_filter_from_group_selection)
+        group_selection_model = self.group_table.selectionModel()
+        if group_selection_model is not None:
+            group_selection_model.selectionChanged.connect(
+                lambda _selected, _deselected: self._sync_filter_from_group_selection()
+            )
         grp_layout.addWidget(self.group_table)
 
         tabs.addTab(grp_tab, "Groups")
@@ -270,6 +276,7 @@ class TimesliceGroupManagerDialog(QDialog):
         timeslices = list(self._catalog.get("timeslices", []))
         filter_gid = self.filter_group_combo.currentData()
         search_text = (self.search_edit.text() or "").strip().lower()
+        selected_tids = set(self._selected_timeslice_ids())
         allowed = None
         if filter_gid:
             group = next((g for g in self._catalog.get("raster_groups", []) if g.get("id") == filter_gid), None)
@@ -303,8 +310,8 @@ class TimesliceGroupManagerDialog(QDialog):
                     continue
             rows.append(rec)
 
-        self.ts_table.setRowCount(len(rows))
-        for i, rec in enumerate(rows):
+        model_rows = []
+        for rec in rows:
             tid = rec.get("id") or ""
             name = rec.get("normalized_name") or rec.get("name") or ""
             depth_txt = self._format_depth_range(rec)
@@ -314,50 +321,87 @@ class TimesliceGroupManagerDialog(QDialog):
             crs_txt = rec.get("crs") or ""
             assigned_txt = rec.get("assigned_crs") or ""
 
-            id_item = QTableWidgetItem(str(tid))
-            id_item.setData(Qt.UserRole, tid)
-            self.ts_table.setItem(i, 0, id_item)
-            self.ts_table.setItem(i, 1, QTableWidgetItem(str(name)))
-            self.ts_table.setItem(i, 2, QTableWidgetItem(str(depth_txt)))
-            self.ts_table.setItem(i, 3, QTableWidgetItem(groups_txt))
-            self.ts_table.setItem(i, 4, QTableWidgetItem(str(crs_txt)))
-            self.ts_table.setItem(i, 5, QTableWidgetItem(str(assigned_txt)))
-            self.ts_table.setItem(i, 6, QTableWidgetItem(str(pth)))
-            self.ts_table.setItem(i, 7, QTableWidgetItem(exists))
+            model_rows.append(
+                {
+                    "id": str(tid),
+                    "name": str(name),
+                    "depth_range": str(depth_txt),
+                    "groups": str(groups_txt),
+                    "crs": str(crs_txt),
+                    "assigned_crs": str(assigned_txt),
+                    "project_path": str(pth),
+                    "exists": str(exists),
+                }
+            )
+
+        model_rows.sort(key=lambda r: (r.get("name") or r.get("id") or "").lower())
+        self.ts_model.set_rows(model_rows)
         self.ts_table.resizeColumnsToContents()
+
+        selection_model = self.ts_table.selectionModel()
+        if selection_model is not None:
+            selection_model.clearSelection()
+            for row, row_data in enumerate(model_rows):
+                if row_data.get("id") not in selected_tids:
+                    continue
+                idx = self.ts_model.index(row, 0)
+                if idx.isValid():
+                    selection_model.select(
+                        idx,
+                        QItemSelectionModel.Select | QItemSelectionModel.Rows,
+                    )
 
     def _refresh_group_table(self):
         groups = list(self._catalog.get("raster_groups", []))
-        self.group_table.setRowCount(len(groups))
-        for i, g in enumerate(groups):
+        selected_gid = self._selected_group_id()
+        model_rows = []
+        for g in groups:
             gid = g.get("id") or ""
             name = g.get("name") or ""
             count = len(g.get("timeslice_ids", []))
+            model_rows.append(
+                {
+                    "id": str(gid),
+                    "name": str(name),
+                    "timeslice_count": count,
+                }
+            )
 
-            id_item = QTableWidgetItem(str(gid))
-            id_item.setData(Qt.UserRole, gid)
-            self.group_table.setItem(i, 0, id_item)
-            self.group_table.setItem(i, 1, QTableWidgetItem(str(name)))
-            self.group_table.setItem(i, 2, QTableWidgetItem(str(count)))
+        model_rows.sort(key=lambda r: (r.get("name") or r.get("id") or "").lower())
+        self.group_model.set_rows(model_rows)
         self.group_table.resizeColumnsToContents()
 
+        if selected_gid:
+            for row_idx, row_data in enumerate(model_rows):
+                if row_data.get("id") == selected_gid:
+                    idx = self.group_model.index(row_idx, 0)
+                    if idx.isValid():
+                        self.group_table.selectRow(row_idx)
+                    break
+
     def _selected_timeslice_ids(self):
-        rows = sorted({idx.row() for idx in self.ts_table.selectionModel().selectedRows()})
+        if self.ts_table is None or self.ts_table.selectionModel() is None:
+            return []
+        rows = sorted({idx.row() for idx in self.ts_table.selectionModel().selectedRows(0)})
         tids = []
         for row in rows:
-            item = self.ts_table.item(row, 0)
-            tid = item.data(Qt.UserRole) if item else None
+            payload = self.ts_model.row_payload(row)
+            tid = payload.get("id") if isinstance(payload, dict) else None
             if tid:
                 tids.append(tid)
         return tids
 
     def _selected_group_id(self):
-        rows = self.group_table.selectionModel().selectedRows()
+        if self.group_table is None or self.group_table.selectionModel() is None:
+            return None
+        rows = self.group_table.selectionModel().selectedRows(0)
         if not rows:
             return None
         row = rows[0].row()
-        item = self.group_table.item(row, 0)
-        return item.data(Qt.UserRole) if item else None
+        payload = self.group_model.row_payload(row)
+        if not isinstance(payload, dict):
+            return None
+        return payload.get("id")
 
     def _timeslice_record_by_id(self, tid):
         return next((r for r in self._catalog.get("timeslices", []) if r.get("id") == tid), None)

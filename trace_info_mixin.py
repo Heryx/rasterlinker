@@ -5,8 +5,6 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QDockWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QTableView,
     QAbstractItemView,
 )
@@ -168,46 +166,12 @@ class TraceInfoMixin:
     def _on_trace_info_table_selection_changed(self):
         if self.trace_info_selection_guard:
             return
-        row = None
-        if self.trace_info_table is not None and self.trace_info_table.selectionModel() is not None:
-            selected = self.trace_info_table.selectionModel().selectedRows()
-            if selected:
-                row = selected[0].row()
-        if row is None:
-            return
-        self.trace_info_selection_guard = True
-        try:
-            if (
-                self.trace_info_form_list is not None
-                and row >= 0
-                and row < self.trace_info_form_list.rowCount()
-            ):
-                self.trace_info_form_list.selectRow(row)
-        finally:
-            self.trace_info_selection_guard = False
         self._update_trace_info_form_from_table_selection()
 
     def _on_trace_info_form_list_selection_changed(self):
         if self.trace_info_selection_guard:
             return
-        row = None
-        if self.trace_info_form_list is not None and self.trace_info_form_list.selectionModel() is not None:
-            selected = self.trace_info_form_list.selectionModel().selectedRows()
-            if selected:
-                row = selected[0].row()
-        if row is None:
-            return
-        self.trace_info_selection_guard = True
-        try:
-            if (
-                self.trace_info_table is not None
-                and self.trace_info_table.model() is not None
-                and row >= 0
-                and row < self.trace_info_table.model().rowCount()
-            ):
-                self.trace_info_table.selectRow(row)
-        finally:
-            self.trace_info_selection_guard = False
+        # Form list shares the same selection model as table view.
         self._update_trace_info_form_from_table_selection()
 
     def _select_trace_info_row(self, row_idx):
@@ -221,8 +185,6 @@ class TraceInfoMixin:
                 and row_idx < self.trace_info_table.model().rowCount()
             ):
                 self.trace_info_table.selectRow(row_idx)
-            if self.trace_info_form_list is not None and row_idx < self.trace_info_form_list.rowCount():
-                self.trace_info_form_list.selectRow(row_idx)
         finally:
             self.trace_info_selection_guard = False
         self._update_trace_info_form_from_table_selection()
@@ -381,11 +343,9 @@ class TraceInfoMixin:
                 else []
             )
             if form_selected_rows:
-                item0 = self.trace_info_form_list.item(form_selected_rows[0].row(), 0)
-                if item0 is not None:
-                    payload = item0.data(Qt.UserRole)
-                    if isinstance(payload, dict):
-                        row_data = payload
+                payload = self._trace_info_payload_from_table_row(form_selected_rows[0].row())
+                if isinstance(payload, dict):
+                    row_data = payload
 
         # Ensure one selected row when data exists.
         if (
@@ -591,18 +551,21 @@ class TraceInfoMixin:
         form_page_layout.setContentsMargins(0, 0, 0, 0)
         form_page_layout.setSpacing(6)
 
-        form_list = QTableWidget(0, 2, form_page)
-        form_list.setHorizontalHeaderLabels(["FID", "Trace ID"])
+        form_list = QTableView(form_page)
+        form_list.setModel(table_model)
         form_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         form_list.setSelectionMode(QAbstractItemView.SingleSelection)
         form_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
         form_list.setWordWrap(False)
         form_list.setTextElideMode(Qt.ElideRight)
         form_list_header = form_list.horizontalHeader()
-        form_list_header.setStretchLastSection(False)
+        form_list_header.setStretchLastSection(True)
         form_list_header.setSectionResizeMode(QHeaderView.Interactive)
         form_list_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        form_list.setColumnWidth(1, 180)
+        form_list.setColumnWidth(1, 190)
+        for col_idx in (2, 3, 4, 5):
+            form_list.setColumnHidden(col_idx, True)
+        form_list.setSelectionModel(table.selectionModel())
         form_list.setMinimumWidth(240)
         form_list.setMaximumWidth(330)
         form_page_layout.addWidget(form_list, 0)
@@ -648,8 +611,11 @@ class TraceInfoMixin:
         sort_field_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
         sort_order_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
         sort_order_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
-        table.itemSelectionChanged.connect(self._on_trace_info_table_selection_changed)
-        form_list.itemSelectionChanged.connect(self._on_trace_info_form_list_selection_changed)
+        table_selection_model = table.selectionModel()
+        if table_selection_model is not None:
+            table_selection_model.selectionChanged.connect(
+                lambda _selected, _deselected: self._on_trace_info_table_selection_changed()
+            )
 
         main_layout.addWidget(left_widget, 1)
 
@@ -704,8 +670,6 @@ class TraceInfoMixin:
                 if isinstance(payload, dict):
                     selected_fid = payload.get("fid")
         self.trace_info_model.set_rows([])
-        if self.trace_info_form_list is not None:
-            self.trace_info_form_list.setRowCount(0)
         if not self._is_line_layer(layer):
             self._update_trace_info_form_from_table_selection()
             return
@@ -796,14 +760,6 @@ class TraceInfoMixin:
             rows.sort(key=lambda r: str(r.get(value_key) or "").lower(), reverse=sort_desc)
 
         self.trace_info_model.set_rows(rows)
-        if self.trace_info_form_list is not None:
-            self.trace_info_form_list.setRowCount(len(rows))
-            for row_idx, row_data in enumerate(rows):
-                fid_item = QTableWidgetItem(str(row_data.get("fid")))
-                fid_item.setData(Qt.UserRole, row_data)
-                trace_item = QTableWidgetItem(str(row_data.get("trace_id")))
-                self.trace_info_form_list.setItem(row_idx, 0, fid_item)
-                self.trace_info_form_list.setItem(row_idx, 1, trace_item)
 
         target_row = 0
         if selected_fid is not None:
