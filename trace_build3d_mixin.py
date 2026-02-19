@@ -17,6 +17,68 @@ from qgis.core import (
 
 
 class TraceBuild3DMixin:
+    def _build3d_mode_choices(self):
+        return [
+            ("Constant Z (from depth/z_value)", "constant"),
+            ("From linked z-grid", "linked_grid"),
+            ("Orthometric (DTM - depth)", "orthometric"),
+        ]
+
+    def _default_build3d_output_name(self, source_layer, mode):
+        suffix_map = {
+            "constant": "_3D",
+            "linked_grid": "_3D_grid",
+            "orthometric": "_3D_ortho",
+        }
+        return f"{source_layer.name()}{suffix_map.get(mode, '_3D')}"
+
+    def _unique_map_layer_name(self, base_name):
+        base = (base_name or "Trace3D").strip() or "Trace3D"
+        existing = {lyr.name() for lyr in QgsProject.instance().mapLayers().values()}
+        if base not in existing:
+            return base
+        i = 1
+        while True:
+            candidate = f"{base}_{i:03d}"
+            if candidate not in existing:
+                return candidate
+            i += 1
+
+    def _choose_build_3d_mode_only(self, default_mode="constant"):
+        choices = self._build3d_mode_choices()
+        labels = [c[0] for c in choices]
+        default_idx = 0
+        for idx, (_, mode_key) in enumerate(choices):
+            if mode_key == default_mode:
+                default_idx = idx
+                break
+        chosen_label, ok = QInputDialog.getItem(
+            self._ui_parent(),
+            "Build 3D Batch",
+            "Mode:",
+            labels,
+            default_idx,
+            False,
+        )
+        if not ok:
+            return None
+        return choices[labels.index(chosen_label)][1]
+
+    def _build3d_batch_source_layers(self):
+        layers = []
+        for lyr in QgsProject.instance().mapLayers().values():
+            if not self._is_line_layer(lyr):
+                continue
+            # In batch mode prioritize trace-related layers to avoid converting unrelated lines.
+            if hasattr(self, "_is_trace_related_line_layer"):
+                try:
+                    if not self._is_trace_related_line_layer(lyr):
+                        continue
+                except Exception:
+                    continue
+            layers.append(lyr)
+        return layers
+
     def _ensure_saved_before_next_step(self, layer, action_title):
         if layer is None:
             return False
@@ -217,11 +279,7 @@ class TraceBuild3DMixin:
         return self._sample_raster_value(raster_layer, point_xy, 1)
 
     def _choose_build_3d_mode(self, source_layer, default_mode="constant"):
-        choices = [
-            ("Constant Z (from depth/z_value)", "constant"),
-            ("From linked z-grid", "linked_grid"),
-            ("Orthometric (DTM - depth)", "orthometric"),
-        ]
+        choices = self._build3d_mode_choices()
         labels = [c[0] for c in choices]
         default_idx = 0
         for idx, (_, mode_key) in enumerate(choices):
@@ -241,12 +299,7 @@ class TraceBuild3DMixin:
             return None, None
         mode = choices[labels.index(chosen_label)][1]
 
-        suffix_map = {
-            "constant": "_3D",
-            "linked_grid": "_3D_grid",
-            "orthometric": "_3D_ortho",
-        }
-        default_name = f"{source_layer.name()}{suffix_map.get(mode, '_3D')}"
+        default_name = self._default_build3d_output_name(source_layer, mode)
         output_name, ok = QInputDialog.getText(
             self._ui_parent(),
             "Build 3D",
@@ -265,6 +318,7 @@ class TraceBuild3DMixin:
             "missing_grid": 0,
             "invalid_geom": 0,
             "sample_fail": 0,
+            "outside_dtm_extent": 0,
         }
         for feat in source_layer.getFeatures():
             stats["total"] += 1
@@ -300,6 +354,27 @@ class TraceBuild3DMixin:
                 if depth_val is None:
                     stats["missing_depth"] += 1
                     continue
+                point_xy = self._first_xy_from_geometry(geom)
+                if point_xy is None:
+                    stats["invalid_geom"] += 1
+                    continue
+                if dtm_layer is not None:
+                    try:
+                        dtm_point = point_xy
+                        if (
+                            source_layer.crs().isValid()
+                            and dtm_layer.crs().isValid()
+                            and source_layer.crs() != dtm_layer.crs()
+                        ):
+                            tr = QgsCoordinateTransform(source_layer.crs(), dtm_layer.crs(), QgsProject.instance())
+                            transformed = tr.transform(point_xy)
+                            dtm_point = QgsPointXY(transformed.x(), transformed.y())
+                        if not dtm_layer.extent().contains(dtm_point):
+                            stats["outside_dtm_extent"] += 1
+                            continue
+                    except Exception:
+                        stats["sample_fail"] += 1
+                        continue
                 if self._geometry_with_dtm_minus_depth(geom, dtm_layer, depth_val) is None:
                     stats["sample_fail"] += 1
                     continue
@@ -389,7 +464,155 @@ class TraceBuild3DMixin:
             out_layer.triggerRepaint()
         return len(features_out), skipped
 
-    def _run_build_3d_workflow(self, default_mode="constant"):
+    def _run_build_3d_workflow(self, default_mode="constant", batch=False):
+        if batch:
+            source_layers = self._build3d_batch_source_layers()
+            if not source_layers:
+                QMessageBox.warning(
+                    self._ui_parent(),
+                    "Build 3D Batch",
+                    "No trace-related line layer found in project.",
+                )
+                return
+            pending_layers = []
+            for lyr in source_layers:
+                try:
+                    if lyr.isEditable() and lyr.isModified():
+                        pending_layers.append(lyr.name())
+                except Exception:
+                    continue
+            if pending_layers:
+                preview = "\n".join(pending_layers[:8])
+                if len(pending_layers) > 8:
+                    preview += f"\n... and {len(pending_layers) - 8} more."
+                QMessageBox.warning(
+                    self._ui_parent(),
+                    "Build 3D Batch",
+                    (
+                        "Some layers have unsaved edits.\n"
+                        "Save edits before running batch build:\n\n"
+                        f"{preview}"
+                    ),
+                )
+                return
+            mode = self._choose_build_3d_mode_only(default_mode=default_mode)
+            if not mode:
+                return
+            dtm_layer = None
+            if mode == "orthometric":
+                dtm_layer = self._choose_dtm_layer()
+                if dtm_layer is None:
+                    return
+
+            mode_label = {
+                "constant": "Constant Z (depth/z_value)",
+                "linked_grid": "Linked z-grid",
+                "orthometric": "Orthometric (DTM - depth)",
+            }.get(mode, mode)
+
+            per_layer = []
+            totals = {
+                "layers_total": 0,
+                "layers_ready": 0,
+                "features_total": 0,
+                "features_ready": 0,
+                "missing_depth": 0,
+                "missing_grid": 0,
+                "invalid_geom": 0,
+                "sample_fail": 0,
+                "outside_dtm_extent": 0,
+            }
+            for lyr in source_layers:
+                stats = self._precheck_build_3d(lyr, mode, dtm_layer=dtm_layer)
+                per_layer.append((lyr, stats))
+                totals["layers_total"] += 1
+                if stats.get("ready", 0) > 0:
+                    totals["layers_ready"] += 1
+                totals["features_total"] += int(stats.get("total", 0))
+                totals["features_ready"] += int(stats.get("ready", 0))
+                totals["missing_depth"] += int(stats.get("missing_depth", 0))
+                totals["missing_grid"] += int(stats.get("missing_grid", 0))
+                totals["invalid_geom"] += int(stats.get("invalid_geom", 0))
+                totals["sample_fail"] += int(stats.get("sample_fail", 0))
+                totals["outside_dtm_extent"] += int(stats.get("outside_dtm_extent", 0))
+
+            if totals["features_ready"] <= 0:
+                QMessageBox.warning(
+                    self._ui_parent(),
+                    "Build 3D Batch",
+                    (
+                        f"Mode: {mode_label}\n"
+                        "No valid feature to convert in selected project layers."
+                    ),
+                )
+                return
+
+            layer_lines = []
+            for lyr, st in per_layer[:12]:
+                layer_lines.append(
+                    f"- {lyr.name()}: ready {st.get('ready', 0)}/{st.get('total', 0)}"
+                )
+            if len(per_layer) > 12:
+                layer_lines.append(f"... and {len(per_layer) - 12} more layers.")
+
+            details = (
+                f"Mode: {mode_label}\n"
+                f"Layers (ready/total): {totals['layers_ready']}/{totals['layers_total']}\n"
+                f"Features (ready/total): {totals['features_ready']}/{totals['features_total']}\n"
+                f"Will be skipped: {totals['features_total'] - totals['features_ready']}\n\n"
+                f"Details - missing depth: {totals['missing_depth']}, "
+                f"missing grid: {totals['missing_grid']}, "
+                f"invalid geom: {totals['invalid_geom']}, sample fail: {totals['sample_fail']}"
+            )
+            if mode == "orthometric":
+                details += f", out of DTM extent: {totals['outside_dtm_extent']}"
+            details += "\n\nLayers preview:\n" + "\n".join(layer_lines) + "\n\nContinue?"
+
+            proceed = QMessageBox.question(
+                self._ui_parent(),
+                "Build 3D Batch - Preview",
+                details,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if proceed != QMessageBox.Yes:
+                return
+
+            built_layers = []
+            created_total = 0
+            skipped_total = 0
+            for lyr, st in per_layer:
+                if st.get("ready", 0) <= 0:
+                    continue
+                out_name = self._unique_map_layer_name(self._default_build3d_output_name(lyr, mode))
+                out_layer = self._create_3d_output_layer(lyr, out_name)
+                if out_layer is None:
+                    continue
+                created, skipped = self._build_3d_with_mode(lyr, out_layer, mode, dtm_layer=dtm_layer)
+                if created <= 0:
+                    continue
+                created_total += int(created)
+                skipped_total += int(skipped)
+                built_layers.append(out_layer)
+
+            if not built_layers:
+                QMessageBox.warning(
+                    self._ui_parent(),
+                    "Build 3D Batch",
+                    "Batch run completed, but no 3D output layer was created.",
+                )
+                return
+
+            self.iface.setActiveLayer(built_layers[0])
+            self._notify_info(
+                (
+                    f"3D batch completed ({mode_label}): "
+                    f"layers created: {len(built_layers)}, features created: {created_total}, skipped: {skipped_total}."
+                ),
+                duration=8,
+            )
+            return
+
         source_layer = self._current_trace_layer(prefer_active=True, require_trace=False)
         if source_layer is None:
             source_layer = self._select_line_layer_dialog(require_trace=False)
@@ -413,6 +636,9 @@ class TraceBuild3DMixin:
 
         preview = self._precheck_build_3d(source_layer, mode, dtm_layer=dtm_layer)
         if preview["ready"] <= 0:
+            extra = ""
+            if mode == "orthometric":
+                extra = f", out of DTM extent: {preview.get('outside_dtm_extent', 0)}"
             QMessageBox.warning(
                 self._ui_parent(),
                 "Build 3D",
@@ -420,7 +646,7 @@ class TraceBuild3DMixin:
                     "No valid feature to convert with selected mode.\n"
                     f"Total: {preview['total']}, missing depth: {preview['missing_depth']}, "
                     f"missing grid: {preview['missing_grid']}, invalid geom: {preview['invalid_geom']}, "
-                    f"sample fail: {preview['sample_fail']}."
+                    f"sample fail: {preview['sample_fail']}{extra}."
                 ),
             )
             return
@@ -430,6 +656,9 @@ class TraceBuild3DMixin:
             "linked_grid": "Linked z-grid",
             "orthometric": "Orthometric (DTM - depth)",
         }.get(mode, mode)
+        extra = ""
+        if mode == "orthometric":
+            extra = f", out of DTM extent: {preview.get('outside_dtm_extent', 0)}"
         proceed = QMessageBox.question(
             self._ui_parent(),
             "Build 3D - Preview",
@@ -440,7 +669,7 @@ class TraceBuild3DMixin:
                 f"Will be skipped: {preview['total'] - preview['ready']}\n\n"
                 f"Details - missing depth: {preview['missing_depth']}, "
                 f"missing grid: {preview['missing_grid']}, "
-                f"invalid geom: {preview['invalid_geom']}, sample fail: {preview['sample_fail']}.\n\n"
+                f"invalid geom: {preview['invalid_geom']}, sample fail: {preview['sample_fail']}{extra}.\n\n"
                 "Continue?"
             ),
             QMessageBox.Yes | QMessageBox.No,
@@ -463,6 +692,9 @@ class TraceBuild3DMixin:
 
     def build_trace_3d_from_depth(self, checked=False):
         self._run_build_3d_workflow(default_mode="constant")
+
+    def build_trace_3d_batch(self, checked=False):
+        self._run_build_3d_workflow(default_mode="constant", batch=True)
 
     def _choose_dtm_layer(self):
         rasters = [

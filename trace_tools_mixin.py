@@ -304,6 +304,13 @@ class TraceToolsMixin:
         )
         self._add_trace_toolbar_action(
             None,
+            "Build 3D Batch",
+            self.build_trace_3d_batch,
+            "mActionSelectByExpression.svg",
+            "mAction3DMap.svg",
+        )
+        self._add_trace_toolbar_action(
+            None,
             "Orthometric 3D",
             self.build_trace_3d_orthometric,
             "mActionRasterCalculator.svg",
@@ -340,7 +347,7 @@ class TraceToolsMixin:
             if action is not None:
                 toolbar.addAction(action)
         toolbar.addSeparator()
-        for name in ("Build 3D", "Orthometric 3D", "Export Layer"):
+        for name in ("Build 3D", "Build 3D Batch", "Orthometric 3D", "Export Layer"):
             action = self.trace_toolbar_actions.get(name)
             if action is not None:
                 toolbar.addAction(action)
@@ -379,6 +386,7 @@ class TraceToolsMixin:
             "Delete",
             "Workflow Check",
             "Build 3D",
+            "Build 3D Batch",
             "Orthometric 3D",
             "Export Layer",
         )

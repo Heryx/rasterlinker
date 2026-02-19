@@ -344,6 +344,7 @@ class TraceInfoMixin:
                 "Build 3D",
                 (
                     "Build 3D: Constant Z or Linked z-grid.\n"
+                    "Build 3D Batch: runs selected mode on all trace layers.\n"
                     "Orthometric 3D: Z = DTM - depth for each vertex.\n"
                     "If Z data is missing, drawing can continue in missing_z mode.\n"
                     "Use form view to inspect row attributes quickly."
