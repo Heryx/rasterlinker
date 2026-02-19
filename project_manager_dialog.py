@@ -476,6 +476,208 @@ class ProjectManagerDialog(QDialog):
         else:
             self.iface.messageBar().pushInfo("RasterLinker", text)
 
+    @staticmethod
+    def _normalize_source_for_compare(source):
+        raw = str(source or "").strip()
+        if not raw:
+            return ""
+        base = raw.split("|", 1)[0].strip()
+        try:
+            return os.path.normcase(os.path.abspath(base))
+        except Exception:
+            return os.path.normcase(base)
+
+    def _remove_loaded_layers_for_paths(self, paths):
+        wanted = {
+            self._normalize_source_for_compare(p)
+            for p in (paths or [])
+            if self._normalize_source_for_compare(p)
+        }
+        if not wanted:
+            return 0
+        project = QgsProject.instance()
+        to_remove = []
+        for lid, lyr in project.mapLayers().items():
+            src = self._normalize_source_for_compare(lyr.source())
+            if src and src in wanted:
+                to_remove.append(lid)
+        if to_remove:
+            project.removeMapLayers(to_remove)
+        return len(to_remove)
+
+    @staticmethod
+    def _remove_file_safe(path, warnings):
+        pth = str(path or "").strip()
+        if not pth:
+            return False
+        try:
+            if os.path.exists(pth):
+                os.remove(pth)
+                return True
+        except Exception as e:
+            warnings.append(f"Delete failed for {os.path.basename(pth)}: {e}")
+        return False
+
+    @staticmethod
+    def _radargram_sidecar_path(project_root, radargram_id):
+        rid = str(radargram_id or "").replace(":", "_")
+        if not rid:
+            return ""
+        return os.path.join(project_root, "metadata", "radargram_sidecars", f"{rid}.json")
+
+    def _ask_partial_import_rollback(self, import_label, imported_count, failed_count, cancelled):
+        if int(imported_count) <= 0:
+            return False
+        if not cancelled and int(failed_count) <= 0:
+            return False
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle(f"{import_label} import - partial result")
+        msg.setText(
+            (
+                f"{import_label} import ended with partial results.\n\n"
+                f"Imported/copied this run: {int(imported_count)}\n"
+                f"Issues: {int(failed_count)}"
+                + ("\nStatus: cancelled by user" if cancelled else "")
+                + "\n\nChoose action:"
+            )
+        )
+        rollback_btn = msg.addButton("Rollback Imported", QMessageBox.DestructiveRole)
+        keep_btn = msg.addButton("Keep Imported", QMessageBox.AcceptRole)
+        msg.setDefaultButton(rollback_btn)
+        msg.exec_()
+        return msg.clickedButton() == rollback_btn
+
+    def _rollback_timeslice_import(self, project_root, imported_records):
+        records = [r for r in (imported_records or []) if isinstance(r, dict)]
+        tids = {r.get("id") for r in records if r.get("id")}
+        warnings = []
+        deleted_files = 0
+        layer_paths = []
+
+        # Remove copied raster files.
+        for rec in records:
+            pth = rec.get("project_path")
+            if pth:
+                layer_paths.append(pth)
+                if self._remove_file_safe(pth, warnings):
+                    deleted_files += 1
+
+        # Remove copied z-grids only when not referenced by remaining catalog records.
+        z_grid_candidates = []
+        for rec in records:
+            z_path = rec.get("z_grid_project_path")
+            if rec.get("z_grid_copied") and z_path:
+                z_grid_candidates.append(z_path)
+        if z_grid_candidates:
+            try:
+                catalog = load_catalog(project_root)
+            except Exception:
+                catalog = {}
+            in_use = {
+                self._normalize_source_for_compare(ts.get("z_grid_project_path"))
+                for ts in catalog.get("timeslices", [])
+                if ts.get("id") not in tids and ts.get("z_grid_project_path")
+            }
+            for z_path in z_grid_candidates:
+                norm_z = self._normalize_source_for_compare(z_path)
+                if norm_z and norm_z in in_use:
+                    continue
+                if self._remove_file_safe(z_path, warnings):
+                    deleted_files += 1
+
+        # Remove catalog references.
+        removed_records = 0
+        if tids:
+            data = load_catalog(project_root)
+            before = len(data.get("timeslices", []))
+            data["timeslices"] = [r for r in data.get("timeslices", []) if r.get("id") not in tids]
+            removed_records = max(0, before - len(data.get("timeslices", [])))
+            for g in data.get("raster_groups", []):
+                g["timeslice_ids"] = [tid for tid in g.get("timeslice_ids", []) if tid not in tids]
+            data["links"] = [lk for lk in data.get("links", []) if lk.get("timeslice_id") not in tids]
+            save_catalog(project_root, data)
+
+        removed_layers = self._remove_loaded_layers_for_paths(layer_paths)
+        return {
+            "removed_records": removed_records,
+            "deleted_files": deleted_files,
+            "removed_layers": removed_layers,
+            "warnings": warnings,
+        }
+
+    def _rollback_las_import(self, project_root, imported_files, model_ids):
+        files = [r for r in (imported_files or []) if isinstance(r, dict)]
+        mids = {v for v in (model_ids or []) if v}
+        warnings = []
+        deleted_files = 0
+        layer_paths = []
+
+        for rec in files:
+            pth = rec.get("project_path")
+            if pth:
+                layer_paths.append(pth)
+                if self._remove_file_safe(pth, warnings):
+                    deleted_files += 1
+
+        removed_records = 0
+        if mids:
+            data = load_catalog(project_root)
+            before = len(data.get("models_3d", []))
+            data["models_3d"] = [r for r in data.get("models_3d", []) if r.get("id") not in mids]
+            removed_records = max(0, before - len(data.get("models_3d", [])))
+            save_catalog(project_root, data)
+
+        removed_layers = self._remove_loaded_layers_for_paths(layer_paths)
+        return {
+            "removed_records": removed_records,
+            "deleted_files": deleted_files,
+            "removed_layers": removed_layers,
+            "warnings": warnings,
+        }
+
+    def _rollback_radargram_import(self, project_root, imported_files, radargram_ids):
+        files = [r for r in (imported_files or []) if isinstance(r, dict)]
+        rids = {v for v in (radargram_ids or []) if v}
+        warnings = []
+        deleted_files = 0
+        layer_paths = []
+
+        for rec in files:
+            pth = rec.get("project_path")
+            if pth:
+                layer_paths.append(pth)
+                if self._remove_file_safe(pth, warnings):
+                    deleted_files += 1
+            wf = rec.get("worldfile_path")
+            if wf and self._remove_file_safe(wf, warnings):
+                deleted_files += 1
+
+        for rid in rids:
+            sidecar = self._radargram_sidecar_path(project_root, rid)
+            if sidecar:
+                self._remove_file_safe(sidecar, warnings)
+
+        removed_records = 0
+        if rids:
+            data = load_catalog(project_root)
+            before = len(data.get("radargrams", []))
+            data["radargrams"] = [r for r in data.get("radargrams", []) if r.get("id") not in rids]
+            removed_records = max(0, before - len(data.get("radargrams", [])))
+            for g in data.get("raster_groups", []):
+                g["radargram_ids"] = [rid for rid in g.get("radargram_ids", []) if rid not in rids]
+            data["links"] = [lk for lk in data.get("links", []) if lk.get("radargram_id") not in rids]
+            save_catalog(project_root, data)
+
+        removed_layers = self._remove_loaded_layers_for_paths(layer_paths)
+        return {
+            "removed_records": removed_records,
+            "deleted_files": deleted_files,
+            "removed_layers": removed_layers,
+            "warnings": warnings,
+        }
+
     def _get_preferred_import_crs(self):
         authid = (self.settings.value(self.settings_key_default_import_crs, "", type=str) or "").strip()
         if authid:
@@ -845,21 +1047,44 @@ class ProjectManagerDialog(QDialog):
             imported_paths = []
             cancelled = bool(done_task.cancelled)
             failures = list(done_task.failed)
+            rollback_stats = None
 
             try:
-                imported_records = list(done_task.imported_records)
-                if imported_records:
+                task_imported_records = list(done_task.imported_records)
+                if task_imported_records:
                     try:
-                        register_timeslices_batch(target_project_root, imported_records)
-                        imported = len(imported_records)
-                        imported_ids = [rec.get("id") for rec in imported_records if rec.get("id")]
-                        imported_paths = [rec.get("project_path") for rec in imported_records if rec.get("project_path")]
+                        register_timeslices_batch(target_project_root, task_imported_records)
+                        imported = len(task_imported_records)
+                        imported_ids = [rec.get("id") for rec in task_imported_records if rec.get("id")]
+                        imported_paths = [rec.get("project_path") for rec in task_imported_records if rec.get("project_path")]
                     except Exception as e:
                         failures.append(f"catalog write: {e}")
                         imported = 0
                         imported_ids = []
                         imported_paths = []
 
+                if self._ask_partial_import_rollback(
+                    "Time-slice",
+                    imported_count=len(task_imported_records),
+                    failed_count=len(failures),
+                    cancelled=cancelled,
+                ):
+                    rollback_stats = self._rollback_timeslice_import(target_project_root, task_imported_records)
+                    imported = 0
+                    linked_grids = 0
+                    imported_ids = []
+                    imported_paths = []
+                    for w in rollback_stats.get("warnings", []):
+                        failures.append(f"rollback: {w}")
+
+                extras = [("linked z-grids", linked_grids)]
+                if rollback_stats:
+                    extras.extend(
+                        [
+                            ("rollback deleted files", rollback_stats.get("deleted_files", 0)),
+                            ("rollback removed records", rollback_stats.get("removed_records", 0)),
+                        ]
+                    )
                 self._show_import_failures("Time-slice import warnings", failures)
                 self._report_import_outcome(
                     "Time-slice",
@@ -868,7 +1093,7 @@ class ProjectManagerDialog(QDialog):
                     failed=len(failures),
                     cancelled=cancelled,
                     validation_skipped=validation_skipped,
-                    extras=[("linked z-grids", linked_grids)],
+                    extras=extras,
                 )
                 self._notify_project_updated()
 
@@ -957,6 +1182,8 @@ class ProjectManagerDialog(QDialog):
             loaded = 0
             failed = list(done_task.failed)
             cancelled = bool(done_task.cancelled)
+            rollback_stats = None
+            registered_model_ids = []
 
             try:
                 for rec in done_task.imported_files:
@@ -976,6 +1203,8 @@ class ProjectManagerDialog(QDialog):
                             }
                         )
                         register_model_3d(target_project_root, meta)
+                        if meta.get("id"):
+                            registered_model_ids.append(meta.get("id"))
                         imported += 1
 
                         layer_name = os.path.basename(project_path)
@@ -994,6 +1223,30 @@ class ProjectManagerDialog(QDialog):
                         label = os.path.basename(source_path) if source_path else normalized_name
                         failed.append(f"{label}: {e}")
 
+                if self._ask_partial_import_rollback(
+                    "LAS/LAZ",
+                    imported_count=len(done_task.imported_files),
+                    failed_count=len(failed),
+                    cancelled=cancelled,
+                ):
+                    rollback_stats = self._rollback_las_import(
+                        target_project_root,
+                        list(done_task.imported_files),
+                        registered_model_ids,
+                    )
+                    imported = 0
+                    loaded = 0
+                    for w in rollback_stats.get("warnings", []):
+                        failed.append(f"rollback: {w}")
+
+                extras = [("loaded in canvas", loaded)]
+                if rollback_stats:
+                    extras.extend(
+                        [
+                            ("rollback deleted files", rollback_stats.get("deleted_files", 0)),
+                            ("rollback removed records", rollback_stats.get("removed_records", 0)),
+                        ]
+                    )
                 self._show_import_failures("LAS/LAZ import warnings", failed)
                 self._report_import_outcome(
                     "LAS/LAZ",
@@ -1001,7 +1254,7 @@ class ProjectManagerDialog(QDialog):
                     imported=imported,
                     failed=len(failed),
                     cancelled=cancelled,
-                    extras=[("loaded in canvas", loaded)],
+                    extras=extras,
                 )
                 self._notify_project_updated()
             finally:
@@ -1065,6 +1318,8 @@ class ProjectManagerDialog(QDialog):
             catalog_only = 0
             failed = list(done_task.failed)
             cancelled = bool(done_task.cancelled)
+            rollback_stats = None
+            registered_radargram_ids = []
 
             try:
                 for rec in done_task.imported_files:
@@ -1088,6 +1343,8 @@ class ProjectManagerDialog(QDialog):
                         if rec.get("worldfile_path") and not meta.get("worldfile_path"):
                             meta["worldfile_path"] = rec.get("worldfile_path")
                         register_radargram(target_project_root, meta)
+                        if meta.get("id"):
+                            registered_radargram_ids.append(meta.get("id"))
                         save_radargram_sidecar(target_project_root, meta)
                         add_radargram_to_default_group(target_project_root, meta.get("id"))
                         if meta.get("import_mode") == "mapped":
@@ -1099,6 +1356,31 @@ class ProjectManagerDialog(QDialog):
                         label = os.path.basename(source_path) if source_path else normalized_name
                         failed.append(f"{label}: {e}")
 
+                if self._ask_partial_import_rollback(
+                    "Radargram",
+                    imported_count=len(done_task.imported_files),
+                    failed_count=len(failed),
+                    cancelled=cancelled,
+                ):
+                    rollback_stats = self._rollback_radargram_import(
+                        target_project_root,
+                        list(done_task.imported_files),
+                        registered_radargram_ids,
+                    )
+                    imported = 0
+                    mapped = 0
+                    catalog_only = 0
+                    for w in rollback_stats.get("warnings", []):
+                        failed.append(f"rollback: {w}")
+
+                extras = [("mapped", mapped), ("catalog-only", catalog_only)]
+                if rollback_stats:
+                    extras.extend(
+                        [
+                            ("rollback deleted files", rollback_stats.get("deleted_files", 0)),
+                            ("rollback removed records", rollback_stats.get("removed_records", 0)),
+                        ]
+                    )
                 self._show_import_failures("Radargram import warnings", failed)
                 self._report_import_outcome(
                     "Radargram",
@@ -1107,7 +1389,7 @@ class ProjectManagerDialog(QDialog):
                     failed=len(failed),
                     cancelled=cancelled,
                     validation_skipped=validation_skipped,
-                    extras=[("mapped", mapped), ("catalog-only", catalog_only)],
+                    extras=extras,
                 )
                 self._notify_project_updated()
             finally:
