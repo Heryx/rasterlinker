@@ -432,6 +432,50 @@ class ProjectManagerDialog(QDialog):
             except Exception:
                 pass
 
+    @staticmethod
+    def _build_issue_preview(items, limit=10):
+        rows = [str(it) for it in (items or []) if str(it).strip()]
+        if not rows:
+            return ""
+        preview = "\n".join(rows[:limit])
+        more = len(rows) - min(len(rows), limit)
+        if more > 0:
+            preview += f"\n... and {more} more."
+        return preview
+
+    def _show_import_failures(self, title, failures):
+        preview = self._build_issue_preview(failures, limit=10)
+        if preview:
+            QMessageBox.warning(self, title, preview)
+
+    def _report_import_outcome(
+        self,
+        import_label,
+        requested,
+        imported,
+        failed,
+        cancelled=False,
+        validation_skipped=0,
+        extras=None,
+    ):
+        parts = [
+            f"requested: {int(max(0, requested))}",
+            f"imported: {int(max(0, imported))}",
+            f"failed: {int(max(0, failed))}",
+        ]
+        if validation_skipped > 0:
+            parts.append(f"validation skipped: {int(validation_skipped)}")
+        for key, value in (extras or []):
+            parts.append(f"{key}: {value}")
+        text = f"{import_label} import finished ({', '.join(parts)})."
+        if cancelled:
+            text += " Cancelled by user."
+
+        if cancelled or int(failed) > 0:
+            self.iface.messageBar().pushWarning("RasterLinker", text)
+        else:
+            self.iface.messageBar().pushInfo("RasterLinker", text)
+
     def _get_preferred_import_crs(self):
         authid = (self.settings.value(self.settings_key_default_import_crs, "", type=str) or "").strip()
         if authid:
@@ -784,6 +828,7 @@ class ProjectManagerDialog(QDialog):
             return
 
         target_project_root = self.project_root
+        task_requested = len(records)
         import_task = TimesliceImportTask(
             target_project_root,
             records,
@@ -815,24 +860,16 @@ class ProjectManagerDialog(QDialog):
                         imported_ids = []
                         imported_paths = []
 
-                if failures:
-                    preview = "\n".join(failures[:10])
-                    more = len(failures) - min(len(failures), 10)
-                    if more > 0:
-                        preview += f"\n... and {more} more."
-                    QMessageBox.warning(self, "Import warning", preview)
-
-                self.iface.messageBar().pushInfo(
-                    "RasterLinker",
-                    f"Time-slices import completed ({imported}) - linked z-grids: {linked_grids}.",
+                self._show_import_failures("Time-slice import warnings", failures)
+                self._report_import_outcome(
+                    "Time-slice",
+                    requested=task_requested,
+                    imported=imported,
+                    failed=len(failures),
+                    cancelled=cancelled,
+                    validation_skipped=validation_skipped,
+                    extras=[("linked z-grids", linked_grids)],
                 )
-                if cancelled:
-                    self.iface.messageBar().pushWarning("RasterLinker", "Time-slice import cancelled by user.")
-                if validation_skipped > 0:
-                    self.iface.messageBar().pushInfo(
-                        "RasterLinker",
-                        f"Validation skipped {validation_skipped} file(s) before import.",
-                    )
                 self._notify_project_updated()
 
                 if imported <= 0:
@@ -905,6 +942,7 @@ class ProjectManagerDialog(QDialog):
             return
 
         target_project_root = self.project_root
+        task_requested = len(file_paths)
         import_task = LasLazImportTask(
             target_project_root,
             file_paths,
@@ -956,19 +994,15 @@ class ProjectManagerDialog(QDialog):
                         label = os.path.basename(source_path) if source_path else normalized_name
                         failed.append(f"{label}: {e}")
 
-                if failed:
-                    preview = "\n".join(failed[:10])
-                    more = len(failed) - min(len(failed), 10)
-                    if more > 0:
-                        preview += f"\n... and {more} more."
-                    QMessageBox.warning(self, "Import warning", preview)
-
-                self.iface.messageBar().pushInfo(
-                    "RasterLinker",
-                    f"LAS/LAZ import completed ({imported}) - loaded in canvas: {loaded}.",
+                self._show_import_failures("LAS/LAZ import warnings", failed)
+                self._report_import_outcome(
+                    "LAS/LAZ",
+                    requested=task_requested,
+                    imported=imported,
+                    failed=len(failed),
+                    cancelled=cancelled,
+                    extras=[("loaded in canvas", loaded)],
                 )
-                if cancelled:
-                    self.iface.messageBar().pushWarning("RasterLinker", "LAS/LAZ import cancelled by user.")
                 self._notify_project_updated()
             finally:
                 self._las_import_active = False
@@ -1015,6 +1049,7 @@ class ProjectManagerDialog(QDialog):
             return
 
         target_project_root = self.project_root
+        task_requested = len(file_paths)
         import_task = RadargramImportTask(
             target_project_root,
             file_paths,
@@ -1064,27 +1099,16 @@ class ProjectManagerDialog(QDialog):
                         label = os.path.basename(source_path) if source_path else normalized_name
                         failed.append(f"{label}: {e}")
 
-                if failed:
-                    preview = "\n".join(failed[:10])
-                    more = len(failed) - min(len(failed), 10)
-                    if more > 0:
-                        preview += f"\n... and {more} more."
-                    QMessageBox.warning(self, "Import warning", preview)
-
-                self.iface.messageBar().pushInfo(
-                    "RasterLinker",
-                    (
-                        f"Radargrams import completed ({imported}) - "
-                        f"mapped: {mapped}, catalog-only: {catalog_only}."
-                    ),
+                self._show_import_failures("Radargram import warnings", failed)
+                self._report_import_outcome(
+                    "Radargram",
+                    requested=task_requested,
+                    imported=imported,
+                    failed=len(failed),
+                    cancelled=cancelled,
+                    validation_skipped=validation_skipped,
+                    extras=[("mapped", mapped), ("catalog-only", catalog_only)],
                 )
-                if validation_skipped > 0:
-                    self.iface.messageBar().pushInfo(
-                        "RasterLinker",
-                        f"Validation skipped {validation_skipped} file(s) before import.",
-                    )
-                if cancelled:
-                    self.iface.messageBar().pushWarning("RasterLinker", "Radargram import cancelled by user.")
                 self._notify_project_updated()
             finally:
                 self._radargram_import_active = False
