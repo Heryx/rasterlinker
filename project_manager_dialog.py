@@ -41,6 +41,7 @@ from .project_catalog import (
     remove_timeslices_from_group,
     validate_catalog,
     normalize_copy_into_project,
+    link_surfer_grid_into_project,
     export_project_package,
     import_project_package,
     utc_now_iso,
@@ -314,6 +315,13 @@ class ProjectManagerDialog(QDialog):
                             "imported_at": utc_now_iso(),
                         }
                     )
+                    link_info = link_surfer_grid_into_project(
+                        self.project_root,
+                        reference_raster_path=project_path,
+                        source_raster_path=project_path,
+                    )
+                    if link_info:
+                        meta.update(link_info)
                     register_timeslice(self.project_root, meta)
                     existing_timeslice_paths.add(norm_path)
                     counts["timeslices"] += 1
@@ -556,6 +564,7 @@ class ProjectManagerDialog(QDialog):
             return
 
         imported = 0
+        linked_grids = 0
         imported_ids = []
         imported_paths = []
         georef_warnings = []
@@ -592,6 +601,15 @@ class ProjectManagerDialog(QDialog):
                         "imported_at": utc_now_iso(),
                     }
                 )
+                link_info = link_surfer_grid_into_project(
+                    self.project_root,
+                    reference_raster_path=project_path,
+                    source_raster_path=file_path,
+                )
+                if link_info:
+                    meta.update(link_info)
+                    if meta.get("z_grid_project_path"):
+                        linked_grids += 1
                 if warn_list:
                     meta["georef_warnings"] = warn_list
                     georef_warnings.append((normalized_name, warn_list))
@@ -613,7 +631,10 @@ class ProjectManagerDialog(QDialog):
                 preview += f"\n... and {more} more."
             QMessageBox.warning(self, "Import warning", preview)
 
-        self.iface.messageBar().pushInfo("RasterLinker", f"Time-slices import completed ({imported}).")
+        self.iface.messageBar().pushInfo(
+            "RasterLinker",
+            f"Time-slices import completed ({imported}) - linked z-grids: {linked_grids}.",
+        )
         if cancelled:
             self.iface.messageBar().pushWarning("RasterLinker", "Time-slice import cancelled by user.")
         if georef_warnings:
@@ -864,6 +885,13 @@ class ProjectManagerDialog(QDialog):
                         "manifest_source": manifest_path,
                     }
                 )
+                link_info = link_surfer_grid_into_project(
+                    self.project_root,
+                    reference_raster_path=project_path,
+                    source_raster_path=source_path,
+                )
+                if link_info:
+                    meta.update(link_info)
                 register_timeslice(self.project_root, meta)
                 add_timeslice_to_default_group(self.project_root, meta.get("id"))
                 imported_timeslices += 1

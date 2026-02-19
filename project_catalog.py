@@ -19,6 +19,7 @@ PROJECT_FOLDERS = (
     "metadata",
 )
 CATALOG_SCHEMA_VERSION = 2
+SURFER_GRID_EXTENSIONS = (".grd", ".gsag", ".gsbg")
 
 
 def _default_catalog(project_root):
@@ -177,6 +178,11 @@ def normalize_timeslice_record(rec):
     rec.setdefault("depth_to", None)
     rec.setdefault("unit", "m")
     rec.setdefault("crs", None)
+    rec.setdefault("z_source", "none")
+    rec.setdefault("z_grid_source_path", None)
+    rec.setdefault("z_grid_project_path", None)
+    rec.setdefault("z_grid_band", 1)
+    rec.setdefault("z_grid_linked_at", None)
     rec.setdefault("imported_at", utc_now_iso())
     return rec
 
@@ -359,6 +365,9 @@ def validate_catalog(project_root, catalog_data=None):
         pth = ts.get("project_path")
         if pth and not os.path.exists(pth):
             warnings.append(f"Missing timeslice file: {pth}")
+        z_grid_path = ts.get("z_grid_project_path")
+        if z_grid_path and not os.path.exists(z_grid_path):
+            warnings.append(f"Missing linked z-grid file: {z_grid_path}")
 
     for ln in data.get("links", []):
         link_id = ln.get("id")
@@ -465,6 +474,82 @@ def normalize_copy_into_project(project_root, subfolder, source_path):
     destination_path = _unique_destination_path(destination_dir, normalized_name)
     shutil.copy2(source_path, destination_path)
     return destination_path, os.path.basename(destination_path)
+
+
+def find_matching_surfer_grid(reference_raster_path, extra_search_dirs=None):
+    """
+    Find a Surfer grid file with the same basename (stem) as the reference raster.
+    """
+    if not reference_raster_path:
+        return None
+    ref_name = os.path.basename(reference_raster_path)
+    ref_stem = os.path.splitext(ref_name)[0].strip().lower()
+    if not ref_stem:
+        return None
+
+    search_dirs = [os.path.dirname(reference_raster_path)]
+    for d in (extra_search_dirs or []):
+        if d and d not in search_dirs:
+            search_dirs.append(d)
+
+    for directory in search_dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        try:
+            names = sorted(os.listdir(directory))
+        except Exception:
+            continue
+        for name in names:
+            cand_path = os.path.join(directory, name)
+            if not os.path.isfile(cand_path):
+                continue
+            stem, ext = os.path.splitext(name)
+            if stem.strip().lower() != ref_stem:
+                continue
+            if ext.lower() in SURFER_GRID_EXTENSIONS:
+                return cand_path
+    return None
+
+
+def link_surfer_grid_into_project(project_root, reference_raster_path, source_raster_path=None):
+    """
+    Try to auto-link a matching Surfer grid to a time-slice.
+    Returns a dict with z-grid linkage fields (empty dict if not found).
+    """
+    if not project_root or not reference_raster_path:
+        return {}
+
+    search_dirs = []
+    if source_raster_path:
+        search_dirs.append(os.path.dirname(source_raster_path))
+    search_dirs.append(os.path.dirname(reference_raster_path))
+    search_dirs.append(os.path.join(project_root, "timeslices_2d"))
+    search_dirs.append(os.path.join(project_root, "timeslices_2d", "z_grids"))
+
+    candidate = find_matching_surfer_grid(source_raster_path or reference_raster_path, search_dirs)
+    if not candidate:
+        return {}
+
+    target_subfolder = os.path.join("timeslices_2d", "z_grids")
+    target_dir = os.path.abspath(os.path.join(project_root, target_subfolder))
+    os.makedirs(target_dir, exist_ok=True)
+    candidate_abs = os.path.abspath(candidate)
+    copied = False
+
+    if os.path.normcase(os.path.dirname(candidate_abs)) == os.path.normcase(target_dir):
+        project_grid_path = candidate_abs
+    else:
+        project_grid_path, _normalized = normalize_copy_into_project(project_root, target_subfolder, candidate_abs)
+        copied = True
+
+    return {
+        "z_source": "surfer_grid",
+        "z_grid_source_path": candidate_abs,
+        "z_grid_project_path": project_grid_path,
+        "z_grid_band": 1,
+        "z_grid_linked_at": utc_now_iso(),
+        "z_grid_copied": copied,
+    }
 
 
 def export_project_package(project_root, output_zip_path):
