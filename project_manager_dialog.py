@@ -536,7 +536,7 @@ class ProjectManagerDialog(QDialog):
             },
         }
 
-    def _timeslice_georef_warnings(self, meta):
+    def _timeslice_georef_issues(self, meta):
         warnings = []
         extent = meta.get("extent") or {}
         xmin = extent.get("xmin")
@@ -546,27 +546,146 @@ class ProjectManagerDialog(QDialog):
         crs_authid = (meta.get("crs") or "").strip()
         project_crs = QgsProject.instance().crs()
 
+        missing_crs = False
+        crs_mismatch = False
+        suspicious_extent = False
+
         if not crs_authid:
+            missing_crs = True
             warnings.append("Missing CRS in raster metadata.")
         elif project_crs.isValid() and crs_authid != project_crs.authid():
+            crs_mismatch = True
             warnings.append(f"CRS mismatch: raster {crs_authid}, project {project_crs.authid()}.")
 
         if None in (xmin, xmax, ymin, ymax):
-            return warnings
+            suspicious_extent = True
+            warnings.append("Missing extent metadata.")
+        else:
+            x_span = float(xmax) - float(xmin)
+            y_span = float(ymax) - float(ymin)
+            if x_span <= 0 or y_span <= 0:
+                suspicious_extent = True
+                warnings.append("Invalid extent (non-positive width/height).")
+            else:
+                max_abs = max(abs(float(xmin)), abs(float(xmax)), abs(float(ymin)), abs(float(ymax)))
+                if max_abs < 1.0:
+                    suspicious_extent = True
+                    warnings.append("Extent is very close to origin (0,0).")
+                if max_abs > 1e8:
+                    suspicious_extent = True
+                    warnings.append("Extent coordinates are unusually large.")
 
-        x_span = float(xmax) - float(xmin)
-        y_span = float(ymax) - float(ymin)
-        if x_span <= 0 or y_span <= 0:
-            warnings.append("Invalid extent (non-positive width/height).")
-            return warnings
+        return {
+            "warnings": warnings,
+            "missing_crs": missing_crs,
+            "crs_mismatch": crs_mismatch,
+            "suspicious_extent": suspicious_extent,
+            "has_issue": bool(missing_crs or crs_mismatch or suspicious_extent),
+        }
 
-        if max(abs(float(xmin)), abs(float(xmax)), abs(float(ymin)), abs(float(ymax))) < 1.0:
-            warnings.append("Extent is very close to origin (0,0).")
+    def _timeslice_georef_warnings(self, meta):
+        return list((self._timeslice_georef_issues(meta) or {}).get("warnings") or [])
 
-        if max(abs(float(xmin)), abs(float(xmax)), abs(float(ymin)), abs(float(ymax))) > 1e8:
-            warnings.append("Extent coordinates are unusually large.")
+    def _ensure_preferred_import_crs(self):
+        preferred = self._get_preferred_import_crs()
+        if preferred is not None and preferred.isValid():
+            return preferred
+        self._choose_default_import_crs()
+        preferred = self._get_preferred_import_crs()
+        if preferred is not None and preferred.isValid():
+            return preferred
+        return None
 
-        return warnings
+    def _validate_timeslice_records_before_import(self, records, scope_label="selected images"):
+        if not records:
+            return records, 0, False
+
+        issue_rows = []
+        missing_crs_count = 0
+        mismatch_count = 0
+        suspicious_count = 0
+
+        for rec in records:
+            meta = rec.get("meta") if isinstance(rec.get("meta"), dict) else {}
+            issues = self._timeslice_georef_issues(meta)
+            rec["warnings"] = list(issues.get("warnings") or [])
+            rec["issues"] = issues
+            if issues.get("missing_crs"):
+                missing_crs_count += 1
+            if issues.get("crs_mismatch"):
+                mismatch_count += 1
+            if issues.get("suspicious_extent"):
+                suspicious_count += 1
+            if issues.get("has_issue"):
+                issue_rows.append(rec)
+
+        if not issue_rows:
+            return records, 0, False
+
+        details = []
+        for rec in issue_rows[:12]:
+            name = os.path.basename(rec.get("source_path") or "")
+            warns = "; ".join(rec.get("warnings") or [])
+            details.append(f"- {name}: {warns}")
+        extra = len(issue_rows) - len(details)
+        if extra > 0:
+            details.append(f"... and {extra} more.")
+
+        summary = (
+            f"Detected issues in {len(issue_rows)} / {len(records)} {scope_label}.\n"
+            f"- Missing CRS: {missing_crs_count}\n"
+            f"- CRS mismatch: {mismatch_count}\n"
+            f"- Suspicious extent: {suspicious_count}\n\n"
+            "Choose how to proceed:\n"
+            "- Assign Default CRS + Import All: fills missing CRS only.\n"
+            "- Import All Anyway: keep all selected files unchanged.\n"
+            "- Skip Problematic: import only files without any issue.\n\n"
+            + "\n".join(details)
+        )
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Time-slice Import Validation")
+        msg.setText("Potential georeference issues detected.")
+        msg.setInformativeText(summary)
+        assign_btn = None
+        if missing_crs_count > 0:
+            assign_btn = msg.addButton("Assign Default CRS + Import All", QMessageBox.AcceptRole)
+        import_all_btn = msg.addButton("Import All Anyway", QMessageBox.AcceptRole)
+        safe_btn = msg.addButton("Skip Problematic", QMessageBox.ActionRole)
+        cancel_btn = msg.addButton(QMessageBox.Cancel)
+        msg.setDefaultButton(safe_btn)
+        msg.exec_()
+
+        clicked = msg.clickedButton()
+        if clicked == cancel_btn:
+            return records, 0, True
+
+        if clicked == safe_btn:
+            filtered = [r for r in records if not ((r.get("issues") or {}).get("has_issue"))]
+            skipped = max(0, len(records) - len(filtered))
+            return filtered, skipped, False
+
+        if assign_btn is not None and clicked == assign_btn:
+            preferred = self._ensure_preferred_import_crs()
+            if preferred is None or not preferred.isValid():
+                return records, 0, True
+            authid = preferred.authid()
+            for rec in records:
+                issues = rec.get("issues") or {}
+                if issues.get("missing_crs"):
+                    rec["assigned_crs"] = authid
+                    rec_meta = rec.get("meta") if isinstance(rec.get("meta"), dict) else {}
+                    rec_meta["crs"] = authid
+                    rec["meta"] = rec_meta
+                    rec["issues"] = self._timeslice_georef_issues(rec_meta)
+                    rec["warnings"] = list((rec.get("issues") or {}).get("warnings") or [])
+            return records, 0, False
+
+        if clicked == import_all_btn:
+            return records, 0, False
+
+        return records, 0, True
 
     def _import_timeslices(self):
         if not self._ensure_project_ready():
@@ -615,6 +734,7 @@ class ProjectManagerDialog(QDialog):
                     "source_path": src_path,
                     "meta": meta,
                     "warnings": self._timeslice_georef_warnings(meta),
+                    "issues": self._timeslice_georef_issues(meta),
                     "assigned_crs": None,
                 }
             )
@@ -637,6 +757,17 @@ class ProjectManagerDialog(QDialog):
             self.iface.messageBar().pushWarning("RasterLinker", "No valid time-slice files to import.")
             return
 
+        records, validation_skipped, validation_cancelled = self._validate_timeslice_records_before_import(
+            records,
+            scope_label="selected image(s)",
+        )
+        if validation_cancelled:
+            self.iface.messageBar().pushWarning("RasterLinker", "Time-slice import cancelled by user.")
+            return
+        if not records:
+            self.iface.messageBar().pushWarning("RasterLinker", "No files left to import after validation.")
+            return
+
         target_project_root = self.project_root
         import_task = TimesliceImportTask(
             target_project_root,
@@ -652,7 +783,6 @@ class ProjectManagerDialog(QDialog):
             linked_grids = int(done_task.linked_grids)
             imported_ids = []
             imported_paths = []
-            georef_warnings = []
             cancelled = bool(done_task.cancelled)
             failures = list(done_task.failed)
 
@@ -664,11 +794,6 @@ class ProjectManagerDialog(QDialog):
                         imported = len(imported_records)
                         imported_ids = [rec.get("id") for rec in imported_records if rec.get("id")]
                         imported_paths = [rec.get("project_path") for rec in imported_records if rec.get("project_path")]
-                        for rec in imported_records:
-                            warn_list = list(rec.get("georef_warnings") or [])
-                            if warn_list:
-                                name = rec.get("normalized_name") or os.path.basename(rec.get("project_path") or "")
-                                georef_warnings.append((name, warn_list))
                     except Exception as e:
                         failures.append(f"catalog write: {e}")
                         imported = 0
@@ -688,17 +813,10 @@ class ProjectManagerDialog(QDialog):
                 )
                 if cancelled:
                     self.iface.messageBar().pushWarning("RasterLinker", "Time-slice import cancelled by user.")
-                if georef_warnings:
-                    preview_lines = []
-                    for name, warns in georef_warnings[:12]:
-                        preview_lines.append(f"{name}: {'; '.join(warns)}")
-                    more = len(georef_warnings) - len(preview_lines)
-                    if more > 0:
-                        preview_lines.append(f"... and {more} more.")
-                    QMessageBox.warning(
-                        self,
-                        "Time-slice Georeference Warnings",
-                        "Potential georeference issues detected:\n\n" + "\n".join(preview_lines),
+                if validation_skipped > 0:
+                    self.iface.messageBar().pushInfo(
+                        "RasterLinker",
+                        f"Validation skipped {validation_skipped} file(s) before import.",
                     )
                 self._notify_project_updated()
 
@@ -870,8 +988,15 @@ class ProjectManagerDialog(QDialog):
         if not file_paths:
             return
 
-        proceed = self._preflight_radargram_import(file_paths)
-        if not proceed:
+        file_paths, validation_skipped, validation_cancelled = self._validate_radargram_sources_before_import(
+            file_paths,
+            scope_label="selected radargram(s)",
+        )
+        if validation_cancelled:
+            self.iface.messageBar().pushWarning("RasterLinker", "Radargram import cancelled by user.")
+            return
+        if not file_paths:
+            self.iface.messageBar().pushWarning("RasterLinker", "No files left to import after validation.")
             return
 
         target_project_root = self.project_root
@@ -938,6 +1063,11 @@ class ProjectManagerDialog(QDialog):
                         f"mapped: {mapped}, catalog-only: {catalog_only}."
                     ),
                 )
+                if validation_skipped > 0:
+                    self.iface.messageBar().pushInfo(
+                        "RasterLinker",
+                        f"Validation skipped {validation_skipped} file(s) before import.",
+                    )
                 if cancelled:
                     self.iface.messageBar().pushWarning("RasterLinker", "Radargram import cancelled by user.")
                 self._notify_project_updated()
@@ -1068,9 +1198,21 @@ class ProjectManagerDialog(QDialog):
                         "source_path": source_path,
                         "meta": meta,
                         "warnings": self._timeslice_georef_warnings(meta),
+                        "issues": self._timeslice_georef_issues(meta),
                         "assigned_crs": None,
                     }
                 )
+
+            records, validation_skipped, validation_cancelled = self._validate_timeslice_records_before_import(
+                records,
+                scope_label="manifest time-slice(s)",
+            )
+            if validation_cancelled:
+                state["cancelled"] = True
+                _finish_manifest()
+                return
+            if validation_skipped > 0:
+                failures.append(f"timeslice validation skipped {validation_skipped} file(s)")
 
             if not records:
                 _finish_manifest()
@@ -1122,9 +1264,26 @@ class ProjectManagerDialog(QDialog):
                     _start_timeslice_stage()
                 return
 
+            selected_sources, validation_skipped, validation_cancelled = self._validate_radargram_sources_before_import(
+                radar_sources,
+                scope_label="manifest radargram(s)",
+            )
+            if validation_cancelled:
+                state["cancelled"] = True
+                _finish_manifest()
+                return
+            if validation_skipped > 0:
+                failures.append(f"radargram validation skipped {validation_skipped} file(s)")
+            if not selected_sources:
+                if state["cancelled"]:
+                    _finish_manifest()
+                else:
+                    _start_timeslice_stage()
+                return
+
             rg_task = RadargramImportTask(
                 target_project_root,
-                radar_sources,
+                selected_sources,
                 description="RasterLinker: Manifest import - radargrams",
             )
 
@@ -1298,47 +1457,212 @@ class ProjectManagerDialog(QDialog):
         shutil.copy2(source_wf, target_wf)
         return target_wf
 
-    def _preflight_radargram_import(self, file_paths):
+    def _analyze_radargram_source(
+        self,
+        source_path,
+        existing_project_names=None,
+        existing_source_paths=None,
+        seen_source_paths=None,
+    ):
+        existing_project_names = existing_project_names or set()
+        existing_source_paths = existing_source_paths or set()
+        seen_source_paths = seen_source_paths or set()
+
+        src_abs = os.path.abspath(source_path)
+        src_key = os.path.normcase(src_abs)
+        name = os.path.basename(source_path)
+        ext = os.path.splitext(name)[1].lower()
+        has_worldfile = bool(find_worldfile(source_path))
+
+        duplicate_source = src_key in existing_source_paths or src_key in seen_source_paths
+        duplicate_name = name.lower() in existing_project_names
+
+        likely_catalog_only = False
+        crs_mismatch = False
+        suspicious_extent = False
+        warnings = []
+
+        if duplicate_source:
+            warnings.append("Source path already imported in catalog (or duplicated in this selection).")
+        if duplicate_name:
+            warnings.append("A file with the same name already exists in project catalog.")
+
+        if ext in {".png", ".jpg", ".jpeg", ".bmp"}:
+            if not has_worldfile:
+                likely_catalog_only = True
+                warnings.append("Image without worldfile: it will be imported as catalog-only.")
+        elif ext in {".tif", ".tiff"}:
+            layer = QgsRasterLayer(source_path, "radargram_probe_source")
+            if layer.isValid():
+                if layer.crs().isValid():
+                    project_crs = QgsProject.instance().crs()
+                    if project_crs.isValid() and layer.crs().authid() != project_crs.authid():
+                        crs_mismatch = True
+                        warnings.append(
+                            f"CRS mismatch: raster {layer.crs().authid()}, project {project_crs.authid()}."
+                        )
+                elif not has_worldfile:
+                    likely_catalog_only = True
+                    warnings.append("TIFF without embedded georeference or worldfile: catalog-only import.")
+
+                extent = layer.extent()
+                if extent is None or extent.isNull() or extent.isEmpty():
+                    suspicious_extent = True
+                    warnings.append("Invalid raster extent.")
+                else:
+                    xmin = float(extent.xMinimum())
+                    xmax = float(extent.xMaximum())
+                    ymin = float(extent.yMinimum())
+                    ymax = float(extent.yMaximum())
+                    x_span = xmax - xmin
+                    y_span = ymax - ymin
+                    if x_span <= 0 or y_span <= 0:
+                        suspicious_extent = True
+                        warnings.append("Invalid extent (non-positive width/height).")
+                    else:
+                        max_abs = max(abs(xmin), abs(xmax), abs(ymin), abs(ymax))
+                        if max_abs < 1.0:
+                            suspicious_extent = True
+                            warnings.append("Extent is very close to origin (0,0).")
+                        if max_abs > 1e8:
+                            suspicious_extent = True
+                            warnings.append("Extent coordinates are unusually large.")
+            elif not has_worldfile:
+                likely_catalog_only = True
+                warnings.append("TIFF is not readable as georeferenced raster and has no worldfile.")
+
+        has_issue = bool(
+            duplicate_source
+            or duplicate_name
+            or likely_catalog_only
+            or crs_mismatch
+            or suspicious_extent
+        )
+        return {
+            "source_path": source_path,
+            "source_key": src_key,
+            "name": name,
+            "ext": ext,
+            "duplicate_source": duplicate_source,
+            "duplicate_name": duplicate_name,
+            "likely_catalog_only": likely_catalog_only,
+            "crs_mismatch": crs_mismatch,
+            "suspicious_extent": suspicious_extent,
+            "has_issue": has_issue,
+            "warnings": warnings,
+        }
+
+    def _validate_radargram_sources_before_import(self, file_paths, scope_label="selected radargram(s)"):
+        paths = [p for p in (file_paths or []) if p]
+        if not paths:
+            return [], 0, False
+
         catalog = load_catalog(self.project_root)
         existing_project_names = {
-            (r.get("normalized_name") or "").lower() for r in catalog.get("radargrams", [])
+            (r.get("normalized_name") or "").strip().lower()
+            for r in catalog.get("radargrams", [])
+            if (r.get("normalized_name") or "").strip()
         }
         existing_source_paths = {
-            os.path.normcase(r.get("source_path") or "") for r in catalog.get("radargrams", [])
+            os.path.normcase(os.path.abspath(r.get("source_path") or ""))
+            for r in catalog.get("radargrams", [])
+            if (r.get("source_path") or "").strip()
         }
 
-        possible_catalog_only = 0
-        duplicate_sources = 0
-        duplicate_names = 0
+        analyses = []
+        seen_source_paths = set()
+        total = len(paths)
+        progress = QProgressDialog("Analyzing selected radargrams...", "Cancel", 0, total, self)
+        progress.setWindowTitle("Radargram Import - Analyze")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(True)
+        progress.setAutoReset(True)
+        progress.setValue(0)
 
-        for file_path in file_paths:
-            ext = os.path.splitext(file_path)[1].lower()
-            if ext in {".png", ".jpg", ".jpeg", ".bmp"} and not find_worldfile(file_path):
-                possible_catalog_only += 1
-            if os.path.normcase(file_path) in existing_source_paths:
-                duplicate_sources += 1
-            norm_name = os.path.basename(file_path).lower()
-            if norm_name in existing_project_names:
-                duplicate_names += 1
+        for idx, source_path in enumerate(paths, start=1):
+            if progress.wasCanceled():
+                progress.close()
+                return paths, 0, True
+            progress.setLabelText(f"Analyzing {idx}/{total}: {os.path.basename(source_path)}")
+            QApplication.processEvents()
+            analysis = self._analyze_radargram_source(
+                source_path,
+                existing_project_names=existing_project_names,
+                existing_source_paths=existing_source_paths,
+                seen_source_paths=seen_source_paths,
+            )
+            analyses.append(analysis)
+            seen_source_paths.add(analysis.get("source_key"))
+            progress.setValue(idx)
+            QApplication.processEvents()
 
-        if not (possible_catalog_only or duplicate_sources or duplicate_names):
-            return True
+        progress.close()
 
-        msg = (
-            f"Preflight checks:\n"
-            f"- Image files without worldfile (likely catalog-only): {possible_catalog_only}\n"
-            f"- Already imported source paths: {duplicate_sources}\n"
-            f"- Potential duplicate names in project: {duplicate_names}\n\n"
-            "Continue import anyway?"
+        issue_rows = [a for a in analyses if a.get("has_issue")]
+        if not issue_rows:
+            return paths, 0, False
+
+        duplicate_source_count = sum(1 for a in analyses if a.get("duplicate_source"))
+        duplicate_name_count = sum(1 for a in analyses if a.get("duplicate_name"))
+        catalog_only_count = sum(1 for a in analyses if a.get("likely_catalog_only"))
+        mismatch_count = sum(1 for a in analyses if a.get("crs_mismatch"))
+        suspicious_extent_count = sum(1 for a in analyses if a.get("suspicious_extent"))
+
+        details = []
+        for a in issue_rows[:12]:
+            details.append(f"- {a.get('name')}: {'; '.join(a.get('warnings') or [])}")
+        extra = len(issue_rows) - len(details)
+        if extra > 0:
+            details.append(f"... and {extra} more.")
+
+        summary = (
+            f"Detected issues in {len(issue_rows)} / {len(analyses)} {scope_label}.\n"
+            f"- Duplicate source paths: {duplicate_source_count}\n"
+            f"- Duplicate names: {duplicate_name_count}\n"
+            f"- Likely catalog-only (missing georef on images): {catalog_only_count}\n"
+            f"- CRS mismatch: {mismatch_count}\n"
+            f"- Suspicious extent: {suspicious_extent_count}\n\n"
+            "Choose how to proceed:\n"
+            "- Import All Anyway: keep all selected files.\n"
+            "- Skip Duplicates: remove duplicate source/name entries only.\n"
+            "- Skip Problematic: import only files without any issue.\n\n"
+            + "\n".join(details)
         )
-        answer = QMessageBox.question(
-            self,
-            "Radargram Import Preflight",
-            msg,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        return answer == QMessageBox.Yes
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Radargram Import Validation")
+        msg.setText("Potential import issues detected.")
+        msg.setInformativeText(summary)
+        import_all_btn = msg.addButton("Import All Anyway", QMessageBox.AcceptRole)
+        skip_duplicates_btn = None
+        if duplicate_source_count > 0 or duplicate_name_count > 0:
+            skip_duplicates_btn = msg.addButton("Skip Duplicates", QMessageBox.ActionRole)
+        skip_problematic_btn = msg.addButton("Skip Problematic", QMessageBox.ActionRole)
+        cancel_btn = msg.addButton(QMessageBox.Cancel)
+        msg.setDefaultButton(skip_problematic_btn)
+        msg.exec_()
+
+        clicked = msg.clickedButton()
+        if clicked == cancel_btn:
+            return paths, 0, True
+        if skip_duplicates_btn is not None and clicked == skip_duplicates_btn:
+            selected = [
+                a.get("source_path")
+                for a in analyses
+                if not (a.get("duplicate_source") or a.get("duplicate_name"))
+            ]
+            skipped = max(0, len(analyses) - len(selected))
+            return selected, skipped, False
+        if clicked == skip_problematic_btn:
+            selected = [a.get("source_path") for a in analyses if not a.get("has_issue")]
+            skipped = max(0, len(analyses) - len(selected))
+            return selected, skipped, False
+        if clicked == import_all_btn:
+            return paths, 0, False
+
+        return paths, 0, True
 
     def _export_package(self):
         if not self._ensure_project_ready():
@@ -1416,9 +1740,10 @@ class ProjectManagerDialog(QDialog):
         if not self._ensure_project_ready():
             return
         catalog = load_catalog(self.project_root)
+        catalog_version = catalog.get("catalog_version", catalog.get("schema_version"))
         msg = (
             f"Project: {self.project_root}\n"
-            f"Schema version: {catalog.get('schema_version')}\n"
+            f"Catalog version: {catalog_version}\n"
             f"Models 3D: {len(catalog.get('models_3d', []))}\n"
             f"Radargrams: {len(catalog.get('radargrams', []))}\n"
             f"Timeslices: {len(catalog.get('timeslices', []))}\n"

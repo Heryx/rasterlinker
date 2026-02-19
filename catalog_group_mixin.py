@@ -288,7 +288,7 @@ class CatalogGroupMixin:
             },
         }
 
-    def _timeslice_georef_warnings(self, meta):
+    def _timeslice_georef_issues(self, meta):
         warnings = []
         extent = meta.get("extent") or {}
         xmin = extent.get("xmin")
@@ -298,26 +298,136 @@ class CatalogGroupMixin:
         crs_authid = (meta.get("crs") or "").strip()
         project_crs = QgsProject.instance().crs()
 
+        missing_crs = False
+        crs_mismatch = False
+        suspicious_extent = False
+
         if not crs_authid:
+            missing_crs = True
             warnings.append("Missing CRS in raster metadata.")
         elif project_crs.isValid() and crs_authid != project_crs.authid():
+            crs_mismatch = True
             warnings.append(f"CRS mismatch: raster {crs_authid}, project {project_crs.authid()}.")
 
         if None in (xmin, xmax, ymin, ymax):
-            return warnings
+            suspicious_extent = True
+            warnings.append("Missing extent metadata.")
+        else:
+            x_span = float(xmax) - float(xmin)
+            y_span = float(ymax) - float(ymin)
+            if x_span <= 0 or y_span <= 0:
+                suspicious_extent = True
+                warnings.append("Invalid extent (non-positive width/height).")
+            else:
+                max_abs = max(abs(float(xmin)), abs(float(xmax)), abs(float(ymin)), abs(float(ymax)))
+                if max_abs < 1.0:
+                    suspicious_extent = True
+                    warnings.append("Extent is very close to origin (0,0).")
+                if max_abs > 1e8:
+                    suspicious_extent = True
+                    warnings.append("Extent coordinates are unusually large.")
 
-        x_span = float(xmax) - float(xmin)
-        y_span = float(ymax) - float(ymin)
-        if x_span <= 0 or y_span <= 0:
-            warnings.append("Invalid extent (non-positive width/height).")
-            return warnings
+        return {
+            "warnings": warnings,
+            "missing_crs": missing_crs,
+            "crs_mismatch": crs_mismatch,
+            "suspicious_extent": suspicious_extent,
+            "has_issue": bool(missing_crs or crs_mismatch or suspicious_extent),
+        }
 
-        max_abs = max(abs(float(xmin)), abs(float(xmax)), abs(float(ymin)), abs(float(ymax)))
-        if max_abs < 1.0:
-            warnings.append("Extent is very close to origin (0,0).")
-        if max_abs > 1e8:
-            warnings.append("Extent coordinates are unusually large.")
-        return warnings
+    def _timeslice_georef_warnings(self, meta):
+        return list((self._timeslice_georef_issues(meta) or {}).get("warnings") or [])
+
+    def _validate_timeslice_records_before_import(self, records, scope_label="selected images"):
+        if not records:
+            return records, 0, False
+
+        issue_rows = []
+        missing_crs_count = 0
+        mismatch_count = 0
+        suspicious_count = 0
+
+        for rec in records:
+            meta = rec.get("meta") if isinstance(rec.get("meta"), dict) else {}
+            issues = self._timeslice_georef_issues(meta)
+            rec["warnings"] = list(issues.get("warnings") or [])
+            rec["issues"] = issues
+            if issues.get("missing_crs"):
+                missing_crs_count += 1
+            if issues.get("crs_mismatch"):
+                mismatch_count += 1
+            if issues.get("suspicious_extent"):
+                suspicious_count += 1
+            if issues.get("has_issue"):
+                issue_rows.append(rec)
+
+        if not issue_rows:
+            return records, 0, False
+
+        details = []
+        for rec in issue_rows[:12]:
+            name = os.path.basename(rec.get("source_path") or "")
+            warns = "; ".join(rec.get("warnings") or [])
+            details.append(f"- {name}: {warns}")
+        extra = len(issue_rows) - len(details)
+        if extra > 0:
+            details.append(f"... and {extra} more.")
+
+        summary = (
+            f"Detected issues in {len(issue_rows)} / {len(records)} {scope_label}.\n"
+            f"- Missing CRS: {missing_crs_count}\n"
+            f"- CRS mismatch: {mismatch_count}\n"
+            f"- Suspicious extent: {suspicious_count}\n\n"
+            "Choose how to proceed:\n"
+            "- Assign Default CRS + Import All: fills missing CRS only.\n"
+            "- Import All Anyway: keep all selected files unchanged.\n"
+            "- Skip Problematic: import only files without any issue.\n\n"
+            + "\n".join(details)
+        )
+
+        msg = QMessageBox(self.dlg)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Time-slice Import Validation")
+        msg.setText("Potential georeference issues detected.")
+        msg.setInformativeText(summary)
+        assign_btn = None
+        if missing_crs_count > 0:
+            assign_btn = msg.addButton("Assign Default CRS + Import All", QMessageBox.AcceptRole)
+        import_all_btn = msg.addButton("Import All Anyway", QMessageBox.AcceptRole)
+        safe_btn = msg.addButton("Skip Problematic", QMessageBox.ActionRole)
+        cancel_btn = msg.addButton(QMessageBox.Cancel)
+        msg.setDefaultButton(safe_btn)
+        msg.exec_()
+
+        clicked = msg.clickedButton()
+        if clicked == cancel_btn:
+            return records, 0, True
+
+        if clicked == safe_btn:
+            filtered = [r for r in records if not ((r.get("issues") or {}).get("has_issue"))]
+            skipped = max(0, len(records) - len(filtered))
+            return filtered, skipped, False
+
+        if assign_btn is not None and clicked == assign_btn:
+            preferred = self._ensure_preferred_import_crs()
+            if preferred is None or not preferred.isValid():
+                return records, 0, True
+            authid = preferred.authid()
+            for rec in records:
+                issues = rec.get("issues") or {}
+                if issues.get("missing_crs"):
+                    rec["assigned_crs"] = authid
+                    rec_meta = rec.get("meta") if isinstance(rec.get("meta"), dict) else {}
+                    rec_meta["crs"] = authid
+                    rec["meta"] = rec_meta
+                    rec["issues"] = self._timeslice_georef_issues(rec_meta)
+                    rec["warnings"] = list((rec.get("issues") or {}).get("warnings") or [])
+            return records, 0, False
+
+        if clicked == import_all_btn:
+            return records, 0, False
+
+        return records, 0, True
 
     def _ensure_preferred_import_crs(self):
         preferred = self._get_preferred_import_crs()
@@ -412,6 +522,7 @@ class CatalogGroupMixin:
                     "source_path": src_path,
                     "meta": meta,
                     "warnings": self._timeslice_georef_warnings(meta),
+                    "issues": self._timeslice_georef_issues(meta),
                     "assigned_crs": None,
                 }
             )
@@ -435,96 +546,13 @@ class CatalogGroupMixin:
         if not records:
             return _finish({"cancelled": False, "imported": 0, "skipped": skipped})
 
-        missing_crs = [r for r in records if not (r.get("meta", {}).get("crs") or "").strip()]
-        if missing_crs:
-            msg = QMessageBox(self.dlg)
-            msg.setIcon(QMessageBox.Warning)
-            msg.setWindowTitle("Missing CRS")
-            msg.setText(f"{len(missing_crs)} image(s) have no CRS.")
-            msg.setInformativeText("Choose how to proceed:")
-            assign_btn = msg.addButton("Assign Default CRS", QMessageBox.AcceptRole)
-            keep_btn = msg.addButton("Keep Without CRS", QMessageBox.ActionRole)
-            skip_btn = msg.addButton("Skip Missing CRS", QMessageBox.DestructiveRole)
-            cancel_btn = msg.addButton(QMessageBox.Cancel)
-            msg.setDefaultButton(assign_btn)
-            msg.exec_()
-            clicked = msg.clickedButton()
-            if clicked == cancel_btn:
-                return _finish({"cancelled": True, "imported": 0, "skipped": skipped})
-            if clicked == skip_btn:
-                records = [r for r in records if (r.get("meta", {}).get("crs") or "").strip()]
-                skipped += len(missing_crs)
-            elif clicked == assign_btn:
-                preferred = self._ensure_preferred_import_crs()
-                if preferred is None or not preferred.isValid():
-                    return _finish({"cancelled": True, "imported": 0, "skipped": skipped})
-                authid = preferred.authid()
-                for rec in missing_crs:
-                    rec["assigned_crs"] = authid
-                    rec_meta = rec.get("meta") or {}
-                    rec_meta["crs"] = authid
-                    rec["warnings"] = self._timeslice_georef_warnings(rec_meta)
-            elif clicked == keep_btn:
-                pass
-
-        if not records:
-            return _finish({"cancelled": False, "imported": 0, "skipped": skipped})
-
-        crs_values = sorted({(r.get("meta", {}).get("crs") or "").strip() for r in records if (r.get("meta", {}).get("crs") or "").strip()})
-        if len(crs_values) > 1:
-            preferred = self._get_preferred_import_crs()
-            target_authid = preferred.authid() if preferred and preferred.isValid() else crs_values[0]
-            msg = QMessageBox(self.dlg)
-            msg.setIcon(QMessageBox.Warning)
-            msg.setWindowTitle("Mixed CRS detected")
-            msg.setText("Selected images have different CRS values.")
-            msg.setInformativeText(
-                "Detected CRS:\n- "
-                + "\n- ".join(crs_values)
-                + f"\n\nChoose how to proceed (target: {target_authid})."
-            )
-            import_all_btn = msg.addButton("Import All", QMessageBox.AcceptRole)
-            keep_target_btn = msg.addButton(f"Keep Only {target_authid}", QMessageBox.ActionRole)
-            cancel_btn = msg.addButton(QMessageBox.Cancel)
-            msg.setDefaultButton(import_all_btn)
-            msg.exec_()
-            clicked = msg.clickedButton()
-            if clicked == cancel_btn:
-                return _finish({"cancelled": True, "imported": 0, "skipped": skipped})
-            if clicked == keep_target_btn:
-                before = len(records)
-                records = [r for r in records if (r.get("meta", {}).get("crs") or "").strip() == target_authid]
-                skipped += max(0, before - len(records))
-
-        if not records:
-            return _finish({"cancelled": False, "imported": 0, "skipped": skipped})
-
-        with_warnings = [r for r in records if r.get("warnings")]
-        if with_warnings:
-            lines = []
-            for rec in with_warnings[:12]:
-                name = os.path.basename(rec.get("source_path") or "")
-                lines.append(f"{name}: {'; '.join(rec.get('warnings') or [])}")
-            extra = len(with_warnings) - len(lines)
-            if extra > 0:
-                lines.append(f"... and {extra} more.")
-            msg = QMessageBox(self.dlg)
-            msg.setIcon(QMessageBox.Warning)
-            msg.setWindowTitle("Georeference warnings")
-            msg.setText("Potential georeference issues were detected.")
-            msg.setInformativeText("\n".join(lines))
-            import_all_btn = msg.addButton("Import All", QMessageBox.AcceptRole)
-            skip_warned_btn = msg.addButton("Skip Problematic", QMessageBox.ActionRole)
-            cancel_btn = msg.addButton(QMessageBox.Cancel)
-            msg.setDefaultButton(import_all_btn)
-            msg.exec_()
-            clicked = msg.clickedButton()
-            if clicked == cancel_btn:
-                return _finish({"cancelled": True, "imported": 0, "skipped": skipped})
-            if clicked == skip_warned_btn:
-                before = len(records)
-                records = [r for r in records if not r.get("warnings")]
-                skipped += max(0, before - len(records))
+        records, validation_skipped, validation_cancelled = self._validate_timeslice_records_before_import(
+            records,
+            scope_label="selected image(s)",
+        )
+        skipped += validation_skipped
+        if validation_cancelled:
+            return _finish({"cancelled": True, "imported": 0, "skipped": skipped})
 
         if not records:
             return _finish({"cancelled": False, "imported": 0, "skipped": skipped})
