@@ -74,7 +74,7 @@ if HAS_QGIS:
     class _GroupVisibilityHarness(CatalogToolsMixin, CatalogGroupMixin):
         def __init__(self, iface):
             self.iface = iface
-            self.plugin_layer_root_name = "RasterLinker"
+            self.plugin_layer_root_name = "GeoSurvey Studio"
             self.dlg = _DialogStub()
 
         def _save_ui_settings(self):
@@ -95,7 +95,7 @@ if HAS_QGIS:
     class _GridHarness(GridWorkflowMixin, CatalogToolsMixin):
         def __init__(self, iface):
             self.iface = iface
-            self.plugin_layer_root_name = "RasterLinker"
+            self.plugin_layer_root_name = "GeoSurvey Studio"
             self.pending_vector_storage_mode = "memory"
             self.keep_source_polygon = False
             self.internal_grid_checkbox = QCheckBox()

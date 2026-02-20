@@ -17,9 +17,8 @@ import unittest
 from qgis.PyQt.QtGui import QIcon
 
 
-
-class GPRDialogTest(unittest.TestCase):
-    """Test rerources work."""
+class GeoSurveyStudioResourcesTest(unittest.TestCase):
+    """Test plugin resources are available."""
 
     def setUp(self):
         """Runs before each test."""
@@ -31,14 +30,13 @@ class GPRDialogTest(unittest.TestCase):
 
     def test_icon_png(self):
         """Test we can click OK."""
-        path = ':/plugins/GPR/icon.png'
+        path = ':/plugins/geosurvey_studio/icon.png'
         icon = QIcon(path)
         self.assertFalse(icon.isNull())
 
 if __name__ == "__main__":
-    suite = unittest.makeSuite(GPRResourcesTest)
+    suite = unittest.makeSuite(GeoSurveyStudioResourcesTest)
     runner = unittest.TextTestRunner(verbosity=2)
     runner.run(suite)
-
 
 

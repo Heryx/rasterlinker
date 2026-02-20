@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for table models used by RasterLinker."""
+"""Unit tests for table models used by GeoSurvey Studio."""
 
 import unittest
 
@@ -92,4 +92,3 @@ class TableModelsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

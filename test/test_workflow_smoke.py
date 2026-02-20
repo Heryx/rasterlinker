@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Smoke tests for RasterLinker end-to-end workflow status checks."""
+"""Smoke tests for GeoSurvey Studio end-to-end workflow status checks."""
 
 import json
 import os
@@ -52,12 +52,12 @@ if HAS_QGIS:
         def __init__(self, iface, project_root, payload):
             self.iface = iface
             self.settings = QSettings()
-            self.settings_group = "RasterLinker"
-            self.settings_key_active_project = "RasterLinker/active_project_root"
-            self.settings_key_default_import_crs = "RasterLinker/default_import_crs_authid"
+            self.settings_group = "GeoSurveyStudio"
+            self.settings_key_active_project = "GeoSurveyStudio/active_project_root"
+            self.settings_key_default_import_crs = "GeoSurveyStudio/default_import_crs_authid"
             self.settings.setValue(self.settings_key_active_project, project_root)
             self.project_manager_dialog = None
-            self.plugin_layer_root_name = "RasterLinker"
+            self.plugin_layer_root_name = "GeoSurvey Studio"
             self.trace_line_layer_id = None
             self.trace_connected_layer_ids = set()
             self.trace_z_grid_cache = {}
@@ -124,7 +124,7 @@ class WorkflowSmokeTest(unittest.TestCase):
             payload={"timeslice_id": "ts_smoke_001", "group_name": "SmokeGroup"},
         )
 
-        # Simulate loaded raster inside RasterLinker group tree.
+        # Simulate loaded raster inside GeoSurvey Studio group tree.
         raster_layer = QgsRasterLayer(self.fixture_raster, "SmokeRaster")
         if not raster_layer.isValid():
             self.skipTest("Raster fixture is not valid in this QGIS runtime.")

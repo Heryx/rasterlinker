@@ -9,7 +9,11 @@
 
 from PyQt5.QtWidgets import QDialog
 from PyQt5.QtCore import Qt
-from .geosurvey_studio_dialog_base import Ui_Dialog
+try:
+    from .geosurvey_studio_dialog_base import Ui_Dialog
+except Exception:
+    # Allow direct module import in test environments.
+    from geosurvey_studio_dialog_base import Ui_Dialog
 
 class GeoSurveyStudioDialog(QDialog, Ui_Dialog):
     def __init__(self, parent=None):

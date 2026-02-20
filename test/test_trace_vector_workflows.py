@@ -118,10 +118,10 @@ if HAS_QGIS:
         def __init__(self, iface):
             self.iface = iface
             self.settings = QSettings()
-            self.plugin_layer_root_name = "RasterLinker"
+            self.plugin_layer_root_name = "GeoSurvey Studio"
             self.project_manager_dialog = None
-            self.settings_key_active_project = "RasterLinker/active_project_root"
-            self.settings_key_default_import_crs = "RasterLinker/default_import_crs_authid"
+            self.settings_key_active_project = "GeoSurveyStudio/active_project_root"
+            self.settings_key_default_import_crs = "GeoSurveyStudio/default_import_crs_authid"
             self.trace_line_layer_id = None
             self.trace_connected_layer_ids = set()
             self.trace_z_grid_cache = {}

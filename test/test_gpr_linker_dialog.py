@@ -16,18 +16,18 @@ import unittest
 
 from qgis.PyQt.QtGui import QDialogButtonBox, QDialog
 
-from gpr_linker_dialog_old import GPRDialog
+from geosurvey_studio_dialog import GeoSurveyStudioDialog
 
 from utilities import get_qgis_app
 QGIS_APP = get_qgis_app()
 
 
-class GPRDialogTest(unittest.TestCase):
+class GeoSurveyStudioDialogTest(unittest.TestCase):
     """Test dialog works."""
 
     def setUp(self):
         """Runs before each test."""
-        self.dialog = GPRDialog(None)
+        self.dialog = GeoSurveyStudioDialog(None)
 
     def tearDown(self):
         """Runs after each test."""
@@ -49,7 +49,6 @@ class GPRDialogTest(unittest.TestCase):
         self.assertEqual(result, QDialog.Rejected)
 
 if __name__ == "__main__":
-    suite = unittest.makeSuite(GPRDialogTest)
+    suite = unittest.makeSuite(GeoSurveyStudioDialogTest)
     runner = unittest.TextTestRunner(verbosity=2)
     runner.run(suite)
-
