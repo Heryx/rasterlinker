@@ -1,6 +1,7 @@
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 from qgis.core import (
     Qgis,
+    QgsLayerTreeGroup,
     QgsPointLocator,
     QgsProject,
     QgsSnappingConfig,
@@ -16,6 +17,54 @@ from .polygon_draw_tool import PolygonDrawTool
 
 
 class GridWorkflowMixin:
+    def _get_or_create_cell_grids_group(self):
+        """
+        Return a dedicated group for generated grid/cell layers, separated from time-slice groups.
+        """
+        root_group_getter = getattr(self, "_get_plugin_root_group", None)
+        if not callable(root_group_getter):
+            return None
+        plugin_root = root_group_getter()
+        if plugin_root is None:
+            return None
+        target_name = "Cell Grids"
+        group = next(
+            (
+                g for g in plugin_root.children()
+                if isinstance(g, QgsLayerTreeGroup) and g.name() == target_name
+            ),
+            None,
+        )
+        if group is None:
+            group = plugin_root.addGroup(target_name)
+        return group
+
+    def _place_layer_in_cell_grids_group(self, layer):
+        """
+        Move a layer-tree node into RasterLinker > Cell Grids.
+        Keeps the map layer itself intact and only re-parents the tree node.
+        """
+        if layer is None:
+            return
+        group = self._get_or_create_cell_grids_group()
+        if group is None:
+            return
+        project = QgsProject.instance()
+        root = project.layerTreeRoot()
+        node = root.findLayer(layer.id())
+        if node is None:
+            # Ensure layer is present in project, then attach it under the dedicated group.
+            project.addMapLayer(layer, False)
+            group.addLayer(layer)
+            return
+        if node.parent() is group:
+            return
+        parent = node.parent()
+        clone = node.clone()
+        group.addChildNode(clone)
+        if parent is not None:
+            parent.removeChildNode(node)
+
     def _resolve_vector_storage_mode_for_grid(self):
         mode = getattr(self, "pending_vector_storage_mode", None)
         if mode in ("memory", "gpkg"):
@@ -157,6 +206,7 @@ class GridWorkflowMixin:
                 storage_mode=storage_mode,
                 source_kind="grid_cells",
             )
+            self._place_layer_in_cell_grids_group(grid_layer)
             self.last_area_layer = polygon_layer
             self.last_grid_layer = grid_layer
 
@@ -487,6 +537,7 @@ class GridWorkflowMixin:
                 storage_mode=storage_mode,
                 source_kind="grid_oriented",
             )
+            self._place_layer_in_cell_grids_group(grid_layer)
             self.last_grid_layer = grid_layer
 
             QMessageBox.information(

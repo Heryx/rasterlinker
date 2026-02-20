@@ -53,6 +53,8 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         try:
             shift_active = self._shift_active(event)
             axis_constraint = shift_active or self.orthogonal_lock_enabled or self._plugin_force_orthogonal()
+            preferred_mode = self._plugin_dimension_mode()
+            auto_dimension = preferred_mode in ("ask", "manual", "canvas")
             if event.button() == Qt.MiddleButton:
                 self._lock_orientation_and_build_rectangle()
                 return
@@ -64,15 +66,30 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
                 if self.dimension_pick_mode is not None:
                     self._handle_canvas_dimension_pick(point)
                     return
+                # 3-click flow:
+                # 1) origin, 2) base orientation, 3) dimension mode (ask/manual/canvas).
+                # The third click is used to trigger dimensions while preserving
+                # first-second segment as explicit grid orientation.
+                if len(self.points) >= 2 and auto_dimension:
+                    angle = self._compute_angle(self.points[0], self.points[1])
+                    if angle is None:
+                        QMessageBox.warning(None, "Orientation", "Invalid orientation.")
+                    else:
+                        self.current_mouse_point = point
+                        self.locked_angle = angle
+                        if self._begin_dimension_mode_selection():
+                            return
                 if len(self.points) >= 1 and axis_constraint:
+                    point = self._constraint_snapped_point(self.points[0], point)
+                if len(self.points) >= 1 and axis_constraint and not auto_dimension:
                     angle = self._compute_angle(self.points[0], point)
                     if angle is None:
                         QMessageBox.warning(None, "Orientation", "Invalid orientation.")
                         return
                     self.current_mouse_point = point
                     self.locked_angle = angle
-                    self._begin_dimension_mode_selection()
-                    return
+                    if self._begin_dimension_mode_selection():
+                        return
                 self.points.append(point)
                 self._add_vertex_marker(point)
                 self._update_preview()
@@ -136,13 +153,12 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
     def _begin_dimension_mode_selection(self):
         preferred_mode = self._plugin_dimension_mode()
         if preferred_mode == "manual":
-            self._build_rectangle_from_dialog()
-            return
+            return self._build_rectangle_from_dialog()
         if preferred_mode == "canvas":
             self.dimension_pick_mode = "length"
             self.pending_length = None
             self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
-            return
+            return True
 
         choice = QMessageBox(None)
         choice.setWindowTitle("Area dimensions")
@@ -154,14 +170,15 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
 
         clicked = choice.clickedButton()
         if clicked == cancel_btn:
-            return
+            return False
         if clicked == manual_btn:
-            self._build_rectangle_from_dialog()
-            return
+            return self._build_rectangle_from_dialog()
         if clicked == canvas_btn:
             self.dimension_pick_mode = "length"
             self.pending_length = None
             self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
+            return True
+        return False
 
     def _compute_angle(self, origin, reference):
         dx = reference.x() - origin.x()
@@ -226,7 +243,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             3,
         )
         if not ok_len:
-            return
+            return False
 
         width, ok_wid = QInputDialog.getDouble(
             None,
@@ -238,11 +255,12 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             3,
         )
         if not ok_wid:
-            return
+            return False
 
         self.last_total_length = length
         self.last_total_width = width
         self._build_rectangle_from_values(length, width)
+        return True
 
     def _handle_canvas_dimension_pick(self, point):
         if not self.points or self.locked_angle is None:
