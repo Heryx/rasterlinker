@@ -34,6 +34,7 @@ class AppRuntimeMixin:
             self.dock_widget.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock_widget)
             self._tabify_with_existing_right_dock()
+            self._connect_main_dock_persistence_signals()
             self._ensure_dialog_main_layout()
             self._init_name_raster_panel()
             self.populate_group_list()
@@ -154,8 +155,10 @@ class AppRuntimeMixin:
             self.dlg.dial2.valueChanged.connect(self.update_visibility_with_dial)
 
         self.dock_widget.show()
-        self._ensure_dock_in_right_area()
-        self._tabify_with_existing_right_dock()
+        restored = self._restore_main_dock_state()
+        if not restored:
+            self._ensure_dock_in_right_area()
+            self._tabify_with_existing_right_dock()
         self.dock_widget.raise_()
         self._apply_dock_constraints()
         if self.dlg is not None:
@@ -328,6 +331,82 @@ class AppRuntimeMixin:
     def _settings_key(self, key):
         return f"{self.settings_group}/{key}"
 
+    def _dock_area_to_text(self, area):
+        if area == Qt.LeftDockWidgetArea:
+            return "left"
+        return "right"
+
+    def _dock_text_to_area(self, text):
+        if str(text or "").strip().lower() == "left":
+            return Qt.LeftDockWidgetArea
+        return Qt.RightDockWidgetArea
+
+    def _connect_main_dock_persistence_signals(self):
+        if self.dock_widget is None:
+            return
+        try:
+            self.dock_widget.topLevelChanged.connect(self._on_main_dock_top_level_changed)
+        except Exception:
+            pass
+        try:
+            self.dock_widget.dockLocationChanged.connect(self._on_main_dock_location_changed)
+        except Exception:
+            pass
+
+    def _on_main_dock_top_level_changed(self, _is_floating):
+        self._save_main_dock_state()
+
+    def _on_main_dock_location_changed(self, _area):
+        self._save_main_dock_state()
+
+    def _save_main_dock_state(self):
+        if self.dock_widget is None:
+            return
+        try:
+            main_window = self.iface.mainWindow()
+            area = main_window.dockWidgetArea(self.dock_widget)
+            self.settings.setValue(
+                self._settings_key("ui/main_dock/area"),
+                self._dock_area_to_text(area),
+            )
+            self.settings.setValue(
+                self._settings_key("ui/main_dock/was_floating"),
+                bool(self.dock_widget.isFloating()),
+            )
+        except Exception:
+            pass
+
+    def _restore_main_dock_state(self):
+        if self.dock_widget is None:
+            return False
+        restore_on_open = self.settings.value(
+            self._settings_key("ui/main_dock/restore_on_open"),
+            True,
+            type=bool,
+        )
+        if not restore_on_open:
+            return False
+
+        area_text = str(self.settings.value(self._settings_key("ui/main_dock/area"), "") or "").strip()
+        if not area_text:
+            return False
+
+        target_area = self._dock_text_to_area(area_text)
+        try:
+            main_window = self.iface.mainWindow()
+            try:
+                main_window.removeDockWidget(self.dock_widget)
+            except Exception:
+                pass
+            main_window.addDockWidget(target_area, self.dock_widget)
+            self.dock_widget.setFloating(False)
+            self.dock_widget.show()
+            if target_area == Qt.RightDockWidgetArea:
+                self._tabify_with_existing_right_dock()
+            return True
+        except Exception:
+            return False
+
     def _load_ui_settings(self):
         self.grid_use_snap = self.settings.value(self._settings_key("grid/use_snap"), True, type=bool)
         self.grid_snap_mode = self.settings.value(self._settings_key("grid/snap_mode"), "all")
@@ -413,6 +492,7 @@ class AppRuntimeMixin:
             self.settings.setValue(self._settings_key("ui/navigation_index"), int(self.dlg.Dial.value()))
         if self.tools_tabs is not None:
             self.settings.setValue(self._settings_key("ui/tools_tab_index"), int(self.tools_tabs.currentIndex()))
+        self._save_main_dock_state()
         if hasattr(self, "_save_trace_info_ui_state"):
             try:
                 self._save_trace_info_ui_state()
