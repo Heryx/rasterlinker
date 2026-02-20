@@ -6,6 +6,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QFormLayout,
     QLineEdit,
+    QInputDialog,
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
@@ -211,14 +212,34 @@ class GridWorkflowMixin:
             chosen = self._choose_vector_storage_mode_for_grid()
             if chosen is None:
                 return
+            # Resolve "Ask" once before drawing starts, so no modal popup interrupts clicks.
+            session_mode = None
+            if str(getattr(self, "grid_dimension_mode", "ask")).strip().lower() == "ask":
+                options = ["Canvas (Free)", "Manual input"]
+                selected, ok = QInputDialog.getItem(
+                    self.dlg,
+                    "Dimension input",
+                    "Choose how to define dimensions for this draw session:",
+                    options,
+                    0,
+                    False,
+                )
+                if not ok:
+                    return
+                session_mode = "manual" if selected == "Manual input" else "canvas"
             # Activate polygon drawing tool
-            self.polygon_draw_tool = PolygonDrawTool(self.iface.mapCanvas(), self)
+            self.polygon_draw_tool = PolygonDrawTool(
+                self.iface.mapCanvas(),
+                self,
+                session_dimension_mode=session_mode,
+            )
             self.iface.mapCanvas().setMapTool(self.polygon_draw_tool)
 
+            mode_label = session_mode or str(getattr(self, "grid_dimension_mode", "ask")).strip().lower()
             self._notify_info(
                 "Draw area: left-click vertices, right-click/Enter to close, ESC to cancel. "
                 "Oriented rectangle: first click origin, then D/middle-click for dimensions. "
-                "Dock: Snap, Ortho 0/90, Mode. Name: Area|Prefix."
+                f"Dock: Snap, Ortho 0/90, Mode={mode_label}. Name: Area|Prefix."
             )
         except Exception as e:
             QMessageBox.critical(self.dlg, "Error", f"Error while activating drawing tool: {e}")
@@ -589,7 +610,7 @@ class GridWorkflowMixin:
             "- Snap to: All / Vertex / Segment / Intersection\n"
             "- Tol: snap tolerance (px, mm, cm, or map units)\n"
             "- Dimension Input:\n"
-            "  Ask = choose rectangle method at 3rd click\n"
+            "  Ask = choose method once when starting Draw Polygon\n"
             "  Manual = numeric rectangle\n"
             "  Canvas (Free) = free polygon drawing (D/middle-click for rectangle mode)"
         )

@@ -17,10 +17,13 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
     orientation and enter numeric rectangle length/width.
     """
 
-    def __init__(self, canvas, parent_plugin):
+    def __init__(self, canvas, parent_plugin, session_dimension_mode=None):
         super().__init__(canvas)
         self.canvas = canvas
         self.parent_plugin = parent_plugin
+        self.session_dimension_mode = (
+            session_dimension_mode if session_dimension_mode in ("manual", "canvas") else None
+        )
         self.points = []
         self.current_mouse_point = None
         self.vertex_markers = []
@@ -158,28 +161,15 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
                 self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
             return True
 
-        choice = QMessageBox(None)
-        choice.setWindowTitle("Area dimensions")
-        choice.setText("How do you want to define length and width?")
-        manual_btn = choice.addButton("Manual input", QMessageBox.AcceptRole)
-        canvas_btn = choice.addButton("Pick from canvas", QMessageBox.ActionRole)
-        cancel_btn = choice.addButton(QMessageBox.Cancel)
-        choice.exec_()
-
-        clicked = choice.clickedButton()
-        if clicked == cancel_btn:
-            return False
-        if clicked == manual_btn:
-            return self._build_rectangle_from_dialog()
-        if clicked == canvas_btn:
-            self.dimension_pick_mode = "length"
-            self.pending_length = None
-            if initial_canvas_point is not None:
-                self._handle_canvas_dimension_pick(initial_canvas_point)
-            else:
-                self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
-            return True
-        return False
+        # Fallback behavior for unexpected/legacy "ask": default to canvas
+        # to keep drawing uninterrupted.
+        self.dimension_pick_mode = "length"
+        self.pending_length = None
+        if initial_canvas_point is not None:
+            self._handle_canvas_dimension_pick(initial_canvas_point)
+        else:
+            self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
+        return True
 
     def _compute_angle(self, origin, reference):
         dx = reference.x() - origin.x()
@@ -236,7 +226,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
     def _build_rectangle_from_dialog(self):
         length, ok_len = QInputDialog.getDouble(
             None,
-            "Lunghezza totale area",
+            "Total area length",
             "Enter total length:",
             self.last_total_length,
             0.0001,
@@ -248,7 +238,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
 
         width, ok_wid = QInputDialog.getDouble(
             None,
-            "Larghezza totale area",
+            "Total area width",
             "Enter total width:",
             self.last_total_width,
             0.0001,
@@ -388,6 +378,8 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         return bool(getattr(self.parent_plugin, "grid_relative_orthogonal", False))
 
     def _plugin_dimension_mode(self):
+        if self.session_dimension_mode in ("manual", "canvas"):
+            return self.session_dimension_mode
         mode = getattr(self.parent_plugin, "grid_dimension_mode", "ask")
         return mode if mode in ("ask", "manual", "canvas") else "ask"
 
