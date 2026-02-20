@@ -1,4 +1,13 @@
-from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtWidgets import (
+    QFileDialog,
+    QMessageBox,
+    QDialog,
+    QLabel,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+)
 from qgis.core import (
     Qgis,
     QgsLayerTreeGroup,
@@ -176,9 +185,8 @@ class GridWorkflowMixin:
         """
         try:
             storage_mode = self._resolve_vector_storage_mode_for_grid()
-            # Read spacing values from UI
-            distance_x = float(self.dlg.lineEditDistanceX.text().strip())
-            distance_y = float(self.dlg.lineEditDistanceY.text().strip())
+            internal_enabled = bool(self.internal_grid_checkbox.isChecked()) if self.internal_grid_checkbox is not None else True
+            grid_layer = None
             area_name, cell_prefix = self._get_grid_names_from_ui()
             polygon_layer.setName(area_name)
             polygon_layer.setCustomProperty("rasterlinker/source_kind", "grid_area")
@@ -190,30 +198,49 @@ class GridWorkflowMixin:
             if not self._confirm_planar_units_for_grid():
                 return
 
-            # Create grid
-            grid_layer = create_grid_from_polygon(
-                polygon_layer,
-                distance_x,
-                distance_y,
-                area_name=area_name,
-                cell_prefix=cell_prefix,
-                max_cells=120000,
-            )
-            if grid_layer is not None:
-                grid_layer.setCustomProperty("rasterlinker/source_kind", "grid_cells")
-            grid_layer = self._persist_project_vector_layer_if_needed(
-                grid_layer,
-                storage_mode=storage_mode,
-                source_kind="grid_cells",
-            )
-            self._place_layer_in_cell_grids_group(grid_layer)
-            self.last_area_layer = polygon_layer
-            self.last_grid_layer = grid_layer
+            if internal_enabled:
+                # Read spacing values from UI only when internal grid is enabled.
+                distance_x = float(self.dlg.lineEditDistanceX.text().strip())
+                distance_y = float(self.dlg.lineEditDistanceY.text().strip())
+                # Create grid
+                grid_layer = create_grid_from_polygon(
+                    polygon_layer,
+                    distance_x,
+                    distance_y,
+                    area_name=area_name,
+                    cell_prefix=cell_prefix,
+                    max_cells=120000,
+                )
+                if grid_layer is not None:
+                    grid_layer.setCustomProperty("rasterlinker/source_kind", "grid_cells")
+                grid_layer = self._persist_project_vector_layer_if_needed(
+                    grid_layer,
+                    storage_mode=storage_mode,
+                    source_kind="grid_cells",
+                )
+                self._place_layer_in_cell_grids_group(grid_layer)
+                self.last_grid_layer = grid_layer
+            else:
+                self.last_grid_layer = None
 
-            if not self.keep_source_polygon and QgsProject.instance().mapLayer(polygon_layer.id()) is not None:
+            # Safety rule:
+            # when Internal grid is disabled, keep the area layer visible even if
+            # "Keep area" is unchecked, otherwise no output layer remains.
+            keep_area_in_project = bool(self.keep_source_polygon) or not internal_enabled
+            if not keep_area_in_project and QgsProject.instance().mapLayer(polygon_layer.id()) is not None:
                 QgsProject.instance().removeMapLayer(polygon_layer.id())
+                self.last_area_layer = None
+            else:
+                # Keep area layer in the same dedicated Cell Grids container.
+                self._place_layer_in_cell_grids_group(polygon_layer)
+                self.last_area_layer = polygon_layer
 
-            self._notify_info(f"Area '{area_name}' created. Cells with prefix '{cell_prefix}'.")
+            if internal_enabled:
+                self._notify_info(f"Area '{area_name}' created. Cells with prefix '{cell_prefix}'.")
+            else:
+                self._notify_info(
+                    f"Area '{area_name}' created. Internal grid is disabled, so only the area polygon was generated."
+                )
         except ValueError as ve:
             QMessageBox.warning(self.dlg, "Error", f"Error: {ve}")
         except Exception as e:
@@ -360,9 +387,85 @@ class GridWorkflowMixin:
         self.update_draw_indicators(angle_rad=angle_rad, length=None)
 
     def _set_orientation_status(self, text):
+        status_text = str(text or "").strip() or "Orientation: idle"
         label = getattr(self, "orientation_status_label", None)
         if label is not None:
-            label.setText(str(text or "").strip() or "Orientation: idle")
+            label.setText(status_text)
+        helper_label = getattr(self, "orientation_helper_status_label", None)
+        if helper_label is not None:
+            helper_label.setText(status_text)
+
+    def _ensure_orientation_helper_dialog(self):
+        dialog = getattr(self, "orientation_helper_dialog", None)
+        if dialog is not None:
+            return dialog
+
+        parent = self._ui_parent()
+        dialog = QDialog(parent)
+        dialog.setWindowTitle("Orientation Assistant")
+        dialog.setModal(False)
+        dialog.setWindowFlag(Qt.Tool, True)
+        dialog.setMinimumWidth(360)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        intro = QLabel(
+            "Set Orientation workflow:\n"
+            "1) Click P0 (origin)\n"
+            "2) Click X1 (X direction)\n"
+            "3) Click Y1 (Y direction)"
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        status_label = QLabel("Orientation: idle")
+        status_label.setWordWrap(True)
+        layout.addWidget(status_label)
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(8)
+        cancel_btn = QPushButton("Cancel Tool")
+        close_btn = QPushButton("Close")
+        buttons.addWidget(cancel_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        def _cancel_tool():
+            try:
+                if getattr(self, "grid_selection_tool", None) is not None:
+                    self.iface.mapCanvas().unsetMapTool(self.grid_selection_tool)
+            except Exception:
+                pass
+            self.on_grid_orientation_cancelled()
+
+        cancel_btn.clicked.connect(_cancel_tool)
+        close_btn.clicked.connect(dialog.hide)
+
+        self.orientation_helper_dialog = dialog
+        self.orientation_helper_status_label = status_label
+        return dialog
+
+    def _show_orientation_helper_dialog(self):
+        dialog = self._ensure_orientation_helper_dialog()
+        if dialog is None:
+            return
+        self._set_orientation_status(
+            getattr(self, "orientation_status_label", None).text()
+            if getattr(self, "orientation_status_label", None) is not None
+            else "Orientation: active"
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _hide_orientation_helper_dialog(self):
+        dialog = getattr(self, "orientation_helper_dialog", None)
+        if dialog is not None:
+            dialog.hide()
 
     def _fmt_orientation_point(self, point):
         if point is None:
@@ -394,6 +497,7 @@ class GridWorkflowMixin:
     def on_grid_orientation_cancelled(self):
         self._set_orientation_status("Orientation cancelled.")
         self.update_draw_indicators(None, None)
+        self._hide_orientation_helper_dialog()
 
     def show_grid_help(self):
         help_text = (
@@ -406,7 +510,10 @@ class GridWorkflowMixin:
             "- Ortho base: orthogonal snapping relative to drawn base\n"
             "- Snap to: All / Vertex / Segment / Intersection\n"
             "- Tol: snap tolerance (px, mm, cm, or map units)\n"
-            "- Dimension Input: Ask / Manual / Canvas for length-width input"
+            "- Dimension Input:\n"
+            "  Ask = choose rectangle method at 3rd click\n"
+            "  Manual = numeric rectangle\n"
+            "  Canvas (Free) = free polygon drawing (D/middle-click for rectangle mode)"
         )
         QMessageBox.information(self.dlg, "Grid Help", help_text)
 
@@ -505,6 +612,7 @@ class GridWorkflowMixin:
             "No popup: follow status in Drawing Options.",
             duration=7,
         )
+        self._show_orientation_helper_dialog()
         self.grid_selection_tool = GridSelectionTool(self.iface.mapCanvas(), self)
         self.iface.mapCanvas().setMapTool(self.grid_selection_tool)
 
@@ -583,6 +691,7 @@ class GridWorkflowMixin:
                 ),
             )
             self._set_orientation_status("Orientation completed. Grid created.")
+            self._hide_orientation_helper_dialog()
         except ValueError as ve:
             self._set_orientation_status("Orientation failed: invalid values.")
             QMessageBox.warning(self.dlg, "Error", f"Invalid values: {ve}")

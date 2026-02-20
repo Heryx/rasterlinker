@@ -98,6 +98,20 @@ class TraceInfoMixin:
         settings.setValue(self._trace_info_settings_key("query_visible"), query_visible)
         settings.setValue(self._trace_info_settings_key("help_visible"), help_visible)
 
+        selected_fid = ""
+        selected_trace_id = ""
+        if self.trace_info_table is not None and self.trace_info_table.selectionModel() is not None:
+            selected_rows = self.trace_info_table.selectionModel().selectedRows()
+            if selected_rows:
+                payload = self._trace_info_payload_from_table_row(selected_rows[0].row())
+                if isinstance(payload, dict):
+                    fid_val = payload.get("fid")
+                    trace_id_val = payload.get("trace_id")
+                    selected_fid = "" if fid_val in (None, "") else str(fid_val)
+                    selected_trace_id = "" if trace_id_val in (None, "") else str(trace_id_val)
+        settings.setValue(self._trace_info_settings_key("selected_fid"), selected_fid)
+        settings.setValue(self._trace_info_settings_key("selected_trace_id"), selected_trace_id)
+
         if self.trace_info_dock is not None:
             try:
                 is_floating = bool(self.trace_info_dock.isFloating())
@@ -131,6 +145,10 @@ class TraceInfoMixin:
         # Legacy flag kept for backward compatibility; query controls are now menu-based.
         _query_visible = settings.value(self._trace_info_settings_key("query_visible"), False, type=bool)
         help_visible = settings.value(self._trace_info_settings_key("help_visible"), False, type=bool)
+        saved_selected_fid = str(settings.value(self._trace_info_settings_key("selected_fid"), "") or "").strip()
+        saved_selected_trace_id = str(
+            settings.value(self._trace_info_settings_key("selected_trace_id"), "") or ""
+        ).strip()
         dock_floating = settings.value(self._trace_info_settings_key("dock/floating"), True, type=bool)
         dock_area_txt = str(settings.value(self._trace_info_settings_key("dock/area"), "right") or "right").strip().lower()
         # Safety default: do not auto-dock on open to avoid breaking QGIS layout.
@@ -164,6 +182,11 @@ class TraceInfoMixin:
         self._toggle_trace_help_panel(bool(help_visible))
         self._set_trace_info_view_mode(view_mode, persist=False)
         self._set_trace_info_form_preview_column(form_preview_key, persist=False)
+        try:
+            self.trace_info_saved_selected_fid = int(saved_selected_fid) if saved_selected_fid else None
+        except Exception:
+            self.trace_info_saved_selected_fid = None
+        self.trace_info_saved_selected_trace_id = saved_selected_trace_id
 
         if self.trace_info_dock is not None:
             area_map = {
@@ -237,12 +260,14 @@ class TraceInfoMixin:
         if self.trace_info_selection_guard:
             return
         self._update_trace_info_form_from_table_selection()
+        self._save_trace_info_ui_state()
 
     def _on_trace_info_form_list_selection_changed(self):
         if self.trace_info_selection_guard:
             return
         # Form list shares the same selection model as table view.
         self._update_trace_info_form_from_table_selection()
+        self._save_trace_info_ui_state()
 
     def _select_trace_info_row(self, row_idx):
         if row_idx is None or row_idx < 0:
@@ -928,6 +953,9 @@ class TraceInfoMixin:
                 payload = self._trace_info_payload_from_table_row(row)
                 if isinstance(payload, dict):
                     selected_fid = payload.get("fid")
+        if selected_fid is None:
+            selected_fid = getattr(self, "trace_info_saved_selected_fid", None)
+        selected_trace_id = str(getattr(self, "trace_info_saved_selected_trace_id", "") or "").strip()
         self.trace_info_model.set_rows([])
         if not self._is_line_layer(layer):
             self._update_trace_info_form_from_table_selection()
@@ -1041,10 +1069,16 @@ class TraceInfoMixin:
                 if row_data.get("fid") == selected_fid:
                     target_row = idx
                     break
+        elif selected_trace_id:
+            for idx, row_data in enumerate(rows):
+                if str(row_data.get("trace_id") or "") == selected_trace_id:
+                    target_row = idx
+                    break
         if rows:
             self._select_trace_info_row(target_row)
         else:
             self._update_trace_info_form_from_table_selection()
+        self._save_trace_info_ui_state()
 
         if hasattr(self, "_sync_trace_vertex_depth_labels"):
             try:

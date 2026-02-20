@@ -93,6 +93,8 @@ class RasterLinkerPlugin(
         self.base_angle_label = None
         self.length_label = None
         self.orientation_status_label = None
+        self.orientation_helper_dialog = None
+        self.orientation_helper_status_label = None
         self.internal_grid_checkbox = None
         self.name_raster_panel = None
         self.name_raster_title = None
@@ -143,6 +145,8 @@ class RasterLinkerPlugin(
         self.trace_info_help_panel = None
         self.trace_info_selection_guard = False
         self.trace_info_is_docked = False
+        self.trace_info_saved_selected_fid = None
+        self.trace_info_saved_selected_trace_id = ""
         self.trace_z_grid_cache = {}
         self.trace_missing_z_prompt_shown = False
         self.trace_allow_missing_z_for_session = False
@@ -233,5 +237,16 @@ class RasterLinkerPlugin(
             self.trace_info_help_panel = None
             self.trace_info_selection_guard = False
             self.trace_info_is_docked = False
+        if self.orientation_helper_dialog is not None:
+            try:
+                self.orientation_helper_dialog.hide()
+            except Exception:
+                pass
+            try:
+                self.orientation_helper_dialog.deleteLater()
+            except Exception:
+                pass
+            self.orientation_helper_dialog = None
+            self.orientation_helper_status_label = None
         self.trace_z_grid_cache = {}
 

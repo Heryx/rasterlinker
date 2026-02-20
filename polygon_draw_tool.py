@@ -54,18 +54,22 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             shift_active = self._shift_active(event)
             axis_constraint = shift_active or self.orthogonal_lock_enabled or self._plugin_force_orthogonal()
             preferred_mode = self._plugin_dimension_mode()
-            auto_dimension = preferred_mode in ("ask", "manual", "canvas")
+            # In free canvas mode, do not auto-open dimension flow:
+            # keep unlimited vertex clicks for arbitrary polygon shapes.
+            auto_dimension = preferred_mode in ("ask", "manual")
             if event.button() == Qt.MiddleButton:
                 self._lock_orientation_and_build_rectangle()
                 return
             if event.button() == Qt.LeftButton:
-                point, snapped = self._map_point_with_snap(event)
-                self._update_snap_marker(point if snapped else None)
-                if len(self.points) >= 1 and axis_constraint:
-                    point = self._constraint_snapped_point(self.points[0], point)
+                point_raw, snapped = self._map_point_with_snap(event)
+                self._update_snap_marker(point_raw if snapped else None)
                 if self.dimension_pick_mode is not None:
-                    self._handle_canvas_dimension_pick(point)
+                    # In canvas dimension mode, consume click directly as length/width pick.
+                    self._handle_canvas_dimension_pick(point_raw)
                     return
+                point = point_raw
+                if len(self.points) >= 1 and axis_constraint:
+                    point = self._constraint_snapped_point(self.points[0], point_raw)
                 # 3-click flow:
                 # 1) origin, 2) base orientation, 3) dimension mode (ask/manual/canvas).
                 # The third click is used to trigger dimensions while preserving
@@ -75,21 +79,12 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
                     if angle is None:
                         QMessageBox.warning(None, "Orientation", "Invalid orientation.")
                     else:
-                        self.current_mouse_point = point
+                        self.current_mouse_point = point_raw
                         self.locked_angle = angle
-                        if self._begin_dimension_mode_selection():
+                        # For Canvas mode, the third click is immediately reused as the
+                        # first dimension pick (length) to avoid an extra click.
+                        if self._begin_dimension_mode_selection(initial_canvas_point=point_raw):
                             return
-                if len(self.points) >= 1 and axis_constraint:
-                    point = self._constraint_snapped_point(self.points[0], point)
-                if len(self.points) >= 1 and axis_constraint and not auto_dimension:
-                    angle = self._compute_angle(self.points[0], point)
-                    if angle is None:
-                        QMessageBox.warning(None, "Orientation", "Invalid orientation.")
-                        return
-                    self.current_mouse_point = point
-                    self.locked_angle = angle
-                    if self._begin_dimension_mode_selection():
-                        return
                 self.points.append(point)
                 self._add_vertex_marker(point)
                 self._update_preview()
@@ -150,14 +145,17 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         self.locked_angle = angle
         self._begin_dimension_mode_selection()
 
-    def _begin_dimension_mode_selection(self):
+    def _begin_dimension_mode_selection(self, initial_canvas_point=None):
         preferred_mode = self._plugin_dimension_mode()
         if preferred_mode == "manual":
             return self._build_rectangle_from_dialog()
         if preferred_mode == "canvas":
             self.dimension_pick_mode = "length"
             self.pending_length = None
-            self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
+            if initial_canvas_point is not None:
+                self._handle_canvas_dimension_pick(initial_canvas_point)
+            else:
+                self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
             return True
 
         choice = QMessageBox(None)
@@ -176,7 +174,10 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         if clicked == canvas_btn:
             self.dimension_pick_mode = "length"
             self.pending_length = None
-            self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
+            if initial_canvas_point is not None:
+                self._handle_canvas_dimension_pick(initial_canvas_point)
+            else:
+                self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
             return True
         return False
 

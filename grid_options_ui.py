@@ -116,11 +116,15 @@ def build_grid_options_controls(
     dimension_mode_combo = QComboBox()
     dimension_mode_combo.addItem("Ask", "ask")
     dimension_mode_combo.addItem("Manual", "manual")
-    dimension_mode_combo.addItem("Canvas", "canvas")
+    dimension_mode_combo.addItem("Canvas (Free)", "canvas")
     mode_index = dimension_mode_combo.findData(dimension_mode)
     dimension_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
     dimension_mode_combo.setMinimumWidth(92)
-    dimension_mode_combo.setToolTip("Dimension input mode after orientation lock (not related to snap).")
+    dimension_mode_combo.setToolTip(
+        "Ask: choose rectangle method at 3rd click. "
+        "Manual: numeric rectangle. "
+        "Canvas (Free): keep polygon free-form (use D/middle-click for rectangle mode)."
+    )
 
     form = QFormLayout()
     form.setContentsMargins(0, 0, 0, 0)
