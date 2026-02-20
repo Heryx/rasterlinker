@@ -1,32 +1,30 @@
-Plugin Builder Results
+GeoSurvey Studio - QGIS Plugin
+==============================
 
-Your plugin GPR was created in:
-    C:/Users/Giuseppe/Desktop/trash/plugintest\gpr_linker
+GeoSurvey Studio is a QGIS plugin for geophysical/time-slice workflows:
+- grouped raster management
+- grid drawing/orientation tools
+- 2D/3D trace workflow
+- project manager with catalog and import tools
 
-Your QGIS plugin directory is located at:
-    C:/Users/Giuseppe/AppData/Roaming/QGIS/QGIS3/profiles/default/python/plugins
+Main files
+----------
+- geosurvey_studio.py
+- geosurvey_studio_dialog.py
+- geosurvey_studio_dialog_base.ui
+- metadata.txt
+- resources.qrc / resources.py
 
-What's Next:
+Development quick start
+-----------------------
+1. Install/copy the plugin folder into your QGIS profile plugins directory.
+2. Rebuild resources when icon/resource paths change:
+   python-qgis -m PyQt5.pyrcc_main -o resources.py resources.qrc
+3. Reload plugin from QGIS and test key workflows.
+4. Run available tests from this repository (where supported by your runtime).
 
-  * Copy the entire directory containing your new plugin to the QGIS plugin
-    directory
-
-  * Compile the resources file using pyrcc5
-
-  * Run the tests (``make test``)
-
-  * Test the plugin by enabling it in the QGIS plugin manager
-
-  * Customize it by editing the implementation file: ``geosurvey_studio.py``
-
-  * Create your own custom icon, replacing the default icon.png
-
-  * Modify your user interface by opening GPR_dialog_base.ui in Qt Designer
-
-  * You can use the Makefile to compile your Ui and resource files when
-    you make changes. This requires GNU make (gmake)
-
-For more information, see the PyQGIS Developer Cookbook at:
-http://www.qgis.org/pyqgis-cookbook/index.html
-
-(C) 2011-2018 GeoApt LLC - geoapt.com
+Notes
+-----
+- Plugin internal name: GeoSurvey Studio
+- Current metadata version is defined in metadata.txt
+- Source code license: GPL-2.0-or-later

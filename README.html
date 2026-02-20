@@ -1,42 +1,49 @@
-<html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>GeoSurvey Studio - QGIS Plugin</title>
+</head>
 <body>
-<h3>Plugin Builder Results</h3>
+  <h2>GeoSurvey Studio</h2>
+  <p>
+    GeoSurvey Studio is a QGIS plugin for geophysical/time-slice workflows.
+  </p>
 
-Congratulations! You just built a plugin for QGIS!<br/><br />
+  <h3>Core Features</h3>
+  <ul>
+    <li>Grouped raster management for time-slice datasets.</li>
+    <li>Grid drawing and orientation tools for survey planning.</li>
+    <li>2D/3D trace workflow with dedicated drawing panel.</li>
+    <li>Project manager with catalog and import/export utilities.</li>
+  </ul>
 
-<div id='help' style='font-size:.9em;'>
-Your plugin <b>GPR</b> was created in:<br>
-&nbsp;&nbsp;<b>C:/Users/Giuseppe/Desktop/trash/plugintest\gpr_linker</b>
-<p>
-Your QGIS plugin directory is located at:<br>
-&nbsp;&nbsp;<b>C:/Users/Giuseppe/AppData/Roaming/QGIS/QGIS3/profiles/default/python/plugins</b>
-<p>
-<h3>What's Next</h3>
-<ol>
-    <li>If resources.py is not present in your plugin directory, compile the resources file using pyrcc5 (simply use <b>pb_tool</b> or <b>make</b> if you have automake)
-    <li>Optionally, test the generated sources using <b>make test</b> (or run tests from your IDE)
-    <li>Copy the entire directory containing your new plugin to the QGIS plugin directory (see Notes below)
-    <li>Test the plugin by enabling it in the QGIS plugin manager
-    <li>Customize it by editing the implementation file <b>geosurvey_studio.py</b>
-    <li>Create your own custom icon, replacing the default <b>icon.png</b>
-    <li>Modify your user interface by opening <b>geosurvey_studio_dialog_base.ui</b> in Qt Designer
-</ol>
-Notes:
-<ul>
-    <li>You can use <b>pb_tool</b> to compile, deploy, and manage your plugin. Tweak the <i>pb_tool.cfg</i> file included with your plugin as you add files. Install <b>pb_tool</b> using 
-        <i>pip</i> or <i>easy_install</i>. See <b>http://loc8.cc/pb_tool</b> for more information.
-    <li>You can also use the <b>Makefile</b> to compile and deploy when you
-        make changes. This requires GNU make (gmake). The Makefile is ready to use, however you 
-        will have to edit it to add addional Python source files, dialogs, and translations.
-</ul>
-</div>
-<div style='font-size:.9em;'>
-<p>
-For information on writing PyQGIS code, see <b>http://loc8.cc/pyqgis_resources</b> for a list of resources.
-</p>
-</div>
-<p>
-&copy;2011-2019 GeoApt LLC - geoapt.com 
-</p>
+  <h3>Main Files</h3>
+  <ul>
+    <li><code>geosurvey_studio.py</code></li>
+    <li><code>geosurvey_studio_dialog.py</code></li>
+    <li><code>geosurvey_studio_dialog_base.ui</code></li>
+    <li><code>metadata.txt</code></li>
+    <li><code>resources.qrc</code> / <code>resources.py</code></li>
+  </ul>
+
+  <h3>Development Quick Start</h3>
+  <ol>
+    <li>Copy the plugin folder into your QGIS profile plugin directory.</li>
+    <li>
+      Rebuild Qt resources when icon/resource paths change:
+      <br>
+      <code>python-qgis -m PyQt5.pyrcc_main -o resources.py resources.qrc</code>
+    </li>
+    <li>Reload the plugin in QGIS and test the main workflows.</li>
+    <li>Run repository tests when supported by your environment.</li>
+  </ol>
+
+  <h3>Notes</h3>
+  <ul>
+    <li>Plugin internal name: <strong>GeoSurvey Studio</strong></li>
+    <li>Current version is defined in <code>metadata.txt</code></li>
+    <li>Source code license: <strong>GPL-2.0-or-later</strong></li>
+  </ul>
 </body>
 </html>
