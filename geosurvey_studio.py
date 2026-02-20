@@ -65,6 +65,7 @@ class GeoSurveyStudioPlugin(
         self.iface = iface
         self.plugin_dir = os.path.dirname(__file__)
         self.actions = []
+        self.plugin_toolbar = None
         self.brand_name = "GeoSurvey Studio"
         self.menu = self.tr(u'&GeoSurvey Studio')
         self.first_start = None
@@ -167,13 +168,21 @@ class GeoSurveyStudioPlugin(
         icon = QIcon(icon_path)
         action = QAction(icon, text, parent)
         action.triggered.connect(callback)
-        self.iface.addToolBarIcon(action)
+        if self.plugin_toolbar is not None:
+            self.plugin_toolbar.addAction(action)
+        else:
+            self.iface.addToolBarIcon(action)
         self.iface.addPluginToMenu(self.menu, action)
         self.actions.append(action)
         return action
 
     def initGui(self):
         """Initialize the GUI."""
+        if self.plugin_toolbar is None:
+            self.plugin_toolbar = self.iface.addToolBar(self.tr(u"GeoSurvey Studio"))
+            self.plugin_toolbar.setObjectName("GeoSurveyStudioMainToolbar")
+            self.plugin_toolbar.setToolTip("GeoSurvey Studio tools")
+
         icon_path = ':/plugins/gpr_linker/icon.png'
         self.add_action(icon_path, text=self.tr(u'GeoSurvey Studio'), callback=self.run, parent=self.iface.mainWindow())
         pm_action = self.add_action(
@@ -213,7 +222,21 @@ class GeoSurveyStudioPlugin(
             self._save_ui_settings()
         for action in self.actions:
             self.iface.removePluginMenu(self.tr(u'&GeoSurvey Studio'), action)
-            self.iface.removeToolBarIcon(action)
+            if self.plugin_toolbar is None:
+                self.iface.removeToolBarIcon(action)
+            else:
+                try:
+                    self.plugin_toolbar.removeAction(action)
+                except Exception:
+                    pass
+        self.actions = []
+        if self.plugin_toolbar is not None:
+            try:
+                self.iface.mainWindow().removeToolBar(self.plugin_toolbar)
+            except Exception:
+                pass
+            self.plugin_toolbar.deleteLater()
+            self.plugin_toolbar = None
         if self.dock_widget is not None:
             self.iface.removeDockWidget(self.dock_widget)
             self.dock_widget.deleteLater()
