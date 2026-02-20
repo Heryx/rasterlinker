@@ -92,6 +92,7 @@ class RasterLinkerPlugin(
         self.export_button = None
         self.base_angle_label = None
         self.length_label = None
+        self.orientation_status_label = None
         self.internal_grid_checkbox = None
         self.name_raster_panel = None
         self.name_raster_title = None

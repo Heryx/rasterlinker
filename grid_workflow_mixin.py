@@ -359,6 +359,42 @@ class GridWorkflowMixin:
     def update_base_angle_indicator(self, angle_rad=None):
         self.update_draw_indicators(angle_rad=angle_rad, length=None)
 
+    def _set_orientation_status(self, text):
+        label = getattr(self, "orientation_status_label", None)
+        if label is not None:
+            label.setText(str(text or "").strip() or "Orientation: idle")
+
+    def _fmt_orientation_point(self, point):
+        if point is None:
+            return "(--, --)"
+        try:
+            return f"({point.x():.3f}, {point.y():.3f})"
+        except Exception:
+            return "(--, --)"
+
+    def on_grid_orientation_point_captured(self, step_index, point):
+        """
+        Non-blocking progress updates for Set Orientation tool.
+        step_index: 1..3
+        """
+        pt_txt = self._fmt_orientation_point(point)
+        if step_index == 1:
+            self._set_orientation_status(
+                f"Orientation | P0 set {pt_txt}. Next: click X1 (X direction) [2/3]."
+            )
+        elif step_index == 2:
+            self._set_orientation_status(
+                f"Orientation | X1 set {pt_txt}. Next: click Y1 (Y direction) [3/3]."
+            )
+        elif step_index == 3:
+            self._set_orientation_status(
+                f"Orientation | Y1 set {pt_txt}. Building grid..."
+            )
+
+    def on_grid_orientation_cancelled(self):
+        self._set_orientation_status("Orientation cancelled.")
+        self.update_draw_indicators(None, None)
+
     def show_grid_help(self):
         help_text = (
             "Draw workflow:\n"
@@ -461,17 +497,13 @@ class GridWorkflowMixin:
                 ),
             )
             return
-        QMessageBox.information(
-            self.dlg,
-            "Set Grid Orientation",
-            (
-                "Orientation mode is active.\n\n"
-                "1) First click: grid origin (0,0)\n"
-                "2) Second click: X-axis direction\n"
-                "3) Third click: Y-axis direction\n\n"
-                "Grid size comes from x0/x1/y0/y1 values.\n"
-                "Internal cells are optional and controlled by 'Internal grid'."
-            ),
+        self._set_orientation_status(
+            "Orientation active | Step 1/3: click P0 (origin), then X1, then Y1."
+        )
+        self._notify_info(
+            "Set Orientation active: click P0 -> X1 -> Y1. "
+            "No popup: follow status in Drawing Options.",
+            duration=7,
         )
         self.grid_selection_tool = GridSelectionTool(self.iface.mapCanvas(), self)
         self.iface.mapCanvas().setMapTool(self.grid_selection_tool)
@@ -550,9 +582,12 @@ class GridWorkflowMixin:
                     f"Internal grid: {'enabled' if internal_enabled else 'disabled'}"
                 ),
             )
+            self._set_orientation_status("Orientation completed. Grid created.")
         except ValueError as ve:
+            self._set_orientation_status("Orientation failed: invalid values.")
             QMessageBox.warning(self.dlg, "Error", f"Invalid values: {ve}")
         except Exception as e:
+            self._set_orientation_status("Orientation failed during grid creation.")
             QMessageBox.critical(self.dlg, "Error", f"Grid creation failed: {str(e)}")
         finally:
             self.pending_vector_storage_mode = None

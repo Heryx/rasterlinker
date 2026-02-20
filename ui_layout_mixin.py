@@ -544,7 +544,11 @@ class UiLayoutMixin:
         self._set_button_icon(getattr(self.dlg, "zoomSelectedGroupsButton", None), "mActionZoomToSelected.svg", "mActionZoomFullExtent.svg")
         self._set_button_icon(getattr(self, "import_groups_button", None), "mActionOptions.svg", "mActionPropertiesWidget.svg")
         self._set_button_icon(getattr(self.dlg, "createGridButton", None), "mActionCapturePolygon.svg", "mActionNewVectorLayer.svg")
-        self._set_button_icon(getattr(self.dlg, "selectGridPointsButton", None), "mActionCapturePoint.svg", "mActionMoveVertex.svg")
+        self._set_button_icon(
+            getattr(self.dlg, "selectGridPointsButton", None),
+            "mActionCaptureLine.svg",
+            "mActionMoveVertex.svg",
+        )
         self._set_button_icon(getattr(self, "enhance_minmax_button", None), "mActionRasterHistogram.svg", "mActionOptions.svg")
         self._set_button_icon(getattr(self, "enhance_batch_button", None), "mActionRasterHistogram.svg", "mActionFilter2.svg")
         self._set_button_icon(getattr(self, "save_style_button", None), "mActionFileSave.svg", "mActionSaveAs.svg")
@@ -567,6 +571,7 @@ class UiLayoutMixin:
             self.export_button,
             self.base_angle_label,
             self.length_label,
+            self.orientation_status_label,
         ) = build_grid_options_controls(
             self.dlg.horizontalLayout_2,
             use_snap=self.grid_use_snap,

@@ -43,6 +43,9 @@ class AppRuntimeMixin:
             self.dlg.selectGridPointsButton.setEnabled(True)
             self.dlg.selectGridPointsButton.setText("Set Orientation")
             self.dlg.selectGridPointsButton.setMinimumWidth(120)
+            self.dlg.selectGridPointsButton.setToolTip(
+                "Set grid orientation with 3 clicks: P0 (origin), X1 (X direction), Y1 (Y direction)."
+            )
             if hasattr(self.dlg, "Ok"):
                 self.dlg.Ok.hide()
             if hasattr(self.dlg, "openButton"):

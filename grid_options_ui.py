@@ -167,10 +167,17 @@ def build_grid_options_controls(
     info_row.addWidget(length_label)
     info_row.addStretch(1)
 
+    orientation_status_label = QLabel("Orientation: idle (click Set Orientation: P0 -> X1 -> Y1)")
+    orientation_status_label.setWordWrap(True)
+    orientation_status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    orientation_status_label.setStyleSheet("color: #505050;")
+    orientation_status_label.setMinimumHeight(18)
+
     group_layout.addLayout(flags_grid)
     group_layout.addLayout(form)
     group_layout.addLayout(buttons_row)
     group_layout.addLayout(info_row)
+    group_layout.addWidget(orientation_status_label)
     group_layout.addStretch(1)
 
     wrapper_layout.addWidget(group)
@@ -189,4 +196,5 @@ def build_grid_options_controls(
         export_button,
         angle_label,
         length_label,
+        orientation_status_label,
     )

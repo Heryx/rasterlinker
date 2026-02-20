@@ -1,7 +1,7 @@
 from qgis.gui import QgsMapTool, QgsVertexMarker
 from qgis.core import QgsPointXY
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
-from PyQt5.QtWidgets import QMessageBox
 
 
 class GridSelectionTool(QgsMapTool):
@@ -22,29 +22,50 @@ class GridSelectionTool(QgsMapTool):
         self.snap_marker.hide()
 
     def canvasPressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            self.points = []
+            self._update_snap_marker(None)
+            if hasattr(self.parent_plugin, "on_grid_orientation_cancelled"):
+                self.parent_plugin.on_grid_orientation_cancelled()
+            self.canvas.unsetMapTool(self)
+            return
+
         point, snapped = self._map_point_with_snap(event)
         self._update_snap_marker(point if snapped else None)
 
         if len(self.points) == 0:
             self.points.append(point)
-            QMessageBox.information(None, "Point Selection", f"Origin point (x0, y0): {point.x()}, {point.y()}")
+            if hasattr(self.parent_plugin, "on_grid_orientation_point_captured"):
+                self.parent_plugin.on_grid_orientation_point_captured(1, point)
         elif len(self.points) == 1:
             self.points.append(point)
-            QMessageBox.information(None, "Point Selection", f"X-axis endpoint (x1, y0): {point.x()}, {point.y()}")
+            if hasattr(self.parent_plugin, "on_grid_orientation_point_captured"):
+                self.parent_plugin.on_grid_orientation_point_captured(2, point)
         elif len(self.points) == 2:
             self.points.append(point)
-            QMessageBox.information(None, "Point Selection", f"Y-axis endpoint (x0, y1): {point.x()}, {point.y()}")
+            if hasattr(self.parent_plugin, "on_grid_orientation_point_captured"):
+                self.parent_plugin.on_grid_orientation_point_captured(3, point)
             self.parent_plugin.set_grid_points(self.points)
             self.points = []
             self._update_snap_marker(None)
             self.canvas.setMapTool(None)
         else:
-            QMessageBox.warning(None, "Error", "Only 3 clicks are required to define the grid.")
             self.points = []
 
     def canvasMoveEvent(self, event):
         point, snapped = self._map_point_with_snap(event)
         self._update_snap_marker(point if snapped else None)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.points = []
+            self._update_snap_marker(None)
+            if hasattr(self.parent_plugin, "on_grid_orientation_cancelled"):
+                self.parent_plugin.on_grid_orientation_cancelled()
+            self.canvas.unsetMapTool(self)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _map_point_with_snap(self, event):
         if not bool(getattr(self.parent_plugin, "grid_use_snap", True)):
