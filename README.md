@@ -18,7 +18,7 @@ GeoSurvey Studio is designed to support non-invasive survey workflows and struct
 ## How to Cite
 If GeoSurvey Studio supports your work, please cite it as:
 
-Guarino, G. (2026). GeoSurvey Studio (v1.0.0) [QGIS plugin]. GitHub. https://github.com/Heryx/rasterlinker
+Guarino, G. (2026). GeoSurvey Studio (v1.0.1) [QGIS plugin]. GitHub. https://github.com/Heryx/rasterlinker
 
 Suggested in-text citation:
 - (Guarino, 2026)

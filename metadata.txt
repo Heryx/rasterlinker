@@ -6,7 +6,7 @@
 name=GeoSurvey Studio
 qgisMinimumVersion=3.0
 description=QGIS plugin to organize raster datasets in groups and create oriented survey grids from drawn areas.
-version=1.0.0
+version=1.0.1
 author=Giuseppe Guarino
 email=guarino.archeo@gmail.com
 
@@ -18,7 +18,7 @@ license=GPL-2.0-or-later
 # Recommended items:
 
 hasProcessingProvider=no
-changelog=1.0.0 - Stable release with dockable UI, oriented polygon-grid workflow, orthogonal/base snapping modes, live draw indicators, and GeoPackage export/reload.
+changelog=1.0.1 - Rebrand to GeoSurvey Studio, renamed core modules, and improved dock/layout stability for drawing and panel workflows.
 
 # Tags are comma separated with spaces allowed
 tags=python
