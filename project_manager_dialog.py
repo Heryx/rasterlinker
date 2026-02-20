@@ -2090,6 +2090,7 @@ class ProjectManagerDialog(QDialog):
             f"Models 3D: {len(catalog.get('models_3d', []))}\n"
             f"Radargrams: {len(catalog.get('radargrams', []))}\n"
             f"Timeslices: {len(catalog.get('timeslices', []))}\n"
+            f"Vector layers: {len(catalog.get('vector_layers', []))}\n"
             f"Links: {len(catalog.get('links', []))}\n"
             f"Catalog file: metadata/project_catalog.json"
         )

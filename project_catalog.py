@@ -19,7 +19,7 @@ PROJECT_FOLDERS = (
     "exports",
     "metadata",
 )
-CATALOG_VERSION = 3
+CATALOG_VERSION = 4
 # Legacy alias kept for backward compatibility with older code/sidecars.
 CATALOG_SCHEMA_VERSION = CATALOG_VERSION
 SURFER_GRID_EXTENSIONS = (".grd", ".gsag", ".gsbg")
@@ -36,6 +36,7 @@ def _default_catalog(project_root):
         "models_3d": [],
         "radargrams": [],
         "timeslices": [],
+        "vector_layers": [],
         "links": [],
         "raster_groups": [],
     }
@@ -129,10 +130,19 @@ def _migrate_catalog_v2_to_v3(project_root, data):
     return data
 
 
+def _migrate_catalog_v3_to_v4(project_root, data):
+    data = dict(data or {})
+    data.setdefault("vector_layers", [])
+    data["catalog_version"] = 4
+    data["schema_version"] = 4
+    return data
+
+
 _CATALOG_MIGRATIONS = {
     0: _migrate_catalog_v0_to_v1,
     1: _migrate_catalog_v1_to_v2,
     2: _migrate_catalog_v2_to_v3,
+    3: _migrate_catalog_v3_to_v4,
 }
 
 
@@ -219,6 +229,49 @@ def register_timeslices_batch(project_root, timeslice_records):
     return save_catalog(project_root, data)
 
 
+def register_vector_layer(project_root, vector_record):
+    """
+    Add or update a vector layer record in catalog.
+    Upsert policy:
+      1) same id -> update
+      2) same (project_path, layer_name) -> update
+      3) otherwise append
+    """
+    rec = normalize_vector_layer_record(vector_record)
+    data = load_catalog(project_root)
+    data.setdefault("vector_layers", [])
+    layers = data.get("vector_layers", [])
+
+    match = None
+    rid = rec.get("id")
+    if rid:
+        match = next((r for r in layers if r.get("id") == rid), None)
+    if match is None:
+        pth = os.path.abspath((rec.get("project_path") or "").strip()) if rec.get("project_path") else ""
+        lname = (rec.get("layer_name") or "").strip().lower()
+        if pth and lname:
+            match = next(
+                (
+                    r for r in layers
+                    if os.path.abspath((r.get("project_path") or "").strip()) == pth
+                    and (r.get("layer_name") or "").strip().lower() == lname
+                ),
+                None,
+            )
+
+    rec["updated_at"] = utc_now_iso()
+    if match is None:
+        layers.append(rec)
+    else:
+        created_at = match.get("created_at") or rec.get("created_at") or utc_now_iso()
+        match.update(rec)
+        match["created_at"] = created_at
+        match["updated_at"] = rec.get("updated_at")
+
+    save_catalog(project_root, data)
+    return rec
+
+
 def register_link(project_root, link_record):
     data = load_catalog(project_root)
     data["links"].append(normalize_link_record(link_record))
@@ -246,6 +299,7 @@ def ensure_catalog_schema(project_root, data, return_info=False):
     data["models_3d"] = [normalize_model_record(v) for v in data.get("models_3d", []) if isinstance(v, dict)]
     data["radargrams"] = [normalize_radargram_record(v) for v in data.get("radargrams", []) if isinstance(v, dict)]
     data["timeslices"] = [normalize_timeslice_record(v) for v in data.get("timeslices", []) if isinstance(v, dict)]
+    data["vector_layers"] = [normalize_vector_layer_record(v) for v in data.get("vector_layers", []) if isinstance(v, dict)]
     data["links"] = [normalize_link_record(v) for v in data.get("links", []) if isinstance(v, dict)]
     data["raster_groups"] = [normalize_raster_group_record(v) for v in data.get("raster_groups", []) if isinstance(v, dict)]
     if not data["raster_groups"]:
@@ -328,6 +382,24 @@ def normalize_timeslice_record(rec):
     rec.setdefault("z_grid_band", 1)
     rec.setdefault("z_grid_linked_at", None)
     rec.setdefault("imported_at", utc_now_iso())
+    return rec
+
+
+def normalize_vector_layer_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"vector_{utc_now_iso()}")
+    rec.setdefault("name", rec.get("layer_name") or "")
+    rec.setdefault("layer_name", rec.get("name") or "")
+    rec.setdefault("project_path", rec.get("path", ""))
+    rec.setdefault("source_path", rec.get("source_path", ""))
+    rec.setdefault("geometry_type", "unknown")
+    rec.setdefault("is_3d", False)
+    rec.setdefault("crs", None)
+    rec.setdefault("storage_mode", "gpkg" if str(rec.get("project_path") or "").lower().endswith(".gpkg") else "memory")
+    rec.setdefault("source_kind", "generic")
+    rec.setdefault("created_at", utc_now_iso())
+    rec.setdefault("updated_at", utc_now_iso())
+    rec.setdefault("notes", "")
     return rec
 
 
@@ -474,6 +546,8 @@ def validate_catalog(project_root, catalog_data=None):
 
     radargram_ids = set()
     timeslice_ids = set()
+    vector_ids = set()
+    vector_keys = set()
 
     for model in data.get("models_3d", []):
         if not model.get("project_path"):
@@ -512,6 +586,29 @@ def validate_catalog(project_root, catalog_data=None):
         z_grid_path = ts.get("z_grid_project_path")
         if z_grid_path and not os.path.exists(z_grid_path):
             warnings.append(f"Missing linked z-grid file: {z_grid_path}")
+
+    for vl in data.get("vector_layers", []):
+        vid = vl.get("id")
+        if vid:
+            if vid in vector_ids:
+                errors.append(f"Duplicate vector layer id: {vid}")
+            vector_ids.add(vid)
+        else:
+            errors.append("Vector layer missing id.")
+
+        pth = (vl.get("project_path") or "").strip()
+        lname = (vl.get("layer_name") or vl.get("name") or "").strip()
+        key = (os.path.abspath(pth).lower(), lname.lower()) if pth and lname else None
+        if key is not None:
+            if key in vector_keys:
+                warnings.append(f"Duplicate vector catalog entry for layer '{lname}' at path: {pth}")
+            vector_keys.add(key)
+
+        if not pth:
+            warnings.append(f"Vector layer without project_path: {vid or lname or 'unknown'}")
+            continue
+        if not os.path.exists(pth):
+            warnings.append(f"Missing vector layer file: {pth}")
 
     for ln in data.get("links", []):
         link_id = ln.get("id")

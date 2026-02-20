@@ -18,6 +18,7 @@ from project_catalog import (
     link_surfer_grid_into_project,
     load_catalog,
     register_timeslices_batch,
+    register_vector_layer,
     remove_timeslices_from_group,
     validate_catalog,
 )
@@ -73,6 +74,25 @@ class ProjectCatalogMetadataTest(unittest.TestCase):
             persisted = json.load(f)
         self.assertEqual(persisted.get("catalog_version"), CATALOG_VERSION)
 
+    def test_load_catalog_migrates_v3_to_v4_vector_layers(self):
+        path = catalog_path(self.project_root)
+        legacy_v3 = {
+            "catalog_version": 3,
+            "schema_version": 3,
+            "project_root": self.project_root,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "models_3d": [],
+            "radargrams": [],
+            "timeslices": [],
+            "links": [],
+            "raster_groups": [],
+        }
+        self._write_json(path, legacy_v3)
+        data = load_catalog(self.project_root)
+        self.assertEqual(data.get("catalog_version"), CATALOG_VERSION)
+        self.assertIsInstance(data.get("vector_layers"), list)
+
     def test_create_group_is_case_insensitive_unique(self):
         group_1, created_1 = create_raster_group(self.project_root, "TimeSlices")
         group_2, created_2 = create_raster_group(self.project_root, "timeslices")
@@ -109,6 +129,55 @@ class ProjectCatalogMetadataTest(unittest.TestCase):
         report = validate_catalog(self.project_root, data)
         self.assertTrue(any("Duplicate timeslice id: ts_dup" in msg for msg in report.get("errors", [])))
         self.assertTrue(any("Missing timeslice file:" in msg for msg in report.get("warnings", [])))
+
+    def test_register_vector_layer_upsert_and_validate(self):
+        gpkg_path = os.path.join(self.project_root, "vector_layers", "trace2d.gpkg")
+        self._touch(gpkg_path, "")
+
+        register_vector_layer(
+            self.project_root,
+            {
+                "id": "vector_trace2d",
+                "layer_name": "Trace2D",
+                "project_path": gpkg_path,
+                "geometry_type": "line",
+                "is_3d": False,
+                "source_kind": "trace2d",
+            },
+        )
+        register_vector_layer(
+            self.project_root,
+            {
+                "layer_name": "Trace2D",
+                "project_path": gpkg_path,
+                "geometry_type": "line",
+                "is_3d": True,
+                "source_kind": "trace3d",
+            },
+        )
+
+        data = load_catalog(self.project_root)
+        vectors = data.get("vector_layers", [])
+        self.assertEqual(len(vectors), 1)
+        self.assertEqual(vectors[0].get("source_kind"), "trace3d")
+        self.assertTrue(vectors[0].get("is_3d"))
+
+        broken = load_catalog(self.project_root)
+        broken["vector_layers"] = [
+            {
+                "id": "vec_dup",
+                "layer_name": "A",
+                "project_path": os.path.join(self.project_root, "vector_layers", "missing_a.gpkg"),
+            },
+            {
+                "id": "vec_dup",
+                "layer_name": "A",
+                "project_path": os.path.join(self.project_root, "vector_layers", "missing_a.gpkg"),
+            },
+        ]
+        report = validate_catalog(self.project_root, broken)
+        self.assertTrue(any("Duplicate vector layer id: vec_dup" in msg for msg in report.get("errors", [])))
+        self.assertTrue(any("Missing vector layer file:" in msg for msg in report.get("warnings", [])))
 
     def test_link_surfer_grid_into_project(self):
         ref = os.path.join(self.project_root, "timeslices_2d", "slice_01.tif")

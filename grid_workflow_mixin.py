@@ -38,7 +38,7 @@ class GridWorkflowMixin:
         self.pending_vector_storage_mode = "memory"
         return "memory"
 
-    def _persist_project_vector_layer_if_needed(self, layer, storage_mode=None):
+    def _persist_project_vector_layer_if_needed(self, layer, storage_mode=None, source_kind=None):
         if layer is None:
             return None
         mode = storage_mode or self._resolve_vector_storage_mode_for_grid()
@@ -49,7 +49,16 @@ class GridWorkflowMixin:
         if not callable(persist_fn):
             return layer
 
-        persisted, out_path, err = persist_fn(layer, layer.name() or "layer")
+        kind = (source_kind or "").strip()
+        if not kind:
+            try:
+                kind = str(layer.customProperty("rasterlinker/source_kind", "") or "").strip()
+            except Exception:
+                kind = ""
+        if not kind:
+            kind = "grid_vector"
+
+        persisted, out_path, err = persist_fn(layer, layer.name() or "layer", source_kind=kind)
         if persisted is None:
             QMessageBox.warning(
                 self._ui_parent(),
@@ -123,7 +132,12 @@ class GridWorkflowMixin:
             distance_y = float(self.dlg.lineEditDistanceY.text().strip())
             area_name, cell_prefix = self._get_grid_names_from_ui()
             polygon_layer.setName(area_name)
-            polygon_layer = self._persist_project_vector_layer_if_needed(polygon_layer, storage_mode=storage_mode)
+            polygon_layer.setCustomProperty("rasterlinker/source_kind", "grid_area")
+            polygon_layer = self._persist_project_vector_layer_if_needed(
+                polygon_layer,
+                storage_mode=storage_mode,
+                source_kind="grid_area",
+            )
             if not self._confirm_planar_units_for_grid():
                 return
 
@@ -136,7 +150,13 @@ class GridWorkflowMixin:
                 cell_prefix=cell_prefix,
                 max_cells=120000,
             )
-            grid_layer = self._persist_project_vector_layer_if_needed(grid_layer, storage_mode=storage_mode)
+            if grid_layer is not None:
+                grid_layer.setCustomProperty("rasterlinker/source_kind", "grid_cells")
+            grid_layer = self._persist_project_vector_layer_if_needed(
+                grid_layer,
+                storage_mode=storage_mode,
+                source_kind="grid_cells",
+            )
             self.last_area_layer = polygon_layer
             self.last_grid_layer = grid_layer
 
@@ -460,7 +480,13 @@ class GridWorkflowMixin:
                 grid_length_y=grid_length_y,
                 y_axis_point=y_axis_point,
             )
-            grid_layer = self._persist_project_vector_layer_if_needed(grid_layer, storage_mode=storage_mode)
+            if grid_layer is not None:
+                grid_layer.setCustomProperty("rasterlinker/source_kind", "grid_oriented")
+            grid_layer = self._persist_project_vector_layer_if_needed(
+                grid_layer,
+                storage_mode=storage_mode,
+                source_kind="grid_oriented",
+            )
             self.last_grid_layer = grid_layer
 
             QMessageBox.information(

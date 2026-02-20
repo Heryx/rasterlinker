@@ -262,7 +262,11 @@ class TraceBuild3DMixin:
         out_layer = mem_layer
         if storage_mode == "gpkg" and hasattr(self, "_persist_vector_layer_to_project_gpkg"):
             try:
-                persisted, _path, err = self._persist_vector_layer_to_project_gpkg(mem_layer, output_name)
+                persisted, _path, err = self._persist_vector_layer_to_project_gpkg(
+                    mem_layer,
+                    output_name,
+                    source_kind="trace3d",
+                )
             except Exception:
                 persisted, err = None, "Unexpected error while writing GeoPackage."
             if persisted is not None:

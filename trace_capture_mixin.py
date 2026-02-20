@@ -24,7 +24,13 @@ from qgis.core import (
 )
 from PyQt5.QtWidgets import QCheckBox
 
-from .project_catalog import ensure_project_structure, load_catalog, sanitize_filename, utc_now_iso
+from .project_catalog import (
+    ensure_project_structure,
+    load_catalog,
+    register_vector_layer,
+    sanitize_filename,
+    utc_now_iso,
+)
 
 
 class TraceCaptureMixin:
@@ -100,7 +106,7 @@ class TraceCaptureMixin:
                 return candidate
             i += 1
 
-    def _persist_vector_layer_to_project_gpkg(self, source_layer, layer_name):
+    def _persist_vector_layer_to_project_gpkg(self, source_layer, layer_name, source_kind="generic"):
         if source_layer is None or not source_layer.isValid():
             return None, None, "Invalid source layer."
         out_dir = self._trace_vector_output_dir()
@@ -132,6 +138,44 @@ class TraceCaptureMixin:
 
         loaded.setCustomProperty("rasterlinker/storage_mode", "gpkg")
         loaded.setCustomProperty("rasterlinker/storage_path", output_path)
+        loaded.setCustomProperty("rasterlinker/source_kind", str(source_kind or "generic"))
+
+        project_root = self._require_project_root(notify=False) if hasattr(self, "_require_project_root") else None
+        if project_root:
+            geom_map = {
+                QgsWkbTypes.PointGeometry: "point",
+                QgsWkbTypes.LineGeometry: "line",
+                QgsWkbTypes.PolygonGeometry: "polygon",
+            }
+            try:
+                geom_type = geom_map.get(loaded.geometryType(), "unknown")
+            except Exception:
+                geom_type = "unknown"
+            try:
+                is_3d = bool(QgsWkbTypes.hasZ(loaded.wkbType()))
+            except Exception:
+                is_3d = False
+            crs_authid = loaded.crs().authid() if loaded.crs().isValid() else None
+            vector_id = f"vector_{sanitize_filename(os.path.splitext(os.path.basename(output_path))[0])}"
+            try:
+                register_vector_layer(
+                    project_root,
+                    {
+                        "id": vector_id,
+                        "name": loaded.name(),
+                        "layer_name": loaded.name(),
+                        "project_path": output_path,
+                        "source_path": "",
+                        "geometry_type": geom_type,
+                        "is_3d": is_3d,
+                        "crs": crs_authid,
+                        "storage_mode": "gpkg",
+                        "source_kind": str(source_kind or "generic"),
+                    },
+                )
+            except Exception:
+                # Catalog registration should not block layer creation.
+                pass
         return loaded, output_path, ""
 
     def _is_line_layer(self, layer):
@@ -421,7 +465,11 @@ class TraceCaptureMixin:
 
         storage_mode = self._trace_vector_storage_mode()
         if storage_mode == "gpkg":
-            persisted, _out_path, _err = self._persist_vector_layer_to_project_gpkg(label_layer, layer_name)
+            persisted, _out_path, _err = self._persist_vector_layer_to_project_gpkg(
+                label_layer,
+                layer_name,
+                source_kind="vertex_depth_labels",
+            )
             if persisted is not None:
                 label_layer = persisted
 
@@ -667,7 +715,11 @@ class TraceCaptureMixin:
         layer = mem_layer
         created_path = ""
         if storage_mode == "gpkg":
-            persisted, created_path, err = self._persist_vector_layer_to_project_gpkg(mem_layer, layer_name)
+            persisted, created_path, err = self._persist_vector_layer_to_project_gpkg(
+                mem_layer,
+                layer_name,
+                source_kind="trace2d",
+            )
             if persisted is None:
                 fallback = QMessageBox.question(
                     self._ui_parent(),
