@@ -187,6 +187,7 @@ class CatalogGroupMixin:
                     )
                     self.dlg.rasterListWidget.addItem(item)
             self._update_navigation_controls()
+            self._restore_raster_selection_from_settings()
         except Exception as e:
             QMessageBox.critical(self.dlg, "Error", f"Error while loading rasters: {e}")
 
@@ -224,6 +225,54 @@ class CatalogGroupMixin:
         self.load_raster(show_message=False)
         if hasattr(self, "_save_ui_settings"):
             self._save_ui_settings()
+
+    def _restore_raster_selection_from_settings(self):
+        if self.dlg is None or not hasattr(self.dlg, "rasterListWidget"):
+            return False
+        widget = self.dlg.rasterListWidget
+        if widget.count() <= 0:
+            return False
+
+        selected_ids = list(getattr(self, "_saved_selected_timeslice_ids", []) or [])
+        current_id = str(getattr(self, "_saved_current_timeslice_id", "") or "").strip()
+        saved_row = int(getattr(self, "_saved_current_raster_row", -1) or -1)
+        selected_set = {str(v).strip() for v in selected_ids if str(v).strip()}
+
+        selected_items = []
+        widget.blockSignals(True)
+        try:
+            widget.clearSelection()
+            for idx in range(widget.count()):
+                item = widget.item(idx)
+                payload = item.data(Qt.UserRole) if item is not None else None
+                tid = str(payload.get("timeslice_id") or "").strip() if isinstance(payload, dict) else ""
+                if tid and tid in selected_set:
+                    item.setSelected(True)
+                    selected_items.append(item)
+
+            if not selected_items and current_id:
+                for idx in range(widget.count()):
+                    item = widget.item(idx)
+                    payload = item.data(Qt.UserRole) if item is not None else None
+                    tid = str(payload.get("timeslice_id") or "").strip() if isinstance(payload, dict) else ""
+                    if tid == current_id:
+                        item.setSelected(True)
+                        selected_items.append(item)
+                        break
+
+            if selected_items:
+                widget.setCurrentItem(selected_items[0])
+                self._update_navigation_controls(widget.row(selected_items[0]))
+            elif 0 <= saved_row < widget.count():
+                widget.setCurrentRow(saved_row)
+                cur_item = widget.currentItem()
+                if cur_item is not None:
+                    cur_item.setSelected(True)
+                    selected_items = [cur_item]
+                    self._update_navigation_controls(saved_row)
+        finally:
+            widget.blockSignals(False)
+        return bool(selected_items)
 
     def _update_navigation_controls(self, value=None):
         if self.dlg is None:

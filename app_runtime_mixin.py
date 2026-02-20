@@ -440,6 +440,17 @@ class AppRuntimeMixin:
         self._saved_current_group_id = str(
             self.settings.value(self._settings_key("ui/current_group_id"), "") or ""
         ).strip()
+        self._saved_selected_timeslice_ids = self._split_setting_list(
+            self.settings.value(self._settings_key("ui/selected_timeslice_ids"), "")
+        )
+        self._saved_current_timeslice_id = str(
+            self.settings.value(self._settings_key("ui/current_timeslice_id"), "") or ""
+        ).strip()
+        saved_raster_row = self.settings.value(self._settings_key("ui/current_raster_row"), -1)
+        try:
+            self._saved_current_raster_row = int(saved_raster_row)
+        except Exception:
+            self._saved_current_raster_row = -1
         nav_index = self.settings.value(self._settings_key("ui/navigation_index"), 0)
         try:
             nav_index = int(nav_index)
@@ -488,6 +499,34 @@ class AppRuntimeMixin:
             "||".join(dict.fromkeys(selected_group_ids)),
         )
         self.settings.setValue(self._settings_key("ui/current_group_id"), current_group_id)
+        selected_timeslice_ids = []
+        current_timeslice_id = ""
+        current_raster_row = -1
+        if self.dlg is not None and hasattr(self.dlg, "rasterListWidget"):
+            for item in self.dlg.rasterListWidget.selectedItems():
+                payload = item.data(Qt.UserRole) if item is not None else None
+                if isinstance(payload, dict):
+                    tid = str(payload.get("timeslice_id") or "").strip()
+                    if tid:
+                        selected_timeslice_ids.append(tid)
+            current_item = self.dlg.rasterListWidget.currentItem()
+            if current_item is not None:
+                payload = current_item.data(Qt.UserRole)
+                if isinstance(payload, dict):
+                    current_timeslice_id = str(payload.get("timeslice_id") or "").strip()
+                current_raster_row = int(self.dlg.rasterListWidget.currentRow())
+        self.settings.setValue(
+            self._settings_key("ui/selected_timeslice_ids"),
+            "||".join(dict.fromkeys(selected_timeslice_ids)),
+        )
+        self.settings.setValue(self._settings_key("ui/current_timeslice_id"), current_timeslice_id)
+        self.settings.setValue(self._settings_key("ui/current_raster_row"), int(current_raster_row))
+        # Keep in-memory snapshot aligned with current UI.
+        self._saved_group_selection_ids = list(dict.fromkeys(selected_group_ids))
+        self._saved_current_group_id = current_group_id
+        self._saved_selected_timeslice_ids = list(dict.fromkeys(selected_timeslice_ids))
+        self._saved_current_timeslice_id = current_timeslice_id
+        self._saved_current_raster_row = int(current_raster_row)
         if self.dlg is not None:
             self.settings.setValue(self._settings_key("ui/navigation_index"), int(self.dlg.Dial.value()))
         if self.tools_tabs is not None:
@@ -529,6 +568,9 @@ class AppRuntimeMixin:
             self.tools_tabs.currentChanged.connect(self._save_ui_settings)
         if hasattr(self.dlg, "groupListWidget"):
             self.dlg.groupListWidget.itemSelectionChanged.connect(self._save_ui_settings)
+        if hasattr(self.dlg, "rasterListWidget"):
+            self.dlg.rasterListWidget.itemSelectionChanged.connect(self._save_ui_settings)
+            self.dlg.rasterListWidget.currentRowChanged.connect(self._save_ui_settings)
         if hasattr(self.dlg, "Dial"):
             self.dlg.Dial.valueChanged.connect(self._save_ui_settings)
         if hasattr(self.dlg, "dial2"):
