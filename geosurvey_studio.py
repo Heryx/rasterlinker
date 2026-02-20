@@ -40,12 +40,14 @@ from .catalog_tools_mixin import CatalogToolsMixin
 from .grid_workflow_mixin import GridWorkflowMixin
 from .ui_layout_mixin import UiLayoutMixin
 from .app_runtime_mixin import AppRuntimeMixin
+from .update_checker_mixin import UpdateCheckerMixin
 
 from .resources import *
 import os.path
 
 
 class GeoSurveyStudioPlugin(
+    UpdateCheckerMixin,
     AppRuntimeMixin,
     CatalogGroupMixin,
     CatalogToolsMixin,
@@ -153,6 +155,8 @@ class GeoSurveyStudioPlugin(
         self.trace_z_grid_cache = {}
         self.trace_missing_z_prompt_shown = False
         self.trace_allow_missing_z_for_session = False
+        self.check_updates_action = None
+        self._update_checked_this_session = False
 
     # Translation helper
     def tr(self, message):
@@ -191,6 +195,16 @@ class GeoSurveyStudioPlugin(
         pencil_icon = self._qgis_theme_icon("mActionToggleEditing.svg", "mActionAddFeature.svg")
         if pencil_icon is not None and not pencil_icon.isNull():
             self.trace_info_action.setIcon(pencil_icon)
+
+        self.check_updates_action = self.add_action(
+            icon_path,
+            text=self.tr(u'Check for Updates'),
+            callback=self.check_for_updates_manual,
+            parent=self.iface.mainWindow(),
+        )
+        refresh_icon = self._qgis_theme_icon("mActionRefresh.svg", "mActionReload.svg")
+        if refresh_icon is not None and not refresh_icon.isNull():
+            self.check_updates_action.setIcon(refresh_icon)
         self.first_start = True
 
     def unload(self):

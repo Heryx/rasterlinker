@@ -174,6 +174,11 @@ class AppRuntimeMixin:
                 "No active project linked. Open 'GeoSurvey Studio Project Manager' and create/open a project.",
                 duration=8,
             )
+        if hasattr(self, "maybe_check_for_updates_on_start"):
+            try:
+                self.maybe_check_for_updates_on_start()
+            except Exception:
+                pass
 
     def open_project_manager(self):
         if self.project_manager_dialog is None:
