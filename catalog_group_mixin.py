@@ -32,6 +32,42 @@ from .background_tasks import (
 
 
 class CatalogGroupMixin:
+    def _sync_qgis_group_visibility_with_selection(self):
+        """
+        Keep QGIS group tree visibility aligned with Group list selection.
+        - Single selection: only that group is visible.
+        - Multi selection: only selected groups are visible.
+        - No selection: all plugin groups are hidden.
+        """
+        if self.dlg is None or not hasattr(self.dlg, "groupListWidget"):
+            return
+
+        selected_names = {
+            str(item.text() or "").strip()
+            for item in self.dlg.groupListWidget.selectedItems()
+            if str(item.text() or "").strip()
+        }
+
+        # Ensure selected groups exist in layer tree before visibility sync.
+        for name in selected_names:
+            try:
+                self._get_or_create_plugin_qgis_group(name)
+            except Exception:
+                pass
+
+        plugin_root = self._find_plugin_root_group()
+        if plugin_root is None:
+            return
+
+        for child in plugin_root.children():
+            if not hasattr(child, "setItemVisibilityChecked"):
+                continue
+            try:
+                child_name = str(child.name() or "").strip()
+                child.setItemVisibilityChecked(bool(selected_names) and child_name in selected_names)
+            except Exception:
+                pass
+
     def _restore_group_selection_from_settings(self, trigger_update=True):
         if self.dlg is None or not hasattr(self.dlg, "groupListWidget"):
             return False
@@ -215,14 +251,20 @@ class CatalogGroupMixin:
             self.dlg.rasterListWidget.clear()
             self._set_name_raster_label(None)
             self._update_navigation_controls(0)
+            self._sync_qgis_group_visibility_with_selection()
             if hasattr(self, "_save_ui_settings"):
                 self._save_ui_settings()
             return
         self.populate_raster_list_from_selected_groups()
-        self._update_navigation_controls()
+        nav_value = self.dlg.rasterListWidget.currentRow()
+        if nav_value < 0:
+            nav_value = 0
+        self._update_navigation_controls(nav_value)
         lines = self._build_name_lines_for_selected_groups()
         self._render_name_raster_lines(lines)
         self.load_raster(show_message=False)
+        self._sync_qgis_group_visibility_with_selection()
+        self.update_visibility_with_dial(nav_value)
         if hasattr(self, "_save_ui_settings"):
             self._save_ui_settings()
 
@@ -235,7 +277,6 @@ class CatalogGroupMixin:
 
         selected_ids = list(getattr(self, "_saved_selected_timeslice_ids", []) or [])
         current_id = str(getattr(self, "_saved_current_timeslice_id", "") or "").strip()
-        saved_row = int(getattr(self, "_saved_current_raster_row", -1) or -1)
         selected_set = {str(v).strip() for v in selected_ids if str(v).strip()}
 
         selected_items = []
@@ -263,13 +304,15 @@ class CatalogGroupMixin:
             if selected_items:
                 widget.setCurrentItem(selected_items[0])
                 self._update_navigation_controls(widget.row(selected_items[0]))
-            elif 0 <= saved_row < widget.count():
-                widget.setCurrentRow(saved_row)
+            else:
+                # Do not fallback to globally saved row from another group:
+                # default to first raster for current selection context.
+                widget.setCurrentRow(0)
                 cur_item = widget.currentItem()
                 if cur_item is not None:
                     cur_item.setSelected(True)
                     selected_items = [cur_item]
-                    self._update_navigation_controls(saved_row)
+                self._update_navigation_controls(0)
         finally:
             widget.blockSignals(False)
         return bool(selected_items)
@@ -304,6 +347,7 @@ class CatalogGroupMixin:
             QMessageBox.warning(self.dlg, "Error", "Select at least one group before using the dial.")
             return
 
+        self._sync_qgis_group_visibility_with_selection()
         self._update_navigation_controls(value)
         value = self.dlg.Dial.value()
 
