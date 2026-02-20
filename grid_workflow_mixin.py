@@ -4,6 +4,8 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QDialog,
     QLabel,
+    QFormLayout,
+    QLineEdit,
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
@@ -26,6 +28,49 @@ from .polygon_draw_tool import PolygonDrawTool
 
 
 class GridWorkflowMixin:
+    def _orientation_main_fields_map(self):
+        dlg = getattr(self, "dlg", None)
+        if dlg is None:
+            return {}
+        return {
+            "x0": getattr(dlg, "lineEditX0Y0", None),
+            "x1": getattr(dlg, "lineEditX1Y0", None),
+            "y0": getattr(dlg, "lineEditY0", None),
+            "y1": getattr(dlg, "lineEditX0Y1", None),
+        }
+
+    def _sync_orientation_helper_fields_from_main(self):
+        edits = getattr(self, "orientation_helper_edits", None)
+        if not isinstance(edits, dict):
+            return
+        if getattr(self, "_orientation_helper_syncing", False):
+            return
+        self._orientation_helper_syncing = True
+        try:
+            for key, widget in self._orientation_main_fields_map().items():
+                helper_edit = edits.get(key)
+                if helper_edit is None or widget is None:
+                    continue
+                txt = widget.text()
+                if helper_edit.text() != txt:
+                    helper_edit.setText(txt)
+        finally:
+            self._orientation_helper_syncing = False
+
+    def _sync_main_field_from_orientation_helper(self, key, value):
+        if getattr(self, "_orientation_helper_syncing", False):
+            return
+        target = self._orientation_main_fields_map().get(key)
+        if target is None:
+            return
+        self._orientation_helper_syncing = True
+        try:
+            text_value = "" if value is None else str(value)
+            if target.text() != text_value:
+                target.setText(text_value)
+        finally:
+            self._orientation_helper_syncing = False
+
     def _get_or_create_cell_grids_group(self):
         """
         Return a dedicated group for generated grid/cell layers, separated from time-slice groups.
@@ -424,6 +469,30 @@ class GridWorkflowMixin:
         status_label.setWordWrap(True)
         layout.addWidget(status_label)
 
+        dims_title = QLabel("Grid dimensions (editable):")
+        layout.addWidget(dims_title)
+
+        dims_form = QFormLayout()
+        dims_form.setContentsMargins(0, 0, 0, 0)
+        dims_form.setHorizontalSpacing(8)
+        dims_form.setVerticalSpacing(6)
+        helper_edits = {}
+        for key, label_txt in (("x0", "x0"), ("x1", "x1"), ("y0", "y0"), ("y1", "y1")):
+            edit = QLineEdit(dialog)
+            edit.setPlaceholderText(label_txt)
+            edit.setToolTip(f"Edit {label_txt} and it will sync with the main panel.")
+            edit.textEdited.connect(lambda txt, k=key: self._sync_main_field_from_orientation_helper(k, txt))
+            dims_form.addRow(f"{label_txt}:", edit)
+            helper_edits[key] = edit
+        layout.addLayout(dims_form)
+
+        hint_label = QLabel(
+            "Tip: dimensions are computed from |x1-x0| and |y1-y0| before grid creation."
+        )
+        hint_label.setWordWrap(True)
+        hint_label.setStyleSheet("color: #606060;")
+        layout.addWidget(hint_label)
+
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(8)
@@ -447,12 +516,21 @@ class GridWorkflowMixin:
 
         self.orientation_helper_dialog = dialog
         self.orientation_helper_status_label = status_label
+        self.orientation_helper_edits = helper_edits
+        self._orientation_helper_syncing = False
+
+        # Keep helper fields aligned with the main panel values.
+        for widget in self._orientation_main_fields_map().values():
+            if widget is not None:
+                widget.textChanged.connect(self._sync_orientation_helper_fields_from_main)
+        self._sync_orientation_helper_fields_from_main()
         return dialog
 
     def _show_orientation_helper_dialog(self):
         dialog = self._ensure_orientation_helper_dialog()
         if dialog is None:
             return
+        self._sync_orientation_helper_fields_from_main()
         self._set_orientation_status(
             getattr(self, "orientation_status_label", None).text()
             if getattr(self, "orientation_status_label", None) is not None
@@ -595,15 +673,10 @@ class GridWorkflowMixin:
         if chosen is None:
             return
         if self._get_grid_dimensions_from_fields() is None:
-            QMessageBox.warning(
-                self.dlg,
-                "Missing Grid Dimensions",
-                (
-                    "Insert valid numeric values in x0, x1, y0, y1 before setting orientation.\n"
-                    "Example: x0=0, x1=10, y0=0, y1=10."
-                ),
+            self._notify_info(
+                "Set Orientation active: enter valid x0/x1/y0/y1 before the final click.",
+                duration=8,
             )
-            return
         self._set_orientation_status(
             "Orientation active | Step 1/3: click P0 (origin), then X1, then Y1."
         )

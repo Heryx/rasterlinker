@@ -95,6 +95,8 @@ class RasterLinkerPlugin(
         self.orientation_status_label = None
         self.orientation_helper_dialog = None
         self.orientation_helper_status_label = None
+        self.orientation_helper_edits = {}
+        self._orientation_helper_syncing = False
         self.internal_grid_checkbox = None
         self.name_raster_panel = None
         self.name_raster_title = None
@@ -248,5 +250,7 @@ class RasterLinkerPlugin(
                 pass
             self.orientation_helper_dialog = None
             self.orientation_helper_status_label = None
+            self.orientation_helper_edits = {}
+            self._orientation_helper_syncing = False
         self.trace_z_grid_cache = {}
 
