@@ -1,4 +1,4 @@
-RasterLinker is a QGIS plugin developed to streamline the management and visualization of grouped raster datasets, particularly suited for GPR and grid-based survey workflows.
+GeoSurvey Studio is a QGIS plugin developed to streamline the management and visualization of grouped raster datasets, particularly suited for GPR and grid-based survey workflows.
 
 Key Features:
 - Recursive detection of layer groups and subgroups
@@ -13,12 +13,12 @@ Key Features:
 The plugin enhances structured raster navigation within complex QGIS projects, 
 especially where multiple raster slices or time/depth grids must be inspected sequentially.
 
-RasterLinker is designed to support non-invasive survey workflows and structured spatial analysis environments.
+GeoSurvey Studio is designed to support non-invasive survey workflows and structured spatial analysis environments.
 
 ## How to Cite
-If RasterLinker supports your work, please cite it as:
+If GeoSurvey Studio supports your work, please cite it as:
 
-Guarino, G. (2026). RasterLinker (v1.0.0) [QGIS plugin]. GitHub. https://github.com/Heryx/rasterlinker
+Guarino, G. (2026). GeoSurvey Studio (v1.0.0) [QGIS plugin]. GitHub. https://github.com/Heryx/rasterlinker
 
 Suggested in-text citation:
 - (Guarino, 2026)

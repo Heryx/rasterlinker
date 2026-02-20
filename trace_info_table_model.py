@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Qt table model for RasterLinker line info rows."""
+"""Qt table model for GeoSurvey Studio line info rows."""
 
 from qgis.PyQt.QtCore import QAbstractTableModel, Qt
 

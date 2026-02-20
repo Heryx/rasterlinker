@@ -45,7 +45,7 @@ from .resources import *
 import os.path
 
 
-class RasterLinkerPlugin(
+class GeoSurveyStudioPlugin(
     AppRuntimeMixin,
     CatalogGroupMixin,
     CatalogToolsMixin,
@@ -63,14 +63,15 @@ class RasterLinkerPlugin(
         self.iface = iface
         self.plugin_dir = os.path.dirname(__file__)
         self.actions = []
-        self.menu = self.tr(u'&RasterLinker')
+        self.brand_name = "GeoSurvey Studio"
+        self.menu = self.tr(u'&GeoSurvey Studio')
         self.first_start = None
         self.dlg = None
         self.dock_widget = None
         self.settings = QSettings()
-        self.settings_group = "RasterLinker"
-        self.settings_key_active_project = "RasterLinker/active_project_root"
-        self.settings_key_default_import_crs = "RasterLinker/default_import_crs_authid"
+        self.settings_group = "GeoSurveyStudio"
+        self.settings_key_active_project = "GeoSurveyStudio/active_project_root"
+        self.settings_key_default_import_crs = "GeoSurveyStudio/default_import_crs_authid"
         self.grid_use_snap = True
         self.grid_snap_mode = "all"
         self.grid_snap_tolerance = 12.0
@@ -119,7 +120,7 @@ class RasterLinkerPlugin(
         self.last_grid_layer = None
         self.pending_vector_storage_mode = None
         self.project_manager_dialog = None
-        self.plugin_layer_root_name = "RasterLinker"
+        self.plugin_layer_root_name = "GeoSurvey Studio"
         self.trace_toolbar = None
         self.trace_info_action = None
         self.trace_toolbar_actions = {}
@@ -155,7 +156,7 @@ class RasterLinkerPlugin(
 
     # Translation helper
     def tr(self, message):
-        return QCoreApplication.translate('RasterLinker', message)
+        return QCoreApplication.translate('GeoSurveyStudio', message)
 
     # Add actions to the toolbar/menu
     def add_action(self, icon_path, text, callback, parent=None):
@@ -170,10 +171,10 @@ class RasterLinkerPlugin(
     def initGui(self):
         """Initialize the GUI."""
         icon_path = ':/plugins/gpr_linker/icon.png'
-        self.add_action(icon_path, text=self.tr(u'Raster Linker'), callback=self.run, parent=self.iface.mainWindow())
+        self.add_action(icon_path, text=self.tr(u'GeoSurvey Studio'), callback=self.run, parent=self.iface.mainWindow())
         pm_action = self.add_action(
             icon_path,
-            text=self.tr(u'RasterLinker Project Manager'),
+            text=self.tr(u'GeoSurvey Studio Project Manager'),
             callback=self.open_project_manager,
             parent=self.iface.mainWindow(),
         )
@@ -197,7 +198,7 @@ class RasterLinkerPlugin(
         if self.dlg is not None:
             self._save_ui_settings()
         for action in self.actions:
-            self.iface.removePluginMenu(self.tr(u'&RasterLinker'), action)
+            self.iface.removePluginMenu(self.tr(u'&GeoSurvey Studio'), action)
             self.iface.removeToolBarIcon(action)
         if self.dock_widget is not None:
             self.iface.removeDockWidget(self.dock_widget)

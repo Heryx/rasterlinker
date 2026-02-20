@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Vector layer manager for RasterLinker project catalog.
+Vector layer manager for GeoSurvey Studio project catalog.
 """
 
 import os
@@ -30,7 +30,7 @@ class VectorLayerManagerDialog(QDialog):
         self.on_updated = on_updated
         self._catalog = {}
         self._records = []
-        self.setWindowTitle("RasterLinker Vector Layer Manager")
+        self.setWindowTitle("GeoSurvey Studio Vector Layer Manager")
         self.resize(1100, 460)
         self._build_ui()
         self._refresh()

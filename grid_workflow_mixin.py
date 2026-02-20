@@ -96,7 +96,7 @@ class GridWorkflowMixin:
 
     def _place_layer_in_cell_grids_group(self, layer):
         """
-        Move a layer-tree node into RasterLinker > Cell Grids.
+        Move a layer-tree node into GeoSurvey Studio > Cell Grids.
         Keeps the map layer itself intact and only re-parents the tree node.
         """
         if layer is None:
@@ -336,7 +336,7 @@ class GridWorkflowMixin:
 
 
     def _notify_info(self, message, duration=6):
-        self.iface.messageBar().pushMessage("RasterLinker", message, level=Qgis.Info, duration=duration)
+        self.iface.messageBar().pushMessage("GeoSurvey Studio", message, level=Qgis.Info, duration=duration)
 
     def _ui_parent(self):
         return self.dlg if self.dlg is not None else self.iface.mainWindow()

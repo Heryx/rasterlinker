@@ -48,7 +48,7 @@ class TimesliceImportTask(CallbackTask):
       }
     """
 
-    def __init__(self, project_root, records, description="RasterLinker: Importing time-slices"):
+    def __init__(self, project_root, records, description="GeoSurvey Studio: Importing time-slices"):
         super().__init__(description)
         self.project_root = project_root
         self.records = list(records or [])
@@ -136,7 +136,7 @@ class LasLazImportTask(CallbackTask):
     Metadata registration and map loading are handled in UI-thread callback.
     """
 
-    def __init__(self, project_root, file_paths, description="RasterLinker: Importing LAS/LAZ"):
+    def __init__(self, project_root, file_paths, description="GeoSurvey Studio: Importing LAS/LAZ"):
         super().__init__(description)
         self.project_root = project_root
         self.file_paths = list(file_paths or [])
@@ -192,7 +192,7 @@ class RadargramImportTask(CallbackTask):
     Metadata registration and georef classification are handled in UI-thread callback.
     """
 
-    def __init__(self, project_root, file_paths, description="RasterLinker: Importing radargrams"):
+    def __init__(self, project_root, file_paths, description="GeoSurvey Studio: Importing radargrams"):
         super().__init__(description)
         self.project_root = project_root
         self.file_paths = list(file_paths or [])
@@ -259,7 +259,7 @@ class CatalogCleanupTask(CallbackTask):
     removes missing model/radargram files from catalog.
     """
 
-    def __init__(self, project_root, description="RasterLinker: Cleaning catalog"):
+    def __init__(self, project_root, description="GeoSurvey Studio: Cleaning catalog"):
         super().__init__(description)
         self.project_root = project_root
         self.removed_models = 0

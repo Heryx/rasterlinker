@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Trace labeling mixin for RasterLinker plugin."""
+"""Trace labeling mixin for GeoSurvey Studio plugin."""
 
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (

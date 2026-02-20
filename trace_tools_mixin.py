@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Trace tools mixin for RasterLinker plugin."""
+"""Trace tools mixin for GeoSurvey Studio plugin."""
 
 import os
 
@@ -68,7 +68,7 @@ class TraceToolsMixin:
                 "details": (
                     f"Project linked: {project_root}"
                     if project_ok
-                    else "No active RasterLinker project. Open Project Manager first."
+                    else "No active GeoSurvey Studio project. Open Project Manager first."
                 ),
             }
         )
@@ -183,7 +183,7 @@ class TraceToolsMixin:
         first_missing = next((s for s in status if not s.get("ok")), None)
 
         lines = [
-            "RasterLinker End-to-End Workflow Check",
+            "GeoSurvey Studio End-to-End Workflow Check",
             "",
             f"Passed: {passed}/{total}",
             "",
@@ -330,9 +330,9 @@ class TraceToolsMixin:
         if self.trace_toolbar is not None:
             return
         self._ensure_trace_actions()
-        toolbar = self.iface.addToolBar("RasterLinker Trace")
-        toolbar.setObjectName("RasterLinkerTraceToolbar")
-        toolbar.setToolTip("RasterLinker 2D/3D trace tools")
+        toolbar = self.iface.addToolBar("GeoSurvey Studio Trace")
+        toolbar.setObjectName("GeoSurveyStudioTraceToolbar")
+        toolbar.setToolTip("GeoSurvey Studio 2D/3D trace tools")
         for name in (
             "New Line Layer",
             "Draw 2D Line",

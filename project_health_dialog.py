@@ -219,7 +219,7 @@ class ProjectHealthDialog(QDialog):
         infos = list(issues.get("info", []) or [])
 
         lines = [
-            "RasterLinker Project Health Report",
+            "GeoSurvey Studio Project Health Report",
             "",
             f"Project: {self.project_root}",
             "",

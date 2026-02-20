@@ -11,9 +11,9 @@ from PyQt5.QtWidgets import QDialog
 from PyQt5.QtCore import Qt
 from .gpr_linker_dialog_base import Ui_Dialog
 
-class RasterLinkerDialog(QDialog, Ui_Dialog):
+class GeoSurveyStudioDialog(QDialog, Ui_Dialog):
     def __init__(self, parent=None):
-        super(RasterLinkerDialog, self).__init__(parent)
+        super(GeoSurveyStudioDialog, self).__init__(parent)
         self.setupUi(self)
         self.on_resized = None
 
@@ -22,10 +22,10 @@ class RasterLinkerDialog(QDialog, Ui_Dialog):
         if event.key() == Qt.Key_Escape:
             event.accept()
             return
-        super(RasterLinkerDialog, self).keyPressEvent(event)
+        super(GeoSurveyStudioDialog, self).keyPressEvent(event)
 
     def resizeEvent(self, event):
-        super(RasterLinkerDialog, self).resizeEvent(event)
+        super(GeoSurveyStudioDialog, self).resizeEvent(event)
         if callable(self.on_resized):
             try:
                 self.on_resized(event.size())

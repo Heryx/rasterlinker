@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Trace editing/capture mixin for RasterLinker plugin."""
+"""Trace editing/capture mixin for GeoSurvey Studio plugin."""
 
 from qgis.PyQt.QtWidgets import QMessageBox, QInputDialog
 from qgis.core import QgsProject, QgsVectorLayer

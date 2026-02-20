@@ -26,11 +26,11 @@
 
 # noinspection PyPep8Naming
 def classFactory(iface):  # pylint: disable=invalid-name
-    """Load RasterLinkerPlugin class from file gpr_linker.
+    """Load GeoSurvey Studio plugin class from file gpr_linker.
 
     :param iface: A QGIS interface instance.
     :type iface: QgsInterface
     """
     #
-    from .gpr_linker import RasterLinkerPlugin
-    return RasterLinkerPlugin(iface)
+    from .gpr_linker import GeoSurveyStudioPlugin
+    return GeoSurveyStudioPlugin(iface)

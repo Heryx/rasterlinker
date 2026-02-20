@@ -2,7 +2,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QAbstractItemView, QDockWidget
 from PyQt5.QtWidgets import QPushButton, QSizePolicy, QCheckBox
 
-from .gpr_linker_dialog import RasterLinkerDialog
+from .gpr_linker_dialog import GeoSurveyStudioDialog
 from .project_manager_dialog import ProjectManagerDialog
 
 
@@ -21,10 +21,10 @@ class AppRuntimeMixin:
         """Esegue il plugin."""
         if self.first_start:
             self.first_start = False
-            self.dlg = RasterLinkerDialog()
+            self.dlg = GeoSurveyStudioDialog()
             self.dlg.on_resized = self._on_dialog_resized
-            self.dock_widget = QDockWidget(self.tr(u"Raster Linker"), self.iface.mainWindow())
-            self.dock_widget.setObjectName("RasterLinkerDockWidget")
+            self.dock_widget = QDockWidget(self.tr(u"GeoSurvey Studio"), self.iface.mainWindow())
+            self.dock_widget.setObjectName("GeoSurveyStudioDockWidget")
             self.dock_widget.setFeatures(
                 QDockWidget.DockWidgetMovable
                 | QDockWidget.DockWidgetFloatable
@@ -171,7 +171,7 @@ class AppRuntimeMixin:
             self.refresh_trace_info_table()
         if not self._active_project_root():
             self._notify_info(
-                "No active project linked. Open 'RasterLinker Project Manager' and create/open a project.",
+                "No active project linked. Open 'GeoSurvey Studio Project Manager' and create/open a project.",
                 duration=8,
             )
 

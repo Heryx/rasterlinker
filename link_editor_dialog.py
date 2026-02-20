@@ -27,7 +27,7 @@ class LinkEditorDialog(QDialog):
         self.project_root = project_root
         self._catalog = {}
         self._current_links = []
-        self.setWindowTitle("RasterLinker Link Editor")
+        self.setWindowTitle("GeoSurvey Studio Link Editor")
         self.resize(980, 460)
         self._build_ui()
         self._refresh()

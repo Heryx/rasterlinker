@@ -3,14 +3,14 @@
 # This file should be included when you package your plugin.# Mandatory items:
 
 [general]
-name=RasterLinker
+name=GeoSurvey Studio
 qgisMinimumVersion=3.0
 description=QGIS plugin to organize raster datasets in groups and create oriented survey grids from drawn areas.
 version=1.0.0
 author=Giuseppe Guarino
 email=guarino.archeo@gmail.com
 
-about=RasterLinker helps users manage raster sequences (GPR, geophysical, satellite) and generate oriented polygon grids for survey planning. Developed by Giuseppe Guarino. Suggested citation text and documentation may be shared under CC BY 4.0. Plugin source code remains distributed under GPL-2.0-or-later.
+about=GeoSurvey Studio helps users manage raster sequences (GPR, geophysical, satellite) and generate oriented polygon grids for survey planning. Developed by Giuseppe Guarino. Suggested citation text and documentation may be shared under CC BY 4.0. Plugin source code remains distributed under GPL-2.0-or-later.
 license=GPL-2.0-or-later
 
 # End of mandatory metadata

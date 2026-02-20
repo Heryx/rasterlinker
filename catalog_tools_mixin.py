@@ -59,7 +59,7 @@ class CatalogToolsMixin:
                 QMessageBox.warning(
                     self.dlg,
                     "Project Required",
-                    "Open RasterLinker Project Manager and create/open a project first.",
+                    "Open GeoSurvey Studio Project Manager and create/open a project first.",
                 )
             return None
         return project_root
@@ -301,23 +301,23 @@ class CatalogToolsMixin:
                 layer_name = layer.name() if layer is not None else "Unknown layer"
                 detail = f"{layer_name}: {reason or 'unknown reason'}"
                 failed.append(detail)
-                QgsMessageLog.logMessage(detail, "RasterLinker", level=Qgis.Warning)
+                QgsMessageLog.logMessage(detail, "GeoSurvey Studio", level=Qgis.Warning)
 
         if total == 0:
             QMessageBox.information(
                 self.dlg,
                 "Enhance Min/Max",
-                "No loaded images found in RasterLinker groups.",
+                "No loaded images found in GeoSurvey Studio groups.",
             )
             return
 
         self.iface.messageBar().pushInfo(
-            "RasterLinker",
+            "GeoSurvey Studio",
             f"Enhance Min/Max applied: {enhanced}/{total} layers.",
         )
         if failed:
             self.iface.messageBar().pushWarning(
-                "RasterLinker",
+                "GeoSurvey Studio",
                 f"Enhance Min/Max skipped {len(failed)} layer(s). See Log Messages for details.",
             )
 
@@ -502,7 +502,7 @@ class CatalogToolsMixin:
         msg = f"Enhance Batch ({mode}) applied: {enhanced}/{len(layers)} layers."
         if disable_zero_nodata:
             msg += f" NoData=0 disabled: {nodata_updated}/{len(layers)} layers."
-        self.iface.messageBar().pushInfo("RasterLinker", msg)
+        self.iface.messageBar().pushInfo("GeoSurvey Studio", msg)
 
     def _active_group_item(self):
         if self.dlg is None:
@@ -544,7 +544,7 @@ class CatalogToolsMixin:
             QMessageBox.warning(self.dlg, "Save Group Style", "Unable to save style file.")
             return
         update_raster_group(project_root, group.get("id"), {"style_qml_path": style_path})
-        self.iface.messageBar().pushInfo("RasterLinker", f"Group style saved: {style_path}")
+        self.iface.messageBar().pushInfo("GeoSurvey Studio", f"Group style saved: {style_path}")
 
     def load_selected_group_style(self):
         project_root, group = self._active_group_record()
@@ -570,7 +570,7 @@ class CatalogToolsMixin:
                     applied += 1
             except Exception:
                 continue
-        self.iface.messageBar().pushInfo("RasterLinker", f"Group style loaded: {applied}/{len(layers)} layers.")
+        self.iface.messageBar().pushInfo("GeoSurvey Studio", f"Group style loaded: {applied}/{len(layers)} layers.")
 
     def export_group_layout_quick(self):
         project_root, group = self._active_group_record()
@@ -588,7 +588,7 @@ class CatalogToolsMixin:
 
         project = QgsProject.instance()
         layout_manager = project.layoutManager()
-        layout_name = "_RasterLinker_QuickExport"
+        layout_name = "_GeoSurveyStudio_QuickExport"
         old = layout_manager.layoutByName(layout_name)
         if old is not None:
             layout_manager.removeLayout(old)
@@ -625,7 +625,7 @@ class CatalogToolsMixin:
 
         layout_manager.removeLayout(layout)
         self.iface.messageBar().pushInfo(
-            "RasterLinker",
+            "GeoSurvey Studio",
             f"Quick layout export completed: {exported}/{len(layers)} PDFs.",
         )
 

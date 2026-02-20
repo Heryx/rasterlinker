@@ -386,7 +386,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
     def _notify_info(self, message, duration=5):
         iface = getattr(self.parent_plugin, "iface", None)
         if iface is not None and hasattr(iface, "messageBar"):
-            iface.messageBar().pushMessage("RasterLinker", message, level=Qgis.Info, duration=duration)
+            iface.messageBar().pushMessage("GeoSurvey Studio", message, level=Qgis.Info, duration=duration)
             return
         QMessageBox.information(None, "Info", message)
 

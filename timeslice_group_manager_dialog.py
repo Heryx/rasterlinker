@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Time-slice and group manager for RasterLinker projects.
+Time-slice and group manager for GeoSurvey Studio projects.
 """
 
 import os
@@ -36,7 +36,7 @@ class TimesliceGroupManagerDialog(QDialog):
         self.on_updated = on_updated
         self.open_catalog_editor_callback = open_catalog_editor_callback
         self._catalog = {}
-        self.setWindowTitle("RasterLinker Time-slice / Group Manager")
+        self.setWindowTitle("GeoSurvey Studio Time-slice / Group Manager")
         self.resize(1180, 560)
         self._build_ui()
         self._refresh()

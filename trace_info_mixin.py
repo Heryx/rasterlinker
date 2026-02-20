@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Trace info panel mixin for RasterLinker plugin."""
+"""Trace info panel mixin for GeoSurvey Studio plugin."""
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
@@ -54,7 +54,7 @@ class TraceInfoMixin:
     def _trace_info_settings_key(self, key):
         if hasattr(self, "_settings_key"):
             return self._settings_key(f"trace_info/{key}")
-        return f"RasterLinker/trace_info/{key}"
+        return f"GeoSurveyStudio/trace_info/{key}"
 
     def _save_trace_info_ui_state(self):
         settings = getattr(self, "settings", None)
@@ -531,7 +531,7 @@ class TraceInfoMixin:
 
         main_window = self.iface.mainWindow()
         dock = QDockWidget("2D/3D Draw Panel", main_window)
-        dock.setObjectName("RasterLinkerTraceInfoDock")
+        dock.setObjectName("GeoSurveyStudioTraceInfoDock")
         dock.setFeatures(
             QDockWidget.DockWidgetMovable
             | QDockWidget.DockWidgetFloatable

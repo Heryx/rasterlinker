@@ -70,8 +70,8 @@ class ProjectManagerDialog(QDialog):
         self.project_root = ""
         self.on_project_updated = on_project_updated
         self.settings = QSettings()
-        self.settings_key_active_project = "RasterLinker/active_project_root"
-        self.settings_key_default_import_crs = "RasterLinker/default_import_crs_authid"
+        self.settings_key_active_project = "GeoSurveyStudio/active_project_root"
+        self.settings_key_default_import_crs = "GeoSurveyStudio/default_import_crs_authid"
         self._timeslice_import_active = False
         self._las_import_active = False
         self._radargram_import_active = False
@@ -82,7 +82,7 @@ class ProjectManagerDialog(QDialog):
         self.import_ts_btn = None
         self.import_manifest_btn = None
         self.cleanup_btn = None
-        self.setWindowTitle("RasterLinker Project Manager")
+        self.setWindowTitle("GeoSurvey Studio Project Manager")
         self.resize(760, 300)
         self._build_ui()
         self._apply_styles()
@@ -274,7 +274,7 @@ class ProjectManagerDialog(QDialog):
                 self,
                 "Create Project Folder",
                 "Project folder name:",
-                text="RasterLinkerProject",
+                text="GeoSurveyStudioProject",
             )
             if not ok or not folder_name.strip():
                 return
@@ -291,9 +291,9 @@ class ProjectManagerDialog(QDialog):
             if any(sync_counts.values())
             else ""
         )
-        self.iface.messageBar().pushInfo("RasterLinker", f"Project ready: {folder}")
+        self.iface.messageBar().pushInfo("GeoSurvey Studio", f"Project ready: {folder}")
         if sync_msg:
-            self.iface.messageBar().pushInfo("RasterLinker", f"Existing data recognized{sync_msg}.")
+            self.iface.messageBar().pushInfo("GeoSurvey Studio", f"Existing data recognized{sync_msg}.")
         self._notify_project_updated()
 
     def _ensure_project_ready(self):
@@ -485,9 +485,9 @@ class ProjectManagerDialog(QDialog):
             text += " Cancelled by user."
 
         if cancelled or int(failed) > 0:
-            self.iface.messageBar().pushWarning("RasterLinker", text)
+            self.iface.messageBar().pushWarning("GeoSurvey Studio", text)
         else:
-            self.iface.messageBar().pushInfo("RasterLinker", text)
+            self.iface.messageBar().pushInfo("GeoSurvey Studio", text)
 
     @staticmethod
     def _normalize_source_for_compare(source):
@@ -744,19 +744,19 @@ class ProjectManagerDialog(QDialog):
             return
 
         self.settings.setValue(self.settings_key_default_import_crs, selected.authid())
-        self.iface.messageBar().pushInfo("RasterLinker", f"Default import CRS set to {selected.authid()}")
+        self.iface.messageBar().pushInfo("GeoSurvey Studio", f"Default import CRS set to {selected.authid()}")
 
     def _get_or_create_qgis_group(self, group_name):
         root = QgsProject.instance().layerTreeRoot()
         plugin_root = next(
             (
                 g for g in root.children()
-                if hasattr(g, "name") and g.name() == "RasterLinker"
+                if hasattr(g, "name") and g.name() == "GeoSurvey Studio"
             ),
             None,
         )
         if plugin_root is None:
-            plugin_root = root.addGroup("RasterLinker")
+            plugin_root = root.addGroup("GeoSurvey Studio")
 
         target = next(
             (
@@ -966,7 +966,7 @@ class ProjectManagerDialog(QDialog):
             return
         if self._timeslice_import_active:
             self.iface.messageBar().pushWarning(
-                "RasterLinker",
+                "GeoSurvey Studio",
                 "A time-slice import is already running.",
             )
             return
@@ -993,7 +993,7 @@ class ProjectManagerDialog(QDialog):
         for idx, src_path in enumerate(file_paths, start=1):
             if scan_progress.wasCanceled():
                 scan_progress.close()
-                self.iface.messageBar().pushWarning("RasterLinker", "Time-slice import cancelled by user.")
+                self.iface.messageBar().pushWarning("GeoSurvey Studio", "Time-slice import cancelled by user.")
                 return
             scan_progress.setLabelText(f"Analyzing {idx}/{scan_total}: {os.path.basename(src_path)}")
             QApplication.processEvents()
@@ -1028,7 +1028,7 @@ class ProjectManagerDialog(QDialog):
             )
 
         if not records:
-            self.iface.messageBar().pushWarning("RasterLinker", "No valid time-slice files to import.")
+            self.iface.messageBar().pushWarning("GeoSurvey Studio", "No valid time-slice files to import.")
             return
 
         records, validation_skipped, validation_cancelled = self._validate_timeslice_records_before_import(
@@ -1036,10 +1036,10 @@ class ProjectManagerDialog(QDialog):
             scope_label="selected image(s)",
         )
         if validation_cancelled:
-            self.iface.messageBar().pushWarning("RasterLinker", "Time-slice import cancelled by user.")
+            self.iface.messageBar().pushWarning("GeoSurvey Studio", "Time-slice import cancelled by user.")
             return
         if not records:
-            self.iface.messageBar().pushWarning("RasterLinker", "No files left to import after validation.")
+            self.iface.messageBar().pushWarning("GeoSurvey Studio", "No files left to import after validation.")
             return
 
         target_project_root = self.project_root
@@ -1047,7 +1047,7 @@ class ProjectManagerDialog(QDialog):
         import_task = TimesliceImportTask(
             target_project_root,
             records,
-            description="RasterLinker: Importing time-slices",
+            description="GeoSurvey Studio: Importing time-slices",
         )
         self._timeslice_import_active = True
         if self.import_ts_btn is not None:
@@ -1139,7 +1139,7 @@ class ProjectManagerDialog(QDialog):
                     remove_timeslices_from_group(target_project_root, "grp_imported", imported_ids)
                     loaded_now = self._load_timeslice_paths_into_qgis_group(imported_paths, group.get("name", "TimeSlices"))
                     self.iface.messageBar().pushInfo(
-                        "RasterLinker",
+                        "GeoSurvey Studio",
                         f"Imported time-slices assigned to group: {group.get('name')} (loaded: {loaded_now}).",
                     )
                     self._notify_project_updated()
@@ -1157,7 +1157,7 @@ class ProjectManagerDialog(QDialog):
             "Import Time-slices",
             on_finished=_on_import_finished,
         )
-        self.iface.messageBar().pushInfo("RasterLinker", "Time-slice import started in background.")
+        self.iface.messageBar().pushInfo("GeoSurvey Studio", "Time-slice import started in background.")
         return
 
     def _import_las_laz(self):
@@ -1165,7 +1165,7 @@ class ProjectManagerDialog(QDialog):
             return
         if self._las_import_active:
             self.iface.messageBar().pushWarning(
-                "RasterLinker",
+                "GeoSurvey Studio",
                 "A LAS/LAZ import is already running.",
             )
             return
@@ -1184,7 +1184,7 @@ class ProjectManagerDialog(QDialog):
         import_task = LasLazImportTask(
             target_project_root,
             file_paths,
-            description="RasterLinker: Importing LAS/LAZ",
+            description="GeoSurvey Studio: Importing LAS/LAZ",
         )
         self._las_import_active = True
         if self.import_las_btn is not None:
@@ -1282,14 +1282,14 @@ class ProjectManagerDialog(QDialog):
             "Import LAS/LAZ",
             on_finished=_on_import_finished,
         )
-        self.iface.messageBar().pushInfo("RasterLinker", "LAS/LAZ import started in background.")
+        self.iface.messageBar().pushInfo("GeoSurvey Studio", "LAS/LAZ import started in background.")
 
     def _import_radargrams(self):
         if not self._ensure_project_ready():
             return
         if self._radargram_import_active:
             self.iface.messageBar().pushWarning(
-                "RasterLinker",
+                "GeoSurvey Studio",
                 "A radargram import is already running.",
             )
             return
@@ -1308,10 +1308,10 @@ class ProjectManagerDialog(QDialog):
             scope_label="selected radargram(s)",
         )
         if validation_cancelled:
-            self.iface.messageBar().pushWarning("RasterLinker", "Radargram import cancelled by user.")
+            self.iface.messageBar().pushWarning("GeoSurvey Studio", "Radargram import cancelled by user.")
             return
         if not file_paths:
-            self.iface.messageBar().pushWarning("RasterLinker", "No files left to import after validation.")
+            self.iface.messageBar().pushWarning("GeoSurvey Studio", "No files left to import after validation.")
             return
 
         target_project_root = self.project_root
@@ -1319,7 +1319,7 @@ class ProjectManagerDialog(QDialog):
         import_task = RadargramImportTask(
             target_project_root,
             file_paths,
-            description="RasterLinker: Importing radargrams",
+            description="GeoSurvey Studio: Importing radargrams",
         )
         self._radargram_import_active = True
         if self.import_rg_btn is not None:
@@ -1417,13 +1417,13 @@ class ProjectManagerDialog(QDialog):
             "Import Radargrams",
             on_finished=_on_import_finished,
         )
-        self.iface.messageBar().pushInfo("RasterLinker", "Radargram import started in background.")
+        self.iface.messageBar().pushInfo("GeoSurvey Studio", "Radargram import started in background.")
 
     def _import_manifest(self):
         if not self._ensure_project_ready():
             return
         if self._manifest_import_active:
-            self.iface.messageBar().pushWarning("RasterLinker", "Manifest import is already running.")
+            self.iface.messageBar().pushWarning("GeoSurvey Studio", "Manifest import is already running.")
             return
 
         manifest_path, _ = QFileDialog.getOpenFileName(
@@ -1504,14 +1504,14 @@ class ProjectManagerDialog(QDialog):
                 QMessageBox.warning(self, "Manifest import warnings", preview)
 
             self.iface.messageBar().pushInfo(
-                "RasterLinker",
+                "GeoSurvey Studio",
                 (
                     f"Manifest import completed (models: {counters['models']}, "
                     f"radargrams: {counters['radargrams']}, timeslices: {counters['timeslices']})."
                 ),
             )
             if state["cancelled"]:
-                self.iface.messageBar().pushWarning("RasterLinker", "Manifest import cancelled by user.")
+                self.iface.messageBar().pushWarning("GeoSurvey Studio", "Manifest import cancelled by user.")
             self._notify_project_updated()
             self._manifest_import_active = False
             if self.import_manifest_btn is not None:
@@ -1555,7 +1555,7 @@ class ProjectManagerDialog(QDialog):
             ts_task = TimesliceImportTask(
                 target_project_root,
                 records,
-                description="RasterLinker: Manifest import - time-slices",
+                description="GeoSurvey Studio: Manifest import - time-slices",
             )
 
             def _on_timeslice_done(done_task, _ok):
@@ -1618,7 +1618,7 @@ class ProjectManagerDialog(QDialog):
             rg_task = RadargramImportTask(
                 target_project_root,
                 selected_sources,
-                description="RasterLinker: Manifest import - radargrams",
+                description="GeoSurvey Studio: Manifest import - radargrams",
             )
 
             def _on_radar_done(done_task, _ok):
@@ -1678,7 +1678,7 @@ class ProjectManagerDialog(QDialog):
             model_task = LasLazImportTask(
                 target_project_root,
                 model_sources,
-                description="RasterLinker: Manifest import - models",
+                description="GeoSurvey Studio: Manifest import - models",
             )
 
             def _on_model_done(done_task, _ok):
@@ -1726,7 +1726,7 @@ class ProjectManagerDialog(QDialog):
 
         try:
             _start_model_stage()
-            self.iface.messageBar().pushInfo("RasterLinker", "Manifest import started in background.")
+            self.iface.messageBar().pushInfo("GeoSurvey Studio", "Manifest import started in background.")
         except Exception as e:
             failures.append(f"manifest pipeline start: {e}")
             _finish_manifest()
@@ -2011,7 +2011,7 @@ class ProjectManagerDialog(QDialog):
             return
         try:
             zip_path = export_project_package(self.project_root, out_zip)
-            self.iface.messageBar().pushInfo("RasterLinker", f"Package exported: {zip_path}")
+            self.iface.messageBar().pushInfo("GeoSurvey Studio", f"Package exported: {zip_path}")
         except Exception as e:
             QMessageBox.critical(self, "Export Package", f"Unable to export package:\n{e}")
 
@@ -2033,10 +2033,10 @@ class ProjectManagerDialog(QDialog):
             self.project_root = target
             self.settings.setValue(self.settings_key_active_project, target)
             sync_counts = self._sync_catalog_from_existing_files()
-            self.iface.messageBar().pushInfo("RasterLinker", f"Package imported: {target}")
+            self.iface.messageBar().pushInfo("GeoSurvey Studio", f"Package imported: {target}")
             if any(sync_counts.values()):
                 self.iface.messageBar().pushInfo(
-                    "RasterLinker",
+                    "GeoSurvey Studio",
                     (
                         "Existing data recognized "
                         f"(timeslices {sync_counts['timeslices']}, "
@@ -2122,7 +2122,7 @@ class ProjectManagerDialog(QDialog):
         errors = report.get("errors", [])
         warnings = report.get("warnings", [])
         if not errors and not warnings:
-            self.iface.messageBar().pushInfo("RasterLinker", "Validation passed: no issues found.")
+            self.iface.messageBar().pushInfo("GeoSurvey Studio", "Validation passed: no issues found.")
             return
 
         lines = [f"Errors: {len(errors)}", f"Warnings: {len(warnings)}", ""]
@@ -2165,7 +2165,7 @@ class ProjectManagerDialog(QDialog):
                 reloaded_models += 1
 
         self.iface.messageBar().pushInfo(
-            "RasterLinker",
+            "GeoSurvey Studio",
             f"Reload complete. Point-cloud layers added: {reloaded_models}",
         )
 
@@ -2173,7 +2173,7 @@ class ProjectManagerDialog(QDialog):
         if not self._ensure_project_ready():
             return
         if self._cleanup_active:
-            self.iface.messageBar().pushWarning("RasterLinker", "Catalog cleanup is already running.")
+            self.iface.messageBar().pushWarning("GeoSurvey Studio", "Catalog cleanup is already running.")
             return
         cleanup_task = CatalogCleanupTask(self.project_root)
         self._cleanup_active = True
@@ -2183,7 +2183,7 @@ class ProjectManagerDialog(QDialog):
         def _on_cleanup_finished(done_task, _ok):
             try:
                 if done_task.cancelled:
-                    self.iface.messageBar().pushWarning("RasterLinker", "Catalog cleanup cancelled by user.")
+                    self.iface.messageBar().pushWarning("GeoSurvey Studio", "Catalog cleanup cancelled by user.")
                     return
                 if done_task.error_message:
                     QMessageBox.warning(self, "Catalog cleanup", done_task.error_message)
@@ -2192,7 +2192,7 @@ class ProjectManagerDialog(QDialog):
                 removed_models = int(done_task.removed_models)
                 removed_radargrams = int(done_task.removed_radargrams)
                 self.iface.messageBar().pushInfo(
-                    "RasterLinker",
+                    "GeoSurvey Studio",
                     f"Catalog cleanup done. Removed models: {removed_models}, radargrams: {removed_radargrams}",
                 )
                 self._notify_project_updated()
@@ -2208,4 +2208,5 @@ class ProjectManagerDialog(QDialog):
             "Catalog Cleanup",
             on_finished=_on_cleanup_finished,
         )
-        self.iface.messageBar().pushInfo("RasterLinker", "Catalog cleanup started in background.")
+        self.iface.messageBar().pushInfo("GeoSurvey Studio", "Catalog cleanup started in background.")
+

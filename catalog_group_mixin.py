@@ -705,7 +705,7 @@ class CatalogGroupMixin:
         import_task = TimesliceImportTask(
             project_root,
             records,
-            description="RasterLinker: Importing selected images",
+            description="GeoSurvey Studio: Importing selected images",
         )
         def _finalize(done_task):
             cancelled = bool(done_task.cancelled)
@@ -777,7 +777,7 @@ class CatalogGroupMixin:
                 on_finished=_on_task_done,
             )
             self.iface.messageBar().pushInfo(
-                "RasterLinker",
+                "GeoSurvey Studio",
                 "Group image import started in background.",
             )
             return None
@@ -815,7 +815,7 @@ class CatalogGroupMixin:
                     self.load_raster(show_message=False)
                     status = "cancelled after partial import" if cancelled else "completed"
                     self.iface.messageBar().pushInfo(
-                        "RasterLinker",
+                        "GeoSurvey Studio",
                         (
                             f"Group '{group_name}' import {status}: "
                             f"imported {imported}, skipped {skipped}, linked z-grids {linked_grids}."

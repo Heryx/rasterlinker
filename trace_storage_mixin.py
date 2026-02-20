@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Trace vector storage mixin for RasterLinker plugin."""
+"""Trace vector storage mixin for GeoSurvey Studio plugin."""
 
 import os.path
 
@@ -15,7 +15,7 @@ class TraceStorageMixin:
         settings = getattr(self, "settings", None)
         if settings is None:
             return default
-        key = self._settings_key("trace/vector_storage_mode") if hasattr(self, "_settings_key") else "RasterLinker/trace/vector_storage_mode"
+        key = self._settings_key("trace/vector_storage_mode") if hasattr(self, "_settings_key") else "GeoSurveyStudio/trace/vector_storage_mode"
         mode = str(settings.value(key, default) or default).strip().lower()
         return mode if mode in ("memory", "gpkg") else default
 
@@ -26,7 +26,7 @@ class TraceStorageMixin:
         settings = getattr(self, "settings", None)
         if settings is None:
             return
-        key = self._settings_key("trace/vector_storage_mode") if hasattr(self, "_settings_key") else "RasterLinker/trace/vector_storage_mode"
+        key = self._settings_key("trace/vector_storage_mode") if hasattr(self, "_settings_key") else "GeoSurveyStudio/trace/vector_storage_mode"
         settings.setValue(key, mode_txt)
 
     def _prompt_trace_vector_storage_mode(self, title="Create 2D Line Layer"):
@@ -87,7 +87,7 @@ class TraceStorageMixin:
             return None, None, "Invalid source layer."
         out_dir = self._trace_vector_output_dir()
         if not out_dir:
-            return None, None, "No active RasterLinker project folder is linked."
+            return None, None, "No active GeoSurvey Studio project folder is linked."
 
         file_name = sanitize_filename(f"{layer_name}.gpkg")
         if not file_name.lower().endswith(".gpkg"):

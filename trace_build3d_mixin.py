@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Trace Build 3D and export mixin for RasterLinker plugin."""
+"""Trace Build 3D and export mixin for GeoSurvey Studio plugin."""
 
 import os.path
 

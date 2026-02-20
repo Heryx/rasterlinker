@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Trace capture/core mixin for RasterLinker plugin."""
+"""Trace capture/core mixin for GeoSurvey Studio plugin."""
 
 import os.path
 from functools import partial

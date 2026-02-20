@@ -26,7 +26,7 @@ class CatalogEditorDialog(QDialog):
         super().__init__(parent)
         self.project_root = project_root
         self.open_timeslice_manager_callback = open_timeslice_manager_callback
-        self.setWindowTitle("RasterLinker 3D/Radargram Editor")
+        self.setWindowTitle("GeoSurvey Studio 3D/Radargram Editor")
         self.resize(880, 420)
         self._build_ui()
         self._refresh()
