@@ -60,6 +60,7 @@ from .catalog_editor_dialog import CatalogEditorDialog
 from .link_editor_dialog import LinkEditorDialog
 from .timeslice_group_manager_dialog import TimesliceGroupManagerDialog
 from .project_health_dialog import ProjectHealthDialog
+from .vector_layer_manager_dialog import VectorLayerManagerDialog
 
 
 class ProjectManagerDialog(QDialog):
@@ -154,7 +155,8 @@ class ProjectManagerDialog(QDialog):
 
         catalog_scope_label = QLabel(
             "3D/Radargram Editor manages volumes and radargrams.\n"
-            "Time-slice Manager handles time-slices and raster groups."
+            "Time-slice Manager handles time-slices and raster groups.\n"
+            "Vector Layer Manager handles vector layers in project catalog."
         )
         catalog_scope_label.setWordWrap(True)
         catalog_layout.addWidget(catalog_scope_label, 0, 0, 1, 2)
@@ -199,10 +201,15 @@ class ProjectManagerDialog(QDialog):
         ts_mgr_btn.setMinimumHeight(28)
         catalog_layout.addWidget(ts_mgr_btn, 4, 1)
 
+        vector_mgr_btn = QPushButton("Vector Layer Manager")
+        vector_mgr_btn.clicked.connect(self._open_vector_layer_manager)
+        vector_mgr_btn.setMinimumHeight(28)
+        catalog_layout.addWidget(vector_mgr_btn, 5, 0)
+
         health_btn = QPushButton("Project Health")
         health_btn.clicked.connect(self._open_project_health)
         health_btn.setMinimumHeight(28)
-        catalog_layout.addWidget(health_btn, 5, 0, 1, 2)
+        catalog_layout.addWidget(health_btn, 5, 1)
 
         package_box = QGroupBox("Package")
         package_layout = QGridLayout(package_box)
@@ -2064,6 +2071,18 @@ class ProjectManagerDialog(QDialog):
             self,
             on_updated=self._notify_project_updated,
             open_catalog_editor_callback=self._open_catalog_editor,
+        )
+        dlg.exec_()
+        self._notify_project_updated()
+
+    def _open_vector_layer_manager(self):
+        if not self._ensure_project_ready():
+            return
+        dlg = VectorLayerManagerDialog(
+            self.iface,
+            self.project_root,
+            self,
+            on_updated=self._notify_project_updated,
         )
         dlg.exec_()
         self._notify_project_updated()
