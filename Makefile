@@ -38,15 +38,15 @@ LOCALES =
 # translation
 SOURCES = \
 	__init__.py \
-	gpr_linker.py gpr_linker_dialog.py
+	geosurvey_studio.py geosurvey_studio_dialog.py
 
-PLUGINNAME = gpr_linker
+PLUGINNAME = geosurvey_studio
 
 PY_FILES = \
 	__init__.py \
-	gpr_linker.py gpr_linker_dialog.py
+	geosurvey_studio.py geosurvey_studio_dialog.py
 
-UI_FILES = gpr_linker_dialog_base.ui
+UI_FILES = geosurvey_studio_dialog_base.ui
 
 EXTRAS = metadata.txt icon.png
 

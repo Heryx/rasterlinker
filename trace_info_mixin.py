@@ -904,11 +904,6 @@ class TraceInfoMixin:
         # Start fully detached: do not call addDockWidget until user explicitly docks.
         dock.setFloating(True)
         dock.resize(700, 460)
-        try:
-            p = main_window.pos()
-            dock.move(p.x() + 120, p.y() + 120)
-        except Exception:
-            pass
 
         self.trace_info_dock = dock
         self.trace_info_is_docked = False

@@ -2,7 +2,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QAbstractItemView, QDockWidget
 from PyQt5.QtWidgets import QPushButton, QSizePolicy, QCheckBox
 
-from .gpr_linker_dialog import GeoSurveyStudioDialog
+from .geosurvey_studio_dialog import GeoSurveyStudioDialog
 from .project_manager_dialog import ProjectManagerDialog
 
 

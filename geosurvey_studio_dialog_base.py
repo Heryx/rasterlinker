@@ -1,6 +1,6 @@
 ﻿# -*- coding: utf-8 -*-
 
-# Form implementation generated from reading ui file 'gpr_linker_dialog_base.ui'
+# Form implementation generated from reading ui file 'geosurvey_studio_dialog_base.ui'
 #
 # Created by: PyQt5 UI code generator 5.15.11
 #

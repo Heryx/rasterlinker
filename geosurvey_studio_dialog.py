@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Form implementation generated from reading ui file 'gpr_linker_dialog_base.ui'
+# Form implementation generated from reading ui file 'geosurvey_studio_dialog_base.ui'
 #
 # Created by: PyQt5 UI code generator 5.15.10
 #
@@ -9,7 +9,7 @@
 
 from PyQt5.QtWidgets import QDialog
 from PyQt5.QtCore import Qt
-from .gpr_linker_dialog_base import Ui_Dialog
+from .geosurvey_studio_dialog_base import Ui_Dialog
 
 class GeoSurveyStudioDialog(QDialog, Ui_Dialog):
     def __init__(self, parent=None):
