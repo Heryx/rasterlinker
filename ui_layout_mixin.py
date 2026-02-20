@@ -369,7 +369,8 @@ class UiLayoutMixin:
             self.dlg.line.setFixedWidth(2)
             self.dlg.line.setStyleSheet("color: #9a9a9a;")
         if self.bottom_controls_widget is None:
-            self._reposition_bottom_controls()
+            # Always use layout-managed controls; avoid absolute-position fallback.
+            self._build_bottom_controls_layout()
 
     def _init_name_raster_panel(self):
         if self.name_raster_panel is not None or self.dlg is None:
@@ -405,82 +406,6 @@ class UiLayoutMixin:
         else:
             self.dlg.gridLayout_3.addWidget(panel, 2, 0, 1, 4)
         self._render_name_raster_lines([])
-
-    def _reposition_bottom_controls(self):
-        """Place legacy absolute-position controls directly under the main layout block."""
-        if self.dlg is None or not hasattr(self.dlg, "layoutWidget"):
-            return
-        lw = self.dlg.layoutWidget.geometry()
-        base_y = lw.y() + lw.height() + 10
-
-        # Column anchors used by the legacy bottom section.
-        x_btn = 180
-        x_col1 = 300
-        x_col2 = 420
-
-        y_row1 = base_y + 22
-        y_row1_lbl = y_row1 - 20
-        y_row2 = y_row1 + 50
-        y_row2_lbl = y_row2 - 20
-        y_row3 = y_row2 + 50
-        y_row3_lbl = y_row3 - 20
-
-        # Row 1: orientation + x0/x1
-        if hasattr(self.dlg, "selectGridPointsButton"):
-            self.dlg.selectGridPointsButton.move(x_btn, y_row1)
-        if hasattr(self.dlg, "lineEditX0Y0"):
-            self.dlg.lineEditX0Y0.move(x_col1, y_row1)
-        if hasattr(self.dlg, "lineEditX1Y0"):
-            self.dlg.lineEditX1Y0.move(x_col2, y_row1)
-
-        # Row 2: y0/y1
-        if hasattr(self.dlg, "lineEditY0"):
-            self.dlg.lineEditY0.move(x_col1, y_row2)
-        if hasattr(self.dlg, "lineEditX0Y1"):
-            self.dlg.lineEditX0Y1.move(x_col2, y_row2)
-
-        # Row 3: draw polygon + name + cell sizes
-        if hasattr(self.dlg, "createGridButton"):
-            self.dlg.createGridButton.move(90, y_row3)
-        if hasattr(self.dlg, "lineEditAreaNames"):
-            self.dlg.lineEditAreaNames.move(208, y_row3)
-        if hasattr(self.dlg, "lineEditDistanceX"):
-            self.dlg.lineEditDistanceX.move(x_col1, y_row3)
-        if hasattr(self.dlg, "lineEditDistanceY"):
-            self.dlg.lineEditDistanceY.move(x_col2, y_row3)
-        if self.internal_grid_checkbox is not None:
-            self.internal_grid_checkbox.move(208, y_row3_lbl - 2)
-
-        # Labels aligned to related fields.
-        if hasattr(self.dlg, "labelx_3"):
-            self.dlg.labelx_3.move(x_col1, y_row2_lbl)
-        if hasattr(self.dlg, "labelx_4"):
-            self.dlg.labelx_4.move(x_col2, y_row2_lbl)
-        if hasattr(self.dlg, "labelx_6"):
-            self.dlg.labelx_6.move(x_col1, y_row3_lbl)
-            self.dlg.labelx_6.setFixedWidth(86)
-            self.dlg.labelx_6.setText("Cell X (m)")
-            self.dlg.labelx_6.setStyleSheet("color: #202020; font-size: 9pt;")
-        if hasattr(self.dlg, "labelx_5"):
-            self.dlg.labelx_5.move(x_col2, y_row3_lbl)
-            self.dlg.labelx_5.setFixedWidth(86)
-            self.dlg.labelx_5.setText("Cell Y (m)")
-            self.dlg.labelx_5.setStyleSheet("color: #202020; font-size: 9pt;")
-
-        # Hide legacy x0/x1 labels in the top layout and create aligned labels near fields.
-        if hasattr(self.dlg, "labelx"):
-            self.dlg.labelx.hide()
-        if hasattr(self.dlg, "labelx_2"):
-            self.dlg.labelx_2.hide()
-        if not hasattr(self, "_coord_x0_label"):
-            self._coord_x0_label = QLabel("x0", self.dlg)
-            self._coord_x1_label = QLabel("x1", self.dlg)
-            self._coord_x0_label.setStyleSheet("color: #202020; font-size: 9pt;")
-            self._coord_x1_label.setStyleSheet("color: #202020; font-size: 9pt;")
-        self._coord_x0_label.setGeometry(x_col1, y_row1_lbl, 40, 16)
-        self._coord_x1_label.setGeometry(x_col2, y_row1_lbl, 40, 16)
-        self._coord_x0_label.show()
-        self._coord_x1_label.show()
 
     def _render_name_raster_lines(self, lines):
         if self.name_raster_panel is None:
