@@ -183,7 +183,7 @@ class GeoSurveyStudioPlugin(
             self.plugin_toolbar.setObjectName("GeoSurveyStudioMainToolbar")
             self.plugin_toolbar.setToolTip("GeoSurvey Studio tools")
 
-        icon_path = ':/plugins/gpr_linker/icon.png'
+        icon_path = ':/plugins/geosurvey_studio/icon.png'
         self.add_action(icon_path, text=self.tr(u'GeoSurvey Studio'), callback=self.run, parent=self.iface.mainWindow())
         pm_action = self.add_action(
             icon_path,

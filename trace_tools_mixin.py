@@ -211,7 +211,7 @@ class TraceToolsMixin:
     def _add_trace_toolbar_action(self, toolbar, text, callback, *icon_names, checkable=False):
         icon = self._qgis_theme_icon(*icon_names)
         if icon is None or icon.isNull():
-            icon = QIcon(':/plugins/gpr_linker/icon.png')
+            icon = QIcon(':/plugins/geosurvey_studio/icon.png')
         action = QAction(icon, text, self.iface.mainWindow())
         action.setToolTip(text)
         action.setCheckable(bool(checkable))
