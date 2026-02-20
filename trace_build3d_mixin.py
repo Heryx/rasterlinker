@@ -245,12 +245,39 @@ class TraceBuild3DMixin:
 
     def _create_3d_output_layer(self, source_layer, output_name):
         crs_authid = source_layer.crs().authid() if source_layer.crs().isValid() else "EPSG:4326"
-        out_layer = QgsVectorLayer(f"LineStringZ?crs={crs_authid}", output_name, "memory")
-        if not out_layer.isValid():
+        mem_layer = QgsVectorLayer(f"LineStringZ?crs={crs_authid}", output_name, "memory")
+        if not mem_layer.isValid():
             return None
-        out_provider = out_layer.dataProvider()
+        out_provider = mem_layer.dataProvider()
         out_provider.addAttributes(list(source_layer.fields()))
-        out_layer.updateFields()
+        mem_layer.updateFields()
+
+        storage_mode = "memory"
+        if hasattr(self, "_trace_vector_storage_mode"):
+            try:
+                storage_mode = self._trace_vector_storage_mode()
+            except Exception:
+                storage_mode = "memory"
+
+        out_layer = mem_layer
+        if storage_mode == "gpkg" and hasattr(self, "_persist_vector_layer_to_project_gpkg"):
+            try:
+                persisted, _path, err = self._persist_vector_layer_to_project_gpkg(mem_layer, output_name)
+            except Exception:
+                persisted, err = None, "Unexpected error while writing GeoPackage."
+            if persisted is not None:
+                out_layer = persisted
+            else:
+                QMessageBox.warning(
+                    self._ui_parent(),
+                    "Build 3D",
+                    (
+                        "Could not create persistent GeoPackage output.\n"
+                        f"Reason: {err}\n"
+                        "Falling back to temporary layer."
+                    ),
+                )
+
         QgsProject.instance().addMapLayer(out_layer, False)
         self._get_or_create_trace_group().addLayer(out_layer)
         return out_layer
@@ -741,10 +768,19 @@ class TraceBuild3DMixin:
             self._notify_info("Export cancelled: save edits first.", duration=5)
             return
 
+        start_path = ""
+        if hasattr(self, "_trace_vector_output_dir"):
+            try:
+                out_dir = self._trace_vector_output_dir()
+                if out_dir:
+                    start_path = os.path.join(out_dir, f"{layer.name()}.gpkg")
+            except Exception:
+                start_path = ""
+
         output_path, selected_filter = QFileDialog.getSaveFileName(
             self._ui_parent(),
             "Export Line Layer",
-            "",
+            start_path,
             "GeoPackage (*.gpkg);;ESRI Shapefile (*.shp)",
         )
         if not output_path:

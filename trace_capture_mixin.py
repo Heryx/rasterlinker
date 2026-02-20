@@ -5,14 +5,135 @@ import os.path
 from functools import partial
 
 from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import QMessageBox, QInputDialog
-from qgis.core import QgsPointXY, QgsProject, QgsRasterLayer, QgsVectorLayer, QgsWkbTypes
+from qgis.core import (
+    QgsPointXY,
+    QgsProject,
+    QgsRasterLayer,
+    QgsVectorLayer,
+    QgsVectorFileWriter,
+    QgsWkbTypes,
+    QgsFeature,
+    QgsGeometry,
+    QgsMarkerSymbol,
+    QgsPalLayerSettings,
+    QgsTextFormat,
+    QgsTextBufferSettings,
+    QgsVectorLayerSimpleLabeling,
+)
 from PyQt5.QtWidgets import QCheckBox
 
-from .project_catalog import load_catalog, utc_now_iso
+from .project_catalog import ensure_project_structure, load_catalog, sanitize_filename, utc_now_iso
 
 
 class TraceCaptureMixin:
+    def _trace_vector_storage_mode(self):
+        default = "memory"
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return default
+        key = self._settings_key("trace/vector_storage_mode") if hasattr(self, "_settings_key") else "RasterLinker/trace/vector_storage_mode"
+        mode = str(settings.value(key, default) or default).strip().lower()
+        return mode if mode in ("memory", "gpkg") else default
+
+    def _set_trace_vector_storage_mode(self, mode):
+        mode_txt = str(mode or "").strip().lower()
+        if mode_txt not in ("memory", "gpkg"):
+            return
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return
+        key = self._settings_key("trace/vector_storage_mode") if hasattr(self, "_settings_key") else "RasterLinker/trace/vector_storage_mode"
+        settings.setValue(key, mode_txt)
+
+    def _prompt_trace_vector_storage_mode(self, title="Create 2D Line Layer"):
+        choices = [
+            ("Temporary layer (memory)", "memory"),
+            ("Persistent layer (GeoPackage in project folder)", "gpkg"),
+        ]
+        labels = [label for label, _mode in choices]
+        current_mode = self._trace_vector_storage_mode()
+        default_idx = 0
+        for idx, (_label, mode_key) in enumerate(choices):
+            if mode_key == current_mode:
+                default_idx = idx
+                break
+        label, ok = QInputDialog.getItem(
+            self._ui_parent(),
+            title,
+            "Storage:",
+            labels,
+            default_idx,
+            False,
+        )
+        if not ok:
+            return None
+        selected_mode = next((mode for txt, mode in choices if txt == label), "memory")
+        self._set_trace_vector_storage_mode(selected_mode)
+        return selected_mode
+
+    def _trace_vector_output_dir(self):
+        project_root = self._require_project_root(notify=False) if hasattr(self, "_require_project_root") else None
+        if not project_root:
+            return None
+        try:
+            paths = ensure_project_structure(project_root)
+            out_dir = paths.get("vector_layers")
+        except Exception:
+            out_dir = None
+        if not out_dir:
+            out_dir = os.path.join(project_root, "vector_layers")
+            os.makedirs(out_dir, exist_ok=True)
+        return out_dir
+
+    def _unique_output_path(self, directory, filename):
+        os.makedirs(directory, exist_ok=True)
+        candidate = os.path.join(directory, filename)
+        if not os.path.exists(candidate):
+            return candidate
+        stem, ext = os.path.splitext(filename)
+        i = 1
+        while True:
+            candidate = os.path.join(directory, f"{stem}_{i:03d}{ext}")
+            if not os.path.exists(candidate):
+                return candidate
+            i += 1
+
+    def _persist_vector_layer_to_project_gpkg(self, source_layer, layer_name):
+        if source_layer is None or not source_layer.isValid():
+            return None, None, "Invalid source layer."
+        out_dir = self._trace_vector_output_dir()
+        if not out_dir:
+            return None, None, "No active RasterLinker project folder is linked."
+
+        file_name = sanitize_filename(f"{layer_name}.gpkg")
+        if not file_name.lower().endswith(".gpkg"):
+            file_name += ".gpkg"
+        output_path = self._unique_output_path(out_dir, file_name)
+
+        opts = QgsVectorFileWriter.SaveVectorOptions()
+        opts.driverName = "GPKG"
+        opts.fileEncoding = "UTF-8"
+        opts.layerName = layer_name
+        opts.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
+        transform_context = QgsProject.instance().transformContext()
+        result = QgsVectorFileWriter.writeAsVectorFormatV3(source_layer, output_path, transform_context, opts)
+        err_code = result[0] if isinstance(result, tuple) else result
+        err_msg = result[1] if isinstance(result, tuple) and len(result) > 1 else ""
+        if err_code != QgsVectorFileWriter.NoError:
+            return None, output_path, str(err_msg or err_code)
+
+        loaded = QgsVectorLayer(f"{output_path}|layername={layer_name}", layer_name, "ogr")
+        if not loaded.isValid():
+            loaded = QgsVectorLayer(output_path, layer_name, "ogr")
+        if not loaded.isValid():
+            return None, output_path, "GeoPackage layer was written but cannot be loaded."
+
+        loaded.setCustomProperty("rasterlinker/storage_mode", "gpkg")
+        loaded.setCustomProperty("rasterlinker/storage_path", output_path)
+        return loaded, output_path, ""
+
     def _is_line_layer(self, layer):
         return (
             isinstance(layer, QgsVectorLayer)
@@ -214,6 +335,188 @@ class TraceCaptureMixin:
             band_idx = 1
         return self._sample_raster_value(z_grid_layer, point_xy, band_idx)
 
+    def _iter_geometry_vertices_xy(self, geometry):
+        if geometry is None or geometry.isEmpty():
+            return []
+        vertices = []
+        try:
+            if geometry.isMultipart():
+                for part in geometry.asMultiPolyline() or []:
+                    for pt in part or []:
+                        vertices.append(QgsPointXY(pt.x(), pt.y()))
+            else:
+                for pt in geometry.asPolyline() or []:
+                    vertices.append(QgsPointXY(pt.x(), pt.y()))
+        except Exception:
+            return []
+        return vertices
+
+    def _depth_label_from_trace_feature(self, layer, feat):
+        if layer is None or feat is None:
+            return "missing_z", None, "m"
+
+        def _attr(name, default=None):
+            idx = layer.fields().indexOf(name)
+            if idx < 0:
+                return default
+            val = feat.attribute(idx)
+            return default if val in (None, "") else val
+
+        unit = str(_attr("depth_unit", "m") or "m").strip() or "m"
+        z_value = _attr("z_value", None)
+        depth_from = _attr("depth_from", None)
+        depth_to = _attr("depth_to", None)
+
+        try:
+            if depth_from is not None and depth_to is not None:
+                d0 = float(depth_from)
+                d1 = float(depth_to)
+                return f"{d0:.2f}-{d1:.2f} {unit}", (d0 + d1) / 2.0, unit
+            if depth_from is not None:
+                d0 = float(depth_from)
+                return f"{d0:.2f} {unit}", d0, unit
+            if depth_to is not None:
+                d1 = float(depth_to)
+                return f"{d1:.2f} {unit}", d1, unit
+            if z_value is not None:
+                zv = float(z_value)
+                return f"{zv:.2f} {unit}", zv, unit
+        except Exception:
+            pass
+        return "missing_z", None, unit
+
+    def _ensure_trace_vertex_label_layer(self, source_layer):
+        if source_layer is None:
+            return None
+        source_layer_id = source_layer.id()
+        for lyr in QgsProject.instance().mapLayers().values():
+            if not isinstance(lyr, QgsVectorLayer) or not lyr.isValid():
+                continue
+            try:
+                if lyr.geometryType() != QgsWkbTypes.PointGeometry:
+                    continue
+            except Exception:
+                continue
+            if str(lyr.customProperty("rasterlinker_vertex_labels", "")) != "1":
+                continue
+            if str(lyr.customProperty("rasterlinker_trace_layer_id", "")) != str(source_layer_id):
+                continue
+            return lyr
+
+        crs_authid = source_layer.crs().authid() if source_layer.crs().isValid() else "EPSG:4326"
+        layer_name = f"{source_layer.name()} | Vertex depth"
+        uri = (
+            f"Point?crs={crs_authid}"
+            "&field=trace_fid:int"
+            "&field=trace_id:string(64)"
+            "&field=vertex_idx:int"
+            "&field=depth_lbl:string(64)"
+            "&field=depth_val:double"
+            "&field=depth_unit:string(16)"
+            "&field=trace_layer_id:string(64)"
+        )
+        label_layer = QgsVectorLayer(uri, layer_name, "memory")
+        if not label_layer.isValid():
+            return None
+
+        storage_mode = self._trace_vector_storage_mode()
+        if storage_mode == "gpkg":
+            persisted, _out_path, _err = self._persist_vector_layer_to_project_gpkg(label_layer, layer_name)
+            if persisted is not None:
+                label_layer = persisted
+
+        try:
+            symbol = QgsMarkerSymbol.createSimple(
+                {
+                    "name": "circle",
+                    "size": "1.8",
+                    "color": "255,220,90,200",
+                    "outline_color": "40,40,40,220",
+                    "outline_width": "0.25",
+                }
+            )
+            if symbol is not None and label_layer.renderer() is not None:
+                label_layer.renderer().setSymbol(symbol)
+        except Exception:
+            pass
+
+        try:
+            pal = QgsPalLayerSettings()
+            pal.enabled = True
+            pal.fieldName = "depth_lbl"
+            pal.placement = QgsPalLayerSettings.OverPoint
+            txt = QgsTextFormat()
+            txt.setSize(8)
+            txt.setColor(QColor(25, 25, 25))
+            buf = QgsTextBufferSettings()
+            buf.setEnabled(True)
+            buf.setSize(0.9)
+            buf.setColor(QColor(255, 255, 255))
+            txt.setBuffer(buf)
+            pal.setFormat(txt)
+            label_layer.setLabeling(QgsVectorLayerSimpleLabeling(pal))
+            label_layer.setLabelsEnabled(True)
+        except Exception:
+            pass
+
+        label_layer.setCustomProperty("rasterlinker_vertex_labels", "1")
+        label_layer.setCustomProperty("rasterlinker_trace_layer_id", str(source_layer_id))
+        QgsProject.instance().addMapLayer(label_layer, False)
+        self._get_or_create_trace_group().addLayer(label_layer)
+        return label_layer
+
+    def _sync_trace_vertex_depth_labels(self, layer=None):
+        source_layer = layer
+        if source_layer is None:
+            source_layer = self._current_trace_layer(prefer_active=True, require_trace=True)
+        if not self._is_trace_layer(source_layer):
+            return
+
+        label_layer = self._ensure_trace_vertex_label_layer(source_layer)
+        if label_layer is None:
+            return
+
+        provider = label_layer.dataProvider()
+        if provider is None:
+            return
+
+        existing_ids = [f.id() for f in label_layer.getFeatures()]
+        if existing_ids:
+            try:
+                provider.deleteFeatures(existing_ids)
+            except Exception:
+                pass
+
+        new_features = []
+        trace_id_idx = source_layer.fields().indexOf("trace_id")
+        for feat in source_layer.getFeatures():
+            geom = feat.geometry()
+            vertices = self._iter_geometry_vertices_xy(geom)
+            if not vertices:
+                continue
+
+            depth_lbl, depth_val, depth_unit = self._depth_label_from_trace_feature(source_layer, feat)
+            trace_id = feat.attribute(trace_id_idx) if trace_id_idx >= 0 else ""
+            for vertex_idx, point_xy in enumerate(vertices, start=1):
+                row = QgsFeature(label_layer.fields())
+                row.setGeometry(QgsGeometry.fromPointXY(point_xy))
+                row.setAttribute("trace_fid", int(feat.id()))
+                row.setAttribute("trace_id", trace_id or f"fid_{feat.id()}")
+                row.setAttribute("vertex_idx", int(vertex_idx))
+                row.setAttribute("depth_lbl", depth_lbl)
+                row.setAttribute("depth_val", depth_val)
+                row.setAttribute("depth_unit", depth_unit)
+                row.setAttribute("trace_layer_id", source_layer.id())
+                new_features.append(row)
+
+        if new_features:
+            try:
+                provider.addFeatures(new_features)
+            except Exception:
+                return
+        label_layer.updateExtents()
+        label_layer.triggerRepaint()
+
     def _derive_depth_and_z_from_timeslice(self, rec, geometry=None):
         if not isinstance(rec, dict):
             return None, None, "m", "missing_z", None
@@ -332,6 +635,7 @@ class TraceCaptureMixin:
         self._set_feature_attr(layer, fid, "z_value", z_value)
         self._set_feature_attr(layer, fid, "created_at", utc_now_iso())
         layer.triggerRepaint()
+        self._sync_trace_vertex_depth_labels(layer)
         self.refresh_trace_info_table()
 
     def create_trace_line_layer(self, checked=False):
@@ -349,17 +653,54 @@ class TraceCaptureMixin:
             QMessageBox.warning(self._ui_parent(), "Create 2D Line Layer", "Layer name cannot be empty.")
             return None
 
+        storage_mode = self._prompt_trace_vector_storage_mode("Create 2D Line Layer")
+        if storage_mode is None:
+            return None
+
         project_crs = QgsProject.instance().crs()
         crs_authid = project_crs.authid() if project_crs is not None and project_crs.isValid() else "EPSG:4326"
-        layer = QgsVectorLayer(self._trace_layer_uri(crs_authid), layer_name, "memory")
-        if not layer.isValid():
+        mem_layer = QgsVectorLayer(self._trace_layer_uri(crs_authid), layer_name, "memory")
+        if not mem_layer.isValid():
             QMessageBox.critical(self._ui_parent(), "Create 2D Line Layer", "Unable to create line layer.")
             return None
+
+        layer = mem_layer
+        created_path = ""
+        if storage_mode == "gpkg":
+            persisted, created_path, err = self._persist_vector_layer_to_project_gpkg(mem_layer, layer_name)
+            if persisted is None:
+                fallback = QMessageBox.question(
+                    self._ui_parent(),
+                    "Create 2D Line Layer",
+                    (
+                        "Unable to create persistent GeoPackage layer.\n"
+                        f"Reason: {err}\n\n"
+                        "Create a temporary memory layer instead?"
+                    ),
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if fallback != QMessageBox.Yes:
+                    return None
+                layer = mem_layer
+            else:
+                layer = persisted
+        else:
+            layer.setCustomProperty("rasterlinker/storage_mode", "memory")
 
         QgsProject.instance().addMapLayer(layer, False)
         self._get_or_create_trace_group().addLayer(layer)
         self._set_active_trace_layer(layer)
-        self._notify_info(f"Line layer '{layer_name}' created. Use 'Draw 2D Line' to digitize.", duration=7)
+        if storage_mode == "gpkg" and created_path:
+            self._notify_info(
+                f"Line layer '{layer_name}' created in GeoPackage: {created_path}",
+                duration=8,
+            )
+        else:
+            self._notify_info(
+                f"Line layer '{layer_name}' created (temporary). Use 'Draw 2D Line' to digitize.",
+                duration=7,
+            )
         return layer
 
     def _ensure_trace_layer_for_capture(self):
@@ -377,19 +718,48 @@ class TraceCaptureMixin:
             return None
         return self.create_trace_line_layer()
 
-    def start_trace_capture(self, checked=False):
+    def _set_draw_action_checked(self, checked):
+        actions = getattr(self, "trace_toolbar_actions", {}) or {}
+        action = actions.get("Draw 2D Line")
+        if action is None or not action.isCheckable():
+            return
+        blocked = action.blockSignals(True)
+        action.setChecked(bool(checked))
+        action.blockSignals(blocked)
+
+    def _sync_draw_action_checked_for_layer(self, layer=None):
+        if layer is None:
+            layer = self._current_trace_layer(prefer_active=True, require_trace=False)
+        is_editing = bool(layer is not None and getattr(layer, "isEditable", lambda: False)())
+        self._set_draw_action_checked(is_editing)
+
+    def start_trace_capture(self, checked=None):
+        toggle_on = True if checked is None else bool(checked)
         layer = self._ensure_trace_layer_for_capture()
         if layer is None:
+            self._set_draw_action_checked(False)
             return
         self._set_active_trace_layer(layer)
+
+        # QGIS-like toggle: same pencil turns editing ON/OFF.
+        if not toggle_on:
+            if layer.isEditable():
+                self.stop_trace_layer_editing()
+            self._sync_draw_action_checked_for_layer(layer)
+            return
+
         if not layer.isEditable():
             try:
                 layer.startEditing()
             except Exception:
                 QMessageBox.warning(self._ui_parent(), "Draw 2D Line", "Unable to start editing on target layer.")
+                self._set_draw_action_checked(False)
                 return
+
+        self._sync_draw_action_checked_for_layer(layer)
         rec, payload = self._active_timeslice_record()
         if rec is not None and not self._confirm_missing_z_for_capture(rec):
+            self._sync_draw_action_checked_for_layer(layer)
             return
         self.trace_capture_context = {"timeslice": rec, "payload": payload}
         if rec is None:
@@ -399,6 +769,7 @@ class TraceCaptureMixin:
             )
         if not self._trigger_iface_action("actionAddFeature"):
             QMessageBox.warning(self._ui_parent(), "Draw 2D Line", "Unable to activate Add Feature tool.")
+            self._sync_draw_action_checked_for_layer(layer)
             return
         self._notify_info("Digitize line on canvas (right-click to finish).", duration=5)
 
@@ -458,7 +829,113 @@ class TraceCaptureMixin:
             "Trace edits saved." + (" Editing session is still active." if kept_editing else ""),
             duration=5,
         )
+        self._sync_trace_vertex_depth_labels(layer)
         self.refresh_trace_info_table()
+
+    def stop_trace_layer_editing(self, checked=False):
+        layer = self._current_trace_layer(prefer_active=True, require_trace=True)
+        if layer is None:
+            layer = self._select_line_layer_dialog(require_trace=True)
+        if layer is None:
+            self._set_draw_action_checked(False)
+            return False
+        self._set_active_trace_layer(layer)
+
+        if not layer.isEditable():
+            self._notify_info("Layer is not in edit mode.", duration=4)
+            self._set_draw_action_checked(False)
+            return False
+
+        try:
+            modified = bool(layer.isModified())
+        except Exception:
+            modified = True
+
+        if not modified:
+            closed = False
+            try:
+                closed = bool(layer.rollBack())
+            except Exception:
+                closed = False
+            if not closed:
+                try:
+                    closed = bool(layer.commitChanges())
+                except Exception:
+                    closed = False
+            if not closed:
+                QMessageBox.warning(
+                    self._ui_parent(),
+                    "Stop Editing",
+                    "Unable to close edit mode for the active layer.",
+                )
+                self._sync_draw_action_checked_for_layer(layer)
+                return False
+            self._notify_info("Editing stopped.", duration=4)
+            self.refresh_trace_info_table()
+            self._set_draw_action_checked(False)
+            return True
+
+        msg = QMessageBox(self._ui_parent())
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Stop Editing")
+        msg.setText("Save changes before stopping edit mode?")
+        save_btn = msg.addButton("Save", QMessageBox.AcceptRole)
+        discard_btn = msg.addButton("Discard", QMessageBox.DestructiveRole)
+        cancel_btn = msg.addButton("Cancel", QMessageBox.RejectRole)
+        msg.setDefaultButton(save_btn)
+        msg.exec_()
+
+        clicked = msg.clickedButton()
+        if clicked == cancel_btn or clicked is None:
+            self._set_draw_action_checked(True)
+            return False
+
+        if clicked == save_btn:
+            ok = False
+            try:
+                ok = bool(layer.commitChanges())
+            except Exception:
+                ok = False
+            if not ok:
+                err_text = ""
+                try:
+                    errors = layer.commitErrors()
+                    if errors:
+                        err_text = "\n".join(str(e) for e in errors if e)
+                except Exception:
+                    err_text = ""
+                QMessageBox.warning(
+                    self._ui_parent(),
+                    "Stop Editing",
+                    "Unable to save and stop editing."
+                    + (f"\n{err_text}" if err_text else ""),
+                )
+                self._set_draw_action_checked(True)
+                return False
+            self._sync_trace_vertex_depth_labels(layer)
+            self._notify_info("Edits saved and editing stopped.", duration=5)
+            self.refresh_trace_info_table()
+            self._set_draw_action_checked(False)
+            return True
+
+        # Discard path
+        ok = False
+        try:
+            ok = bool(layer.rollBack())
+        except Exception:
+            ok = False
+        if not ok:
+            QMessageBox.warning(
+                self._ui_parent(),
+                "Stop Editing",
+                "Unable to discard edits and stop editing.",
+            )
+            self._set_draw_action_checked(True)
+            return False
+        self._notify_info("Edits discarded and editing stopped.", duration=5)
+        self.refresh_trace_info_table()
+        self._set_draw_action_checked(False)
+        return True
 
     def activate_trace_vertex_tool(self, checked=False):
         if not self._trigger_iface_action("actionVertexTool", "actionNodeTool"):
@@ -492,4 +969,3 @@ class TraceCaptureMixin:
         except Exception:
             if not self._trigger_iface_action("actionOpenTable"):
                 QMessageBox.warning(self._ui_parent(), "Attribute Table", "Unable to open attribute table.")
-

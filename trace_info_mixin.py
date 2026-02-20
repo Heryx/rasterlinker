@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
     QComboBox,
+    QMenu,
     QToolButton,
     QHeaderView,
     QStackedWidget,
@@ -27,6 +28,13 @@ from .trace_info_table_model import TraceInfoTableModel
 
 
 class TraceInfoMixin:
+    def _set_combo_current_data(self, combo, value):
+        if combo is None:
+            return
+        idx = combo.findData(value)
+        if idx >= 0 and combo.currentIndex() != idx:
+            combo.setCurrentIndex(idx)
+
     def _trace_info_payload_from_table_row(self, row):
         if self.trace_info_table is None:
             return None
@@ -62,6 +70,11 @@ class TraceInfoMixin:
             filter_text = self.trace_info_filter_edit.text() or ""
         settings.setValue(self._trace_info_settings_key("filter_text"), filter_text)
 
+        filter_field = "all"
+        if self.trace_info_filter_field_combo is not None:
+            filter_field = self.trace_info_filter_field_combo.currentData() or "all"
+        settings.setValue(self._trace_info_settings_key("filter_field"), filter_field)
+
         mode_filter = "all"
         if self.trace_info_mode_combo is not None:
             mode_filter = self.trace_info_mode_combo.currentData() or "all"
@@ -76,6 +89,9 @@ class TraceInfoMixin:
         if self.trace_info_sort_order_combo is not None:
             sort_order = "desc" if self.trace_info_sort_order_combo.currentData() == Qt.DescendingOrder else "asc"
         settings.setValue(self._trace_info_settings_key("sort_order"), sort_order)
+
+        form_preview_key = str(getattr(self, "trace_info_form_preview_key", "timeslice") or "timeslice")
+        settings.setValue(self._trace_info_settings_key("form_preview_key"), form_preview_key)
 
         query_visible = bool(self.trace_info_query_panel is not None and self.trace_info_query_panel.isVisible())
         help_visible = bool(self.trace_info_help_panel is not None and self.trace_info_help_panel.isVisible())
@@ -105,10 +121,15 @@ class TraceInfoMixin:
 
         view_mode = str(settings.value(self._trace_info_settings_key("view_mode"), "table") or "table").strip().lower()
         filter_text = str(settings.value(self._trace_info_settings_key("filter_text"), "") or "")
+        filter_field = str(settings.value(self._trace_info_settings_key("filter_field"), "all") or "all").strip()
         mode_filter = str(settings.value(self._trace_info_settings_key("mode_filter"), "all") or "all").strip()
         sort_field = str(settings.value(self._trace_info_settings_key("sort_field"), "fid") or "fid").strip()
         sort_order_txt = str(settings.value(self._trace_info_settings_key("sort_order"), "asc") or "asc").strip().lower()
-        query_visible = settings.value(self._trace_info_settings_key("query_visible"), False, type=bool)
+        form_preview_key = str(
+            settings.value(self._trace_info_settings_key("form_preview_key"), "timeslice") or "timeslice"
+        ).strip().lower()
+        # Legacy flag kept for backward compatibility; query controls are now menu-based.
+        _query_visible = settings.value(self._trace_info_settings_key("query_visible"), False, type=bool)
         help_visible = settings.value(self._trace_info_settings_key("help_visible"), False, type=bool)
         dock_floating = settings.value(self._trace_info_settings_key("dock/floating"), True, type=bool)
         dock_area_txt = str(settings.value(self._trace_info_settings_key("dock/area"), "right") or "right").strip().lower()
@@ -121,6 +142,10 @@ class TraceInfoMixin:
 
         if self.trace_info_filter_edit is not None:
             self.trace_info_filter_edit.setText(filter_text)
+        if self.trace_info_filter_field_combo is not None:
+            idx = self.trace_info_filter_field_combo.findData(filter_field)
+            if idx >= 0:
+                self.trace_info_filter_field_combo.setCurrentIndex(idx)
         if self.trace_info_mode_combo is not None:
             idx = self.trace_info_mode_combo.findData(mode_filter)
             if idx >= 0:
@@ -135,9 +160,10 @@ class TraceInfoMixin:
             if idx >= 0:
                 self.trace_info_sort_order_combo.setCurrentIndex(idx)
 
-        self._toggle_trace_query_panel(bool(query_visible))
+        self._toggle_trace_query_panel(False)
         self._toggle_trace_help_panel(bool(help_visible))
         self._set_trace_info_view_mode(view_mode, persist=False)
+        self._set_trace_info_form_preview_column(form_preview_key, persist=False)
 
         if self.trace_info_dock is not None:
             area_map = {
@@ -165,8 +191,45 @@ class TraceInfoMixin:
             self.trace_info_view_form_btn.setEnabled(not use_form)
         if self.trace_info_view_table_btn is not None:
             self.trace_info_view_table_btn.setEnabled(use_form)
+        if self.trace_info_form_preview_combo is not None:
+            self.trace_info_form_preview_combo.setEnabled(use_form)
         if use_form:
             self._update_trace_info_form_from_table_selection()
+        if persist:
+            self._save_trace_info_ui_state()
+
+    def _set_trace_info_form_preview_column(self, key, persist=True):
+        key_txt = str(key or "timeslice").strip().lower()
+        allowed = ("timeslice", "depth", "z_mode", "length")
+        if key_txt not in allowed:
+            key_txt = "timeslice"
+        self.trace_info_form_preview_key = key_txt
+
+        col_map = {
+            "timeslice": 2,
+            "depth": 3,
+            "z_mode": 4,
+            "length": 5,
+        }
+        target_col = col_map.get(key_txt, 2)
+        if self.trace_info_form_list is not None:
+            for col in range(6):
+                self.trace_info_form_list.setColumnHidden(col, col != target_col)
+            try:
+                hdr = self.trace_info_form_list.horizontalHeader()
+                if hdr is not None:
+                    hdr.setStretchLastSection(True)
+                    hdr.setSectionResizeMode(target_col, QHeaderView.Stretch)
+            except Exception:
+                pass
+
+        if self.trace_info_form_preview_combo is not None:
+            idx = self.trace_info_form_preview_combo.findData(key_txt)
+            if idx >= 0 and self.trace_info_form_preview_combo.currentIndex() != idx:
+                blocked = self.trace_info_form_preview_combo.blockSignals(True)
+                self.trace_info_form_preview_combo.setCurrentIndex(idx)
+                self.trace_info_form_preview_combo.blockSignals(blocked)
+
         if persist:
             self._save_trace_info_ui_state()
 
@@ -286,7 +349,7 @@ class TraceInfoMixin:
         visible = bool(checked)
         if self.trace_info_query_panel is not None:
             self.trace_info_query_panel.setVisible(visible)
-        if self.trace_info_query_btn is not None:
+        if self.trace_info_query_btn is not None and self.trace_info_query_btn.isCheckable():
             self.trace_info_query_btn.setChecked(visible)
         self._save_trace_info_ui_state()
 
@@ -476,6 +539,17 @@ class TraceInfoMixin:
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(4)
+
+        # Hidden state holder for "filter column" to support menu-based UX (QGIS-like).
+        filter_field_combo = QComboBox(left_widget)
+        filter_field_combo.addItem("All fields", "all")
+        filter_field_combo.addItem("Trace ID", "trace_id")
+        filter_field_combo.addItem("Time-slice", "timeslice")
+        filter_field_combo.addItem("Depth", "depth")
+        filter_field_combo.addItem("Z mode", "z_mode")
+        filter_field_combo.addItem("Length", "length")
+        filter_field_combo.setVisible(False)
+
         filter_edit = QLineEdit(left_widget)
         filter_edit.setPlaceholderText("Filter traces...")
         top_row.addWidget(filter_edit, 1)
@@ -500,18 +574,18 @@ class TraceInfoMixin:
             form_view_btn.setIcon(icon_form)
         else:
             form_view_btn.setText("Frm")
+        top_row.addWidget(table_view_btn, 0)
+        top_row.addWidget(form_view_btn, 0)
 
         query_btn = QToolButton(left_widget)
         query_btn.setAutoRaise(True)
-        query_btn.setCheckable(True)
-        query_btn.setChecked(False)
-        query_btn.setToolTip("Toggle advanced query/sort controls")
-        query_btn.toggled.connect(self._toggle_trace_query_panel)
+        query_btn.setToolTip("Filter / sort / preview options")
+        query_btn.setPopupMode(QToolButton.InstantPopup)
         icon_query = self._qgis_theme_icon("mActionFilter2.svg", "mActionFilterExpression.svg", "mActionFilter.svg")
         if icon_query is not None and not icon_query.isNull():
             query_btn.setIcon(icon_query)
         else:
-            query_btn.setText("?")
+            query_btn.setText("Opt")
         top_row.addWidget(query_btn, 0)
 
         refresh_btn = QToolButton(left_widget)
@@ -538,6 +612,131 @@ class TraceInfoMixin:
             help_btn.setText("?")
         top_row.addWidget(help_btn, 0)
         left_layout.addLayout(top_row)
+
+        query_menu = QMenu(query_btn)
+        query_btn.setMenu(query_menu)
+
+        filter_menu = query_menu.addMenu("Filter column")
+        filter_actions = {}
+        for title, key in (
+            ("All fields", "all"),
+            ("Trace ID", "trace_id"),
+            ("Time-slice", "timeslice"),
+            ("Depth", "depth"),
+            ("Z mode", "z_mode"),
+            ("Length", "length"),
+        ):
+            act = filter_menu.addAction(title)
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: (
+                    self._set_combo_current_data(self.trace_info_filter_field_combo, data_key),
+                    self._save_trace_info_ui_state(),
+                    self.refresh_trace_info_table(),
+                )
+            )
+            filter_actions[key] = act
+
+        mode_menu = query_menu.addMenu("Mode")
+        mode_actions = {}
+        for title, key in (
+            ("All", "all"),
+            ("Only Missing Z", "missing_z"),
+            ("Only With Z", "with_z"),
+        ):
+            act = mode_menu.addAction(title)
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: (
+                    self._set_combo_current_data(self.trace_info_mode_combo, data_key),
+                    self._save_trace_info_ui_state(),
+                    self.refresh_trace_info_table(),
+                )
+            )
+            mode_actions[key] = act
+
+        sort_menu = query_menu.addMenu("Sort by")
+        sort_actions = {}
+        for title, key in (
+            ("FID", "fid"),
+            ("Trace ID", "trace_id"),
+            ("Time-slice", "timeslice"),
+            ("Depth", "depth"),
+            ("Z mode", "z_mode"),
+            ("Length", "length"),
+        ):
+            act = sort_menu.addAction(title)
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: (
+                    self._set_combo_current_data(self.trace_info_sort_field_combo, data_key),
+                    self._save_trace_info_ui_state(),
+                    self.refresh_trace_info_table(),
+                )
+            )
+            sort_actions[key] = act
+
+        order_menu = query_menu.addMenu("Sort order")
+        order_actions = {}
+        for title, key in (
+            ("Asc", Qt.AscendingOrder),
+            ("Desc", Qt.DescendingOrder),
+        ):
+            act = order_menu.addAction(title)
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: (
+                    self._set_combo_current_data(self.trace_info_sort_order_combo, data_key),
+                    self._save_trace_info_ui_state(),
+                    self.refresh_trace_info_table(),
+                )
+            )
+            order_actions[key] = act
+
+        preview_menu = query_menu.addMenu("Form preview")
+        preview_actions = {}
+        for title, key in (
+            ("Time-slice", "timeslice"),
+            ("Depth", "depth"),
+            ("Z mode", "z_mode"),
+            ("Length", "length"),
+        ):
+            act = preview_menu.addAction(title)
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: self._set_trace_info_form_preview_column(data_key, persist=True)
+            )
+            preview_actions[key] = act
+
+        query_menu.addSeparator()
+        clear_text_act = query_menu.addAction("Clear text filter")
+        clear_text_act.triggered.connect(lambda: (filter_edit.clear(), self.refresh_trace_info_table()))
+
+        def _sync_query_menu_checks():
+            current_filter = (
+                self.trace_info_filter_field_combo.currentData() if self.trace_info_filter_field_combo is not None else "all"
+            )
+            current_mode = self.trace_info_mode_combo.currentData() if self.trace_info_mode_combo is not None else "all"
+            current_sort = self.trace_info_sort_field_combo.currentData() if self.trace_info_sort_field_combo is not None else "fid"
+            current_order = (
+                self.trace_info_sort_order_combo.currentData()
+                if self.trace_info_sort_order_combo is not None
+                else Qt.AscendingOrder
+            )
+            current_preview = str(getattr(self, "trace_info_form_preview_key", "timeslice") or "timeslice").strip().lower()
+
+            for key, act in filter_actions.items():
+                act.setChecked(key == current_filter)
+            for key, act in mode_actions.items():
+                act.setChecked(key == current_mode)
+            for key, act in sort_actions.items():
+                act.setChecked(key == current_sort)
+            for key, act in order_actions.items():
+                act.setChecked(key == current_order)
+            for key, act in preview_actions.items():
+                act.setChecked(key == current_preview)
+
+        query_menu.aboutToShow.connect(_sync_query_menu_checks)
 
         tools_row_widget = self._build_trace_info_tools_panel(left_widget)
         left_layout.addWidget(tools_row_widget, 0)
@@ -603,6 +802,9 @@ class TraceInfoMixin:
         table.setColumnWidth(3, 90)   # Depth
         table.setColumnWidth(4, 90)   # Z mode
         table.setColumnWidth(5, 80)   # Length
+        # Requested: keep FID/Trace ID internal, hide from visible table columns.
+        table.setColumnHidden(0, True)
+        table.setColumnHidden(1, True)
         table_page_layout.addWidget(table, 1)
         stack.addWidget(table_page)
 
@@ -622,8 +824,8 @@ class TraceInfoMixin:
         form_list_header.setStretchLastSection(True)
         form_list_header.setSectionResizeMode(QHeaderView.Interactive)
         form_list_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        form_list.setColumnWidth(1, 190)
-        for col_idx in (2, 3, 4, 5):
+        # Keep module list focused on one preview column (configured by combo).
+        for col_idx in (0, 1):
             form_list.setColumnHidden(col_idx, True)
         form_list.setSelectionModel(table.selectionModel())
         form_list.setMinimumWidth(240)
@@ -655,16 +857,10 @@ class TraceInfoMixin:
         stack.addWidget(form_page)
         left_layout.addWidget(stack, 1)
 
-        view_switch_row = QHBoxLayout()
-        view_switch_row.setContentsMargins(0, 0, 0, 0)
-        view_switch_row.setSpacing(4)
-        view_switch_row.addStretch(1)
-        view_switch_row.addWidget(table_view_btn, 0)
-        view_switch_row.addWidget(form_view_btn, 0)
-        left_layout.addLayout(view_switch_row, 0)
-
         filter_edit.returnPressed.connect(self.refresh_trace_info_table)
         filter_edit.textChanged.connect(self._save_trace_info_ui_state)
+        filter_field_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
+        filter_field_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
         mode_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
         mode_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
         sort_field_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
@@ -694,12 +890,14 @@ class TraceInfoMixin:
         self.trace_info_table = table
         self.trace_info_model = table_model
         self.trace_info_filter_edit = filter_edit
+        self.trace_info_filter_field_combo = filter_field_combo
         self.trace_info_mode_combo = mode_combo
         self.trace_info_sort_field_combo = sort_field_combo
         self.trace_info_sort_order_combo = sort_order_combo
         self.trace_info_stack = stack
         self.trace_info_form_list = form_list
         self.trace_info_form_fields = form_fields
+        self.trace_info_form_preview_combo = None
         self.trace_info_view_table_btn = table_view_btn
         self.trace_info_view_form_btn = form_view_btn
         self.trace_info_query_btn = query_btn
@@ -707,6 +905,7 @@ class TraceInfoMixin:
         self.trace_info_help_btn = help_btn
         self.trace_info_help_panel = help_panel
         self._set_trace_info_view_mode("table", persist=False)
+        self._set_trace_info_form_preview_column(getattr(self, "trace_info_form_preview_key", "timeslice"), persist=False)
         self._apply_trace_info_ui_state()
 
     def open_trace_info_tab(self, checked=False):
@@ -737,6 +936,10 @@ class TraceInfoMixin:
         filter_text = ""
         if self.trace_info_filter_edit is not None:
             filter_text = (self.trace_info_filter_edit.text() or "").strip().lower()
+
+        filter_field = "all"
+        if self.trace_info_filter_field_combo is not None:
+            filter_field = self.trace_info_filter_field_combo.currentData() or "all"
 
         mode_filter = "all"
         if self.trace_info_mode_combo is not None:
@@ -789,7 +992,18 @@ class TraceInfoMixin:
 
             trace_text = trace_id or f"fid_{fid}"
             if filter_text:
-                hay = f"{fid} {trace_text} {ts_label} {depth_txt} {z_mode_text} {length_val:.2f}".lower()
+                field_values = {
+                    "fid": str(fid),
+                    "trace_id": str(trace_text),
+                    "timeslice": str(ts_label),
+                    "depth": str(depth_txt),
+                    "z_mode": str(z_mode_text),
+                    "length": f"{float(length_val):.2f}",
+                }
+                if str(filter_field or "all") == "all":
+                    hay = " ".join(field_values.values()).lower()
+                else:
+                    hay = str(field_values.get(str(filter_field), "")).lower()
                 if filter_text not in hay:
                     continue
 
@@ -831,3 +1045,14 @@ class TraceInfoMixin:
             self._select_trace_info_row(target_row)
         else:
             self._update_trace_info_form_from_table_selection()
+
+        if hasattr(self, "_sync_trace_vertex_depth_labels"):
+            try:
+                self._sync_trace_vertex_depth_labels(layer)
+            except Exception:
+                pass
+        if hasattr(self, "_sync_draw_action_checked_for_layer"):
+            try:
+                self._sync_draw_action_checked_for_layer(layer)
+            except Exception:
+                pass

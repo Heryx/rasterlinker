@@ -16,12 +16,89 @@ from .polygon_draw_tool import PolygonDrawTool
 
 
 class GridWorkflowMixin:
+    def _resolve_vector_storage_mode_for_grid(self):
+        mode = getattr(self, "pending_vector_storage_mode", None)
+        if mode in ("memory", "gpkg"):
+            return mode
+        if hasattr(self, "_trace_vector_storage_mode"):
+            try:
+                return self._trace_vector_storage_mode()
+            except Exception:
+                pass
+        return "memory"
+
+    def _choose_vector_storage_mode_for_grid(self):
+        chooser = getattr(self, "_prompt_trace_vector_storage_mode", None)
+        if callable(chooser):
+            mode = chooser("Grid/Area Vector Storage")
+            if mode in ("memory", "gpkg"):
+                self.pending_vector_storage_mode = mode
+                return mode
+            return None
+        self.pending_vector_storage_mode = "memory"
+        return "memory"
+
+    def _persist_project_vector_layer_if_needed(self, layer, storage_mode=None):
+        if layer is None:
+            return None
+        mode = storage_mode or self._resolve_vector_storage_mode_for_grid()
+        if mode != "gpkg":
+            return layer
+
+        persist_fn = getattr(self, "_persist_vector_layer_to_project_gpkg", None)
+        if not callable(persist_fn):
+            return layer
+
+        persisted, out_path, err = persist_fn(layer, layer.name() or "layer")
+        if persisted is None:
+            QMessageBox.warning(
+                self._ui_parent(),
+                "Persistent Layer",
+                (
+                    "Unable to create GeoPackage layer in project folder.\n"
+                    f"Reason: {err}\n\n"
+                    "Continuing with temporary memory layer."
+                ),
+            )
+            return layer
+
+        # Keep layer placement close to original position/group when possible.
+        project = QgsProject.instance()
+        root = project.layerTreeRoot()
+        old_node = root.findLayer(layer.id()) if layer is not None else None
+        parent_group = old_node.parent() if old_node is not None else None
+        insert_index = -1
+        if parent_group is not None:
+            try:
+                insert_index = parent_group.children().index(old_node)
+            except Exception:
+                insert_index = -1
+
+        project.addMapLayer(persisted, False)
+        if parent_group is not None:
+            if insert_index >= 0:
+                parent_group.insertLayer(insert_index, persisted)
+            else:
+                parent_group.addLayer(persisted)
+        else:
+            project.layerTreeRoot().addLayer(persisted)
+
+        if layer is not None and project.mapLayer(layer.id()) is not None:
+            project.removeMapLayer(layer.id())
+
+        if out_path:
+            self._notify_info(f"Saved persistent layer: {out_path}", duration=6)
+        return persisted
+
     def create_grid_from_polygon_layer(self):
         """
         Draw a polygon interactively and create a grid from it.
         """
         try:
             self._sync_grid_options_from_controls()
+            chosen = self._choose_vector_storage_mode_for_grid()
+            if chosen is None:
+                return
             # Activate polygon drawing tool
             self.polygon_draw_tool = PolygonDrawTool(self.iface.mapCanvas(), self)
             self.iface.mapCanvas().setMapTool(self.polygon_draw_tool)
@@ -40,11 +117,13 @@ class GridWorkflowMixin:
         Create a grid based on the polygon drawn by the user.
         """
         try:
+            storage_mode = self._resolve_vector_storage_mode_for_grid()
             # Read spacing values from UI
             distance_x = float(self.dlg.lineEditDistanceX.text().strip())
             distance_y = float(self.dlg.lineEditDistanceY.text().strip())
             area_name, cell_prefix = self._get_grid_names_from_ui()
             polygon_layer.setName(area_name)
+            polygon_layer = self._persist_project_vector_layer_if_needed(polygon_layer, storage_mode=storage_mode)
             if not self._confirm_planar_units_for_grid():
                 return
 
@@ -57,6 +136,7 @@ class GridWorkflowMixin:
                 cell_prefix=cell_prefix,
                 max_cells=120000,
             )
+            grid_layer = self._persist_project_vector_layer_if_needed(grid_layer, storage_mode=storage_mode)
             self.last_area_layer = polygon_layer
             self.last_grid_layer = grid_layer
 
@@ -68,6 +148,8 @@ class GridWorkflowMixin:
             QMessageBox.warning(self.dlg, "Error", f"Error: {ve}")
         except Exception as e:
             QMessageBox.critical(self.dlg, "Error", f"Error while creating grid: {e}")
+        finally:
+            self.pending_vector_storage_mode = None
 
     def _get_grid_names_from_ui(self):
         """
@@ -296,6 +378,9 @@ class GridWorkflowMixin:
         Activate tool to orient the grid from 3 canvas picks.
         """
         self._sync_grid_options_from_controls()
+        chosen = self._choose_vector_storage_mode_for_grid()
+        if chosen is None:
+            return
         if self._get_grid_dimensions_from_fields() is None:
             QMessageBox.warning(
                 self.dlg,
@@ -340,6 +425,7 @@ class GridWorkflowMixin:
         Receive 3 orientation points and create grid using dimensions from x0/x1/y0/y1.
         """
         try:
+            storage_mode = self._resolve_vector_storage_mode_for_grid()
             dims = self._get_grid_dimensions_from_fields()
             if dims is None:
                 QMessageBox.warning(self.dlg, "Missing Grid Dimensions", "Invalid x0/x1/y0/y1 values.")
@@ -362,7 +448,7 @@ class GridWorkflowMixin:
             y_axis_point = (points[2].x(), points[2].y())
 
             raster_crs = QgsProject.instance().crs()
-            create_oriented_grid(
+            grid_layer = create_oriented_grid(
                 x0,
                 y0,
                 x1,
@@ -374,6 +460,8 @@ class GridWorkflowMixin:
                 grid_length_y=grid_length_y,
                 y_axis_point=y_axis_point,
             )
+            grid_layer = self._persist_project_vector_layer_if_needed(grid_layer, storage_mode=storage_mode)
+            self.last_grid_layer = grid_layer
 
             QMessageBox.information(
                 self.dlg,
@@ -389,3 +477,5 @@ class GridWorkflowMixin:
             QMessageBox.warning(self.dlg, "Error", f"Invalid values: {ve}")
         except Exception as e:
             QMessageBox.critical(self.dlg, "Error", f"Grid creation failed: {str(e)}")
+        finally:
+            self.pending_vector_storage_mode = None

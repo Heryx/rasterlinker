@@ -6,7 +6,7 @@ import os
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
-from PyQt5.QtWidgets import QWidget, QHBoxLayout, QToolButton, QMessageBox
+from PyQt5.QtWidgets import QWidget, QHBoxLayout, QToolButton, QMessageBox, QFrame
 from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes
 
 from .project_catalog import load_catalog
@@ -208,12 +208,13 @@ class TraceToolsMixin:
         else:
             QMessageBox.warning(self._ui_parent(), title, text)
 
-    def _add_trace_toolbar_action(self, toolbar, text, callback, *icon_names):
+    def _add_trace_toolbar_action(self, toolbar, text, callback, *icon_names, checkable=False):
         icon = self._qgis_theme_icon(*icon_names)
         if icon is None or icon.isNull():
             icon = QIcon(':/plugins/gpr_linker/icon.png')
         action = QAction(icon, text, self.iface.mainWindow())
         action.setToolTip(text)
+        action.setCheckable(bool(checkable))
         action.triggered.connect(callback)
         if toolbar is not None:
             toolbar.addAction(action)
@@ -237,6 +238,7 @@ class TraceToolsMixin:
             "mActionToggleEditing.svg",
             "mActionAddFeature.svg",
             "mActionCaptureLine.svg",
+            checkable=True,
         )
         self._add_trace_toolbar_action(
             None,
@@ -375,25 +377,10 @@ class TraceToolsMixin:
         tools_layout.setContentsMargins(0, 0, 0, 0)
         tools_layout.setSpacing(3)
 
-        action_order = (
-            "New Line Layer",
-            "Draw 2D Line",
-            "Save Edits",
-            "Vertex Tool",
-            "Split Feature",
-            "Copy",
-            "Paste",
-            "Delete",
-            "Workflow Check",
-            "Build 3D",
-            "Build 3D Batch",
-            "Orthometric 3D",
-            "Export Layer",
-        )
-        for action_name in action_order:
+        def _add_button(action_name):
             action = self.trace_toolbar_actions.get(action_name)
             if action is None:
-                continue
+                return
             btn = QToolButton(tools_widget)
             btn.setDefaultAction(action)
             btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -401,6 +388,28 @@ class TraceToolsMixin:
             btn.setMaximumSize(30, 30)
             btn.setToolTip(action_name)
             tools_layout.addWidget(btn, 0)
+
+        def _add_separator():
+            sep = QFrame(tools_widget)
+            sep.setFrameShape(QFrame.VLine)
+            sep.setFrameShadow(QFrame.Sunken)
+            sep.setLineWidth(1)
+            sep.setMidLineWidth(0)
+            tools_layout.addWidget(sep, 0)
+
+        # Group 1: basic edit workflow (close to QGIS attribute/digitizing flow)
+        for action_name in ("New Line Layer", "Draw 2D Line", "Save Edits"):
+            _add_button(action_name)
+        _add_separator()
+
+        # Group 2: geometry editing tools
+        for action_name in ("Vertex Tool", "Split Feature", "Copy", "Paste", "Delete"):
+            _add_button(action_name)
+        _add_separator()
+
+        # Group 3: model/export/check utilities
+        for action_name in ("Build 3D", "Build 3D Batch", "Orthometric 3D", "Export Layer", "Workflow Check"):
+            _add_button(action_name)
 
         tools_layout.addStretch(1)
         return tools_widget

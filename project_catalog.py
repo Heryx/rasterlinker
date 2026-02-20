@@ -15,6 +15,7 @@ PROJECT_FOLDERS = (
     "volumes_3d",
     "timeslices_2d",
     "radargrams",
+    "vector_layers",
     "exports",
     "metadata",
 )
