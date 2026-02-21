@@ -39,19 +39,37 @@ class UpdateCheckerMixin:
     def _local_plugin_version(self):
         return self._plugin_metadata_general().get("version", "")
 
+    def _extract_github_owner_repo(self, value):
+        txt = str(value or "").strip()
+        if not txt:
+            return None, None
+
+        # Support short notation: owner/repo
+        if "/" in txt and "://" not in txt and "github.com" not in txt.lower():
+            parts = [p.strip() for p in txt.split("/", 1)]
+            if len(parts) == 2 and parts[0] and parts[1]:
+                owner, repo = parts[0], parts[1]
+                if repo.lower().endswith(".git"):
+                    repo = repo[:-4]
+                return owner, repo
+
+        match = self._GITHUB_REPO_RE.search(txt)
+        if not match:
+            return None, None
+        owner = match.group(1).strip()
+        repo = match.group(2).strip()
+        if repo.lower().endswith(".git"):
+            repo = repo[:-4]
+        if owner and repo:
+            return owner, repo
+        return None, None
+
     def _github_owner_repo(self):
         general = self._plugin_metadata_general()
-        for key in ("repository", "homepage", "tracker"):
-            url = str(general.get(key, "") or "").strip()
-            if not url:
-                continue
-            match = self._GITHUB_REPO_RE.search(url)
-            if not match:
-                continue
-            owner = match.group(1).strip()
-            repo = match.group(2).strip()
-            if repo.lower().endswith(".git"):
-                repo = repo[:-4]
+        # `update_repository` lets users pin update checks to a specific repo
+        # without changing homepage/tracker links.
+        for key in ("update_repository", "repository", "homepage", "tracker"):
+            owner, repo = self._extract_github_owner_repo(general.get(key, ""))
             if owner and repo:
                 return owner, repo
         return None, None

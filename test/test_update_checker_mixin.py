@@ -62,6 +62,7 @@ class UpdateCheckerMixinTest(unittest.TestCase):
                 "[general]\n"
                 "name=GeoSurvey Studio\n"
                 "version=1.0.1\n"
+                "update_repository=https://github.com/Heryx/geosurvey-studio.git\n"
                 "repository=https://github.com/Heryx/rasterlinker\n"
             )
         self.plugin = _DummyPlugin(self.tmpdir)
@@ -69,10 +70,15 @@ class UpdateCheckerMixinTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_github_owner_repo_parsing(self):
+    def test_github_owner_repo_parsing_prefers_update_repository(self):
         owner, repo = self.plugin._github_owner_repo()
         self.assertEqual(owner, "Heryx")
-        self.assertEqual(repo, "rasterlinker")
+        self.assertEqual(repo, "geosurvey-studio")
+
+    def test_extract_github_owner_repo_supports_short_notation(self):
+        owner, repo = self.plugin._extract_github_owner_repo("OrgName/my-plugin")
+        self.assertEqual(owner, "OrgName")
+        self.assertEqual(repo, "my-plugin")
 
     def test_version_normalization(self):
         self.assertEqual(self.plugin._normalize_version_text("v1.2.3"), "1.2.3")

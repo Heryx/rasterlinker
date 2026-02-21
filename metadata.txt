@@ -26,6 +26,7 @@ tags=python
 homepage=https://github.com/Heryx/rasterlinker
 tracker=https://github.com/Heryx/rasterlinker/issues
 repository=https://github.com/Heryx/rasterlinker
+update_repository=https://github.com/Heryx/rasterlinker
 category=Plugins
 icon=icon.png
 # experimental flag
