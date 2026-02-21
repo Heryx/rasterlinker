@@ -18,6 +18,8 @@ It can be used as:
   - step-by-step procedure for changing canonical GitHub repository links safely
 - `docs/RELEASE_NOTES_v1.1.0.md`
   - ready-to-paste release text (full and short) + issue closing comment template
+- `docs/RELEASE_NOTES_v1.1.1.md`
+  - ready-to-paste patch release text for metadata/version alignment
 
 ## Maintenance Rule
 

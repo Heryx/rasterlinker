@@ -4,6 +4,7 @@ This file tracks implementation changes between formal releases.
 
 ## 2026-02-21 (branch: `dev/feature/ui-responsive-docking`)
 
+- Bump plugin metadata to `v1.1.1` and add `v1.1.1` release-notes draft.
 - Package workflow hardening: Full vs Portable export modes, safer import with conflict preview and unsafe-entry skip reporting, and new package workflow tests.
 - Refactor: extract Project Manager time-slice import/CRS/validation helpers into `project_manager_timeslice_import_mixin.py`.
 - Refactor: extract Project Manager import rollback/reporting helpers into `project_manager_import_rollback_mixin.py`.
