@@ -14,14 +14,22 @@ __copyright__ = 'Copyright 2024, Giuseppe'
 
 import unittest
 
-from qgis.PyQt.QtGui import QDialogButtonBox, QDialog
+try:
+    from qgis.PyQt.QtGui import QDialogButtonBox, QDialog
+    HAS_QGIS = True
+except Exception:
+    HAS_QGIS = False
 
-from geosurvey_studio_dialog import GeoSurveyStudioDialog
+if HAS_QGIS:
+    from geosurvey_studio_dialog import GeoSurveyStudioDialog
+    from utilities import get_qgis_app
+    QGIS_APP = get_qgis_app()
+else:
+    GeoSurveyStudioDialog = None
+    QGIS_APP = None
 
-from utilities import get_qgis_app
-QGIS_APP = get_qgis_app()
 
-
+@unittest.skipUnless(HAS_QGIS, "QGIS runtime is not available")
 class GeoSurveyStudioDialogTest(unittest.TestCase):
     """Test dialog works."""
 
