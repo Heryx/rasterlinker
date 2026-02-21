@@ -794,14 +794,54 @@ def link_surfer_grid_into_project(project_root, reference_raster_path, source_ra
     }
 
 
+def _normalize_output_zip_path(output_zip_path):
+    out = str(output_zip_path or "").strip()
+    if not out:
+        raise ValueError("Output zip path is empty.")
+    if not out.lower().endswith(".zip"):
+        out += ".zip"
+    return out
+
+
+def _abs_norm(path):
+    try:
+        return os.path.normcase(os.path.abspath(path))
+    except Exception:
+        return os.path.normcase(str(path or ""))
+
+
+def _is_within_root(path, root):
+    p = _abs_norm(path)
+    r = _abs_norm(root)
+    if not p or not r:
+        return False
+    return p == r or p.startswith(r + os.sep)
+
+
+def _iter_catalog_file_paths(catalog):
+    data = dict(catalog or {})
+    for model in data.get("models_3d", []):
+        yield model.get("project_path")
+    for rg in data.get("radargrams", []):
+        yield rg.get("project_path")
+    for ts in data.get("timeslices", []):
+        yield ts.get("project_path")
+        yield ts.get("z_grid_project_path")
+    for vl in data.get("vector_layers", []):
+        yield vl.get("project_path")
+    for grp in data.get("raster_groups", []):
+        style_qml = grp.get("style_qml_path")
+        if style_qml:
+            yield style_qml
+
+
 def export_project_package(project_root, output_zip_path):
     """
-    Export entire project folder as zip package.
+    Export entire project folder as zip package (full backup mode).
     """
     if not os.path.isdir(project_root):
         raise FileNotFoundError(project_root)
-    if not output_zip_path.lower().endswith(".zip"):
-        output_zip_path += ".zip"
+    output_zip_path = _normalize_output_zip_path(output_zip_path)
 
     with zipfile.ZipFile(output_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, _, files in os.walk(project_root):
@@ -812,13 +852,139 @@ def export_project_package(project_root, output_zip_path):
     return output_zip_path
 
 
-def import_project_package(zip_path, target_project_root):
+def export_project_package_portable(project_root, output_zip_path):
+    """
+    Export a portable package with catalog-referenced assets and metadata.
+
+    Returns:
+        {
+            "zip_path": "...",
+            "included_files": [...],
+            "missing_files": [...],
+            "external_files": [...],
+        }
+    """
+    if not os.path.isdir(project_root):
+        raise FileNotFoundError(project_root)
+    output_zip_path = _normalize_output_zip_path(output_zip_path)
+    catalog = load_catalog(project_root)
+    project_root_abs = _abs_norm(project_root)
+
+    include_paths = set()
+    missing_files = []
+    external_files = []
+
+    # Always include metadata folder content when available.
+    metadata_dir = os.path.join(project_root, "metadata")
+    if os.path.isdir(metadata_dir):
+        for root, _, files in os.walk(metadata_dir):
+            for fn in files:
+                include_paths.add(os.path.join(root, fn))
+
+    for raw_path in _iter_catalog_file_paths(catalog):
+        pth = str(raw_path or "").strip()
+        if not pth:
+            continue
+        abs_path = _abs_norm(pth)
+        if not os.path.exists(abs_path):
+            missing_files.append(abs_path)
+            continue
+        if not _is_within_root(abs_path, project_root_abs):
+            external_files.append(abs_path)
+            continue
+        if os.path.isfile(abs_path):
+            include_paths.add(abs_path)
+
+    included_files = []
+    with zipfile.ZipFile(output_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for abs_path in sorted(include_paths):
+            if not os.path.isfile(abs_path):
+                continue
+            rel_path = os.path.relpath(abs_path, project_root)
+            zf.write(abs_path, rel_path)
+            included_files.append(rel_path)
+
+    return {
+        "zip_path": output_zip_path,
+        "included_files": included_files,
+        "missing_files": sorted(set(missing_files)),
+        "external_files": sorted(set(external_files)),
+    }
+
+
+def inspect_package_import_conflicts(zip_path, target_project_root):
+    """
+    Inspect potential file conflicts before importing a package.
+    """
+    if not os.path.isfile(zip_path):
+        raise FileNotFoundError(zip_path)
+    target_abs = _abs_norm(target_project_root)
+    members = []
+    conflicts = []
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            members.append(info.filename)
+            dst = _safe_extract_destination(target_abs, info.filename)
+            if dst is None:
+                continue
+            if os.path.exists(dst):
+                conflicts.append(info.filename)
+    return {
+        "total_entries": len(members),
+        "conflict_count": len(conflicts),
+        "conflicts": conflicts,
+    }
+
+
+def _safe_extract_destination(target_root, member_name):
+    rel = str(member_name or "").replace("\\", "/").strip("/")
+    if not rel:
+        return None
+    dst = _abs_norm(os.path.join(target_root, rel))
+    if not _is_within_root(dst, target_root):
+        return None
+    return dst
+
+
+def import_project_package(zip_path, target_project_root, return_report=False):
     """
     Import project package zip into target folder.
+
+    Args:
+        return_report: when True, returns a dict summary instead of target path.
     """
     if not os.path.isfile(zip_path):
         raise FileNotFoundError(zip_path)
     ensure_project_structure(target_project_root)
+    target_abs = _abs_norm(target_project_root)
+
+    total_entries = 0
+    overwritten_entries = 0
+    skipped_unsafe = []
+
     with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(target_project_root)
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            total_entries += 1
+            dst = _safe_extract_destination(target_abs, info.filename)
+            if dst is None:
+                skipped_unsafe.append(info.filename)
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if os.path.exists(dst):
+                overwritten_entries += 1
+            with zf.open(info, "r") as src, open(dst, "wb") as out:
+                shutil.copyfileobj(src, out)
+
+    report = {
+        "target_root": target_project_root,
+        "total_entries": total_entries,
+        "overwritten_entries": overwritten_entries,
+        "skipped_unsafe_entries": skipped_unsafe,
+    }
+    if return_report:
+        return report
     return target_project_root

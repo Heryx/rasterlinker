@@ -4,6 +4,7 @@ This file tracks implementation changes between formal releases.
 
 ## 2026-02-21 (branch: `dev/feature/ui-responsive-docking`)
 
+- Package workflow hardening: Full vs Portable export modes, safer import with conflict preview and unsafe-entry skip reporting, and new package workflow tests.
 - `c15a902` Extract package import/export actions from Project Manager into dedicated mixin.
 - `a44ae11` Extract Trace Info UI state logic into dedicated `trace_info_state_mixin` module.
 - `38c8169` Add repository-switch checklist for metadata and update-check migration.

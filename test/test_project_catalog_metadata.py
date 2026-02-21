@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+import zipfile
 
 from project_catalog import (
     CATALOG_VERSION,
@@ -14,12 +15,15 @@ from project_catalog import (
     create_raster_group,
     ensure_project_structure,
     export_project_package,
+    export_project_package_portable,
     import_project_package,
+    inspect_package_import_conflicts,
     link_surfer_grid_into_project,
     load_catalog,
     register_timeslices_batch,
     register_vector_layer,
     remove_timeslices_from_group,
+    save_catalog,
     validate_catalog,
 )
 
@@ -223,6 +227,57 @@ class ProjectCatalogMetadataTest(unittest.TestCase):
         import_project_package(zip_path, target_root)
         imported_file = os.path.join(target_root, "timeslices_2d", "slice_a.tif")
         self.assertTrue(os.path.isfile(imported_file))
+
+    def test_export_portable_package_reports_external_and_missing(self):
+        in_project = os.path.join(self.project_root, "timeslices_2d", "slice_inside.tif")
+        self._touch(in_project, "inside")
+
+        ext_tmp = tempfile.TemporaryDirectory()
+        try:
+            external_path = os.path.join(ext_tmp.name, "slice_external.tif")
+            self._touch(external_path, "external")
+            missing_path = os.path.join(self.project_root, "timeslices_2d", "missing_slice.tif")
+
+            data = load_catalog(self.project_root)
+            data["timeslices"] = [
+                {"id": "ts_inside", "project_path": in_project},
+                {"id": "ts_external", "project_path": external_path},
+                {"id": "ts_missing", "project_path": missing_path},
+            ]
+            save_catalog(self.project_root, data)
+
+            out_zip = os.path.join(self.project_root, "exports", "portable_test.zip")
+            report = export_project_package_portable(self.project_root, out_zip)
+            self.assertTrue(os.path.isfile(report.get("zip_path", "")))
+            self.assertIn(os.path.normcase(os.path.abspath(external_path)), [os.path.normcase(p) for p in report.get("external_files", [])])
+            self.assertIn(os.path.normcase(os.path.abspath(missing_path)), [os.path.normcase(p) for p in report.get("missing_files", [])])
+
+            with zipfile.ZipFile(report.get("zip_path"), "r") as zf:
+                names = set(zf.namelist())
+            self.assertIn("metadata/project_catalog.json", names)
+            self.assertIn("timeslices_2d/slice_inside.tif", names)
+            self.assertNotIn("timeslices_2d/slice_external.tif", names)
+        finally:
+            ext_tmp.cleanup()
+
+    def test_import_conflict_report_and_overwrite_stats(self):
+        src_file = os.path.join(self.project_root, "timeslices_2d", "slice_a.tif")
+        self._touch(src_file, "src")
+        out_zip = os.path.join(self.project_root, "exports", "conflict_test.zip")
+        zip_path = export_project_package(self.project_root, out_zip)
+
+        target_root = os.path.join(self.project_root, "import_target_conflict")
+        preexisting = os.path.join(target_root, "timeslices_2d", "slice_a.tif")
+        self._touch(preexisting, "old")
+
+        preview = inspect_package_import_conflicts(zip_path, target_root)
+        self.assertGreaterEqual(preview.get("total_entries", 0), 1)
+        self.assertGreaterEqual(preview.get("conflict_count", 0), 1)
+
+        report = import_project_package(zip_path, target_root, return_report=True)
+        self.assertGreaterEqual(report.get("total_entries", 0), 1)
+        self.assertGreaterEqual(report.get("overwritten_entries", 0), 1)
+        self.assertTrue(os.path.isfile(os.path.join(target_root, "timeslices_2d", "slice_a.tif")))
 
 
 if __name__ == "__main__":

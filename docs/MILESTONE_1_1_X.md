@@ -8,7 +8,7 @@ Patch-line objective: stability, compatibility cleanup, and workflow hardening.
 - [x] #10 Rename remaining legacy dialog test filename
 - [x] #9 Repository switch plan for metadata/update-check links
 - [ ] #11 Refactor large modules (`project_manager_dialog`, `trace_info_mixin`) - in progress
-- [ ] #16 Package workflow hardening (Full vs Portable export + safer import)
+- [x] #16 Package workflow hardening (Full vs Portable export + safer import)
 
 ## Recommended Execution Order
 
