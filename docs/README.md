@@ -14,6 +14,8 @@ It can be used as:
   - scope and execution checklist for patch-line 1.1.x
 - `docs/WORKFLOW_AND_VERSIONING.md`
   - practical rules for commits, version bumps, milestones, and releases
+- `docs/REPOSITORY_SWITCH_CHECKLIST.md`
+  - step-by-step procedure for changing canonical GitHub repository links safely
 
 ## Maintenance Rule
 

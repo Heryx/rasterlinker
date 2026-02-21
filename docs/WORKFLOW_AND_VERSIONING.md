@@ -30,3 +30,9 @@ After each implementation commit:
 1. update `docs/CHANGELOG_DEV.md`
 2. update milestone checklist if status changed
 3. keep issue labels/milestones consistent with current scope
+
+## Repository Migration
+
+When switching to a new canonical GitHub repository, follow:
+
+- `docs/REPOSITORY_SWITCH_CHECKLIST.md`
