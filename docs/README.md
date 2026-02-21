@@ -12,6 +12,8 @@ It can be used as:
   - chronological list of technical changes grouped by commit
 - `docs/MILESTONE_1_1_X.md`
   - scope and execution checklist for patch-line 1.1.x
+- `docs/MILESTONE_1_2_0.md`
+  - roadmap and execution checklist for Atlas/Layout integration
 - `docs/WORKFLOW_AND_VERSIONING.md`
   - practical rules for commits, version bumps, milestones, and releases
 - `docs/REPOSITORY_SWITCH_CHECKLIST.md`
