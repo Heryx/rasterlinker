@@ -7,6 +7,7 @@ This file tracks implementation changes between formal releases.
 - Package workflow hardening: Full vs Portable export modes, safer import with conflict preview and unsafe-entry skip reporting, and new package workflow tests.
 - Refactor: extract Project Manager time-slice import/CRS/validation helpers into `project_manager_timeslice_import_mixin.py`.
 - Refactor: extract Project Manager import rollback/reporting helpers into `project_manager_import_rollback_mixin.py`.
+- Refactor: extract Project Manager radargram validation/georef helpers into `project_manager_radargram_validation_mixin.py`.
 - Refactor: extract Trace Info help/query panel logic into `trace_info_help_mixin.py`.
 - `c15a902` Extract package import/export actions from Project Manager into dedicated mixin.
 - `a44ae11` Extract Trace Info UI state logic into dedicated `trace_info_state_mixin` module.
