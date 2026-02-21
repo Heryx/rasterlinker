@@ -17,9 +17,11 @@ from project_catalog import (
     export_project_package,
     export_project_package_portable,
     import_project_package,
+    inspect_catalog_compatibility,
     inspect_package_import_conflicts,
     link_surfer_grid_into_project,
     load_catalog,
+    load_catalog_with_info,
     register_timeslices_batch,
     register_vector_layer,
     remove_timeslices_from_group,
@@ -77,6 +79,49 @@ class ProjectCatalogMetadataTest(unittest.TestCase):
         with open(path, "r", encoding="utf-8") as f:
             persisted = json.load(f)
         self.assertEqual(persisted.get("catalog_version"), CATALOG_VERSION)
+
+    def test_inspect_catalog_compatibility_detects_migration_need(self):
+        path = catalog_path(self.project_root)
+        legacy = {
+            "schema_version": 1,
+            "project_root": self.project_root,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "models_3d": [],
+            "radargrams": [],
+            "timeslices": [],
+            "links": [],
+        }
+        self._write_json(path, legacy)
+
+        report = inspect_catalog_compatibility(self.project_root, plugin_version="1.1.1")
+        self.assertEqual(report.get("status"), "needs_migration")
+        self.assertEqual(report.get("raw_catalog_version"), 1)
+        self.assertGreaterEqual(len(report.get("applied_migrations") or []), 1)
+
+    def test_load_catalog_with_info_creates_backup_and_stamps_plugin_version(self):
+        path = catalog_path(self.project_root)
+        legacy_v3 = {
+            "catalog_version": 3,
+            "schema_version": 3,
+            "project_root": self.project_root,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "models_3d": [],
+            "radargrams": [],
+            "timeslices": [],
+            "links": [],
+            "raster_groups": [],
+        }
+        self._write_json(path, legacy_v3)
+
+        data, info = load_catalog_with_info(self.project_root, plugin_version="1.1.1")
+        self.assertEqual(data.get("catalog_version"), CATALOG_VERSION)
+        self.assertEqual(data.get("created_with_plugin"), "1.1.1")
+        self.assertEqual(data.get("last_opened_with_plugin"), "1.1.1")
+        self.assertTrue(info.get("applied_migrations"))
+        backup_path = info.get("backup_path")
+        self.assertTrue(backup_path and os.path.isfile(backup_path))
 
     def test_load_catalog_migrates_v3_to_v4_vector_layers(self):
         path = catalog_path(self.project_root)

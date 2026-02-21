@@ -25,14 +25,17 @@ CATALOG_SCHEMA_VERSION = CATALOG_VERSION
 SURFER_GRID_EXTENSIONS = (".grd", ".gsag", ".gsbg")
 
 
-def _default_catalog(project_root):
+def _default_catalog(project_root, plugin_version=None):
     now = utc_now_iso()
+    plugin_ver = str(plugin_version or "").strip()
     return {
         "catalog_version": CATALOG_VERSION,
         "schema_version": CATALOG_VERSION,
         "project_root": project_root,
         "created_at": now,
         "updated_at": now,
+        "created_with_plugin": plugin_ver,
+        "last_opened_with_plugin": plugin_ver,
         "models_3d": [],
         "radargrams": [],
         "timeslices": [],
@@ -63,6 +66,14 @@ def catalog_path(project_root):
     return os.path.join(project_root, "metadata", "project_catalog.json")
 
 
+def _read_raw_catalog(project_root):
+    path = catalog_path(project_root)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def _safe_int(value, default=0):
     try:
         return int(value)
@@ -86,6 +97,18 @@ def _write_catalog_file(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=True)
     return path
+
+
+def _backup_catalog_file(path, suffix="migration"):
+    if not path or not os.path.exists(path):
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base = os.path.basename(path)
+    folder = os.path.dirname(path)
+    backup_name = f"{base}.{suffix}.{stamp}.bak"
+    backup_path = os.path.join(folder, backup_name)
+    shutil.copy2(path, backup_path)
+    return backup_path
 
 
 def _migrate_catalog_v0_to_v1(project_root, data):
@@ -180,17 +203,124 @@ def _apply_catalog_migrations(project_root, data):
     return migrated, source_version, current, applied
 
 
-def load_catalog(project_root):
+def inspect_catalog_compatibility(project_root, plugin_version=None):
+    """
+    Inspect catalog compatibility without mutating files.
+
+    Returns:
+        {
+            "status": "new_project|compatible|needs_migration|future_catalog|invalid_catalog",
+            "catalog_exists": bool,
+            "raw_catalog_version": int,
+            "supported_catalog_version": int,
+            "applied_migrations": [...],
+            "raw_plugin_version": "...",
+            "current_plugin_version": "...",
+            "error": "...",
+        }
+    """
+    result = {
+        "status": "new_project",
+        "catalog_exists": False,
+        "raw_catalog_version": 0,
+        "supported_catalog_version": CATALOG_VERSION,
+        "applied_migrations": [],
+        "raw_plugin_version": "",
+        "current_plugin_version": str(plugin_version or "").strip(),
+        "error": "",
+    }
+    try:
+        raw = _read_raw_catalog(project_root)
+    except Exception as e:
+        result["status"] = "invalid_catalog"
+        result["catalog_exists"] = True
+        result["error"] = str(e)
+        return result
+
+    if raw is None:
+        return result
+
+    result["catalog_exists"] = True
+    result["raw_plugin_version"] = str((raw or {}).get("last_opened_with_plugin") or "").strip()
+    raw_version = _detect_catalog_version(raw)
+    result["raw_catalog_version"] = raw_version
+
+    if raw_version > CATALOG_VERSION:
+        result["status"] = "future_catalog"
+        return result
+
+    _migrated, _src, _final, applied = _apply_catalog_migrations(project_root, raw)
+    result["applied_migrations"] = applied
+    result["status"] = "needs_migration" if applied else "compatible"
+    return result
+
+
+def _stamp_plugin_version(data, plugin_version):
+    plugin_ver = str(plugin_version or "").strip()
+    if not plugin_ver:
+        return False
+    changed = False
+    if not str(data.get("created_with_plugin") or "").strip():
+        data["created_with_plugin"] = plugin_ver
+        changed = True
+    if str(data.get("last_opened_with_plugin") or "").strip() != plugin_ver:
+        data["last_opened_with_plugin"] = plugin_ver
+        changed = True
+    return changed
+
+
+def load_catalog_with_info(project_root, plugin_version=None, create_backup_on_migrate=True):
     path = catalog_path(project_root)
     if not os.path.exists(path):
-        return _default_catalog(project_root)
+        data = _default_catalog(project_root, plugin_version=plugin_version)
+        info = {
+            "raw_version": 0,
+            "final_version": data.get("catalog_version"),
+            "applied_migrations": [],
+            "changed": False,
+            "backup_path": None,
+            "stamped_plugin_version": bool(str(plugin_version or "").strip()),
+            "created_default": True,
+        }
+        return data, info
+
     with open(path, "r", encoding="utf-8") as f:
         loaded = json.load(f)
 
     normalized, info = ensure_catalog_schema(project_root, loaded, return_info=True)
-    if info.get("changed"):
+    info = dict(info or {})
+    info.setdefault("backup_path", None)
+    info.setdefault("stamped_plugin_version", False)
+    info["created_default"] = False
+
+    plugin_stamped = _stamp_plugin_version(normalized, plugin_version)
+    if plugin_stamped:
+        info["stamped_plugin_version"] = True
+
+    if info.get("changed") or plugin_stamped:
+        if create_backup_on_migrate and os.path.exists(path):
+            applied = list(info.get("applied_migrations") or [])
+            if applied:
+                raw_v = info.get("raw_version")
+                final_v = info.get("final_version")
+                suffix = f"migrate_v{raw_v}_to_v{final_v}"
+            else:
+                suffix = "normalize"
+            try:
+                info["backup_path"] = _backup_catalog_file(path, suffix=suffix)
+            except Exception:
+                info["backup_path"] = None
         _write_catalog_file(path, normalized)
-    return normalized
+    return normalized, info
+
+
+def load_catalog(project_root, plugin_version=None, create_backup_on_migrate=True):
+    data, _info = load_catalog_with_info(
+        project_root,
+        plugin_version=plugin_version,
+        create_backup_on_migrate=create_backup_on_migrate,
+    )
+    return data
 
 
 def save_catalog(project_root, data):

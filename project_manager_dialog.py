@@ -29,6 +29,8 @@ from qgis.core import QgsProject, QgsPointCloudLayer, QgsRasterLayer
 from .project_catalog import (
     ensure_project_structure,
     load_catalog,
+    load_catalog_with_info,
+    inspect_catalog_compatibility,
     save_catalog,
     register_model_3d,
     register_radargram,
@@ -91,6 +93,7 @@ class ProjectManagerDialog(
         self.cleanup_btn = None
         self.setWindowTitle("GeoSurvey Studio Project Manager")
         self.resize(760, 300)
+        self._cached_plugin_version = None
         self._build_ui()
         self._apply_styles()
         try:
@@ -266,6 +269,84 @@ class ProjectManagerDialog(
             """
         )
 
+    def _plugin_version(self):
+        cached = str(self._cached_plugin_version or "").strip()
+        if cached:
+            return cached
+        try:
+            meta_path = os.path.join(os.path.dirname(__file__), "metadata.txt")
+            if os.path.exists(meta_path):
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip().lower().startswith("version="):
+                            self._cached_plugin_version = line.split("=", 1)[1].strip()
+                            break
+        except Exception:
+            self._cached_plugin_version = ""
+        return str(self._cached_plugin_version or "").strip()
+
+    def _ensure_catalog_compatible(self, project_root):
+        plugin_ver = self._plugin_version()
+        comp = inspect_catalog_compatibility(project_root, plugin_version=plugin_ver)
+        status = str(comp.get("status") or "").strip()
+
+        if status == "invalid_catalog":
+            QMessageBox.critical(
+                self,
+                "Project Catalog Error",
+                (
+                    "Unable to read project catalog.\n\n"
+                    f"Error: {comp.get('error') or 'unknown error'}\n\n"
+                    "Fix or replace metadata/project_catalog.json before continuing."
+                ),
+            )
+            return False
+
+        if status == "future_catalog":
+            raw_ver = comp.get("raw_catalog_version")
+            answer = QMessageBox.question(
+                self,
+                "Catalog Newer Than Plugin",
+                (
+                    f"This project catalog is newer than the current plugin support.\n\n"
+                    f"Catalog version: {raw_ver}\n"
+                    f"Supported version: {comp.get('supported_catalog_version')}\n\n"
+                    "You may continue, but some features might not work correctly.\n"
+                    "Continue?"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return False
+
+        try:
+            _catalog, info = load_catalog_with_info(
+                project_root,
+                plugin_version=plugin_ver,
+                create_backup_on_migrate=True,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Project Catalog Error", f"Unable to load catalog:\n{e}")
+            return False
+
+        applied = list(info.get("applied_migrations") or [])
+        backup_path = str(info.get("backup_path") or "").strip()
+        if applied:
+            self.iface.messageBar().pushInfo(
+                "GeoSurvey Studio",
+                (
+                    f"Catalog migrated to v{info.get('final_version')} "
+                    f"(from v{info.get('raw_version')})."
+                ),
+            )
+            if backup_path:
+                self.iface.messageBar().pushInfo(
+                    "GeoSurvey Studio",
+                    f"Pre-migration backup created: {backup_path}",
+                )
+        return True
+
     def _browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select project folder")
         if folder:
@@ -289,6 +370,8 @@ class ProjectManagerDialog(
             self.path_edit.setText(folder)
 
         ensure_project_structure(folder)
+        if not self._ensure_catalog_compatible(folder):
+            return
         self.project_root = folder
         self.settings.setValue(self.settings_key_active_project, folder)
         sync_counts = self._sync_catalog_from_existing_files()
@@ -311,6 +394,8 @@ class ProjectManagerDialog(
             QMessageBox.warning(self, "Project Manager", "Create/Open a project first.")
             return False
         ensure_project_structure(folder)
+        if not self._ensure_catalog_compatible(folder):
+            return False
         self.project_root = folder
         self.settings.setValue(self.settings_key_active_project, folder)
         self._notify_project_updated()
