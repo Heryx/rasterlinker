@@ -7,6 +7,7 @@ from qgis.PyQt.QtWidgets import QInputDialog
 from qgis.core import QgsProject, QgsVectorFileWriter, QgsVectorLayer, QgsWkbTypes
 
 from .project_catalog import ensure_project_structure, register_vector_layer, sanitize_filename
+from .layer_property_utils import set_layer_property
 
 
 class TraceStorageMixin:
@@ -112,9 +113,9 @@ class TraceStorageMixin:
         if not loaded.isValid():
             return None, output_path, "GeoPackage layer was written but cannot be loaded."
 
-        loaded.setCustomProperty("rasterlinker/storage_mode", "gpkg")
-        loaded.setCustomProperty("rasterlinker/storage_path", output_path)
-        loaded.setCustomProperty("rasterlinker/source_kind", str(source_kind or "generic"))
+        set_layer_property(loaded, "storage_mode", "gpkg")
+        set_layer_property(loaded, "storage_path", output_path)
+        set_layer_property(loaded, "source_kind", str(source_kind or "generic"))
 
         project_root = self._require_project_root(notify=False) if hasattr(self, "_require_project_root") else None
         if project_root:

@@ -26,6 +26,7 @@ from .grid_creator import create_oriented_grid
 from .grid_selection_tool import GridSelectionTool
 from .polygon_grid_creator import create_grid_from_polygon
 from .polygon_draw_tool import PolygonDrawTool
+from .layer_property_utils import get_layer_property, set_layer_property
 
 
 class GridWorkflowMixin:
@@ -156,7 +157,7 @@ class GridWorkflowMixin:
         kind = (source_kind or "").strip()
         if not kind:
             try:
-                kind = str(layer.customProperty("rasterlinker/source_kind", "") or "").strip()
+                kind = str(get_layer_property(layer, "source_kind", default="") or "").strip()
             except Exception:
                 kind = ""
         if not kind:
@@ -255,7 +256,7 @@ class GridWorkflowMixin:
             grid_layer = None
             area_name, cell_prefix = self._get_grid_names_from_ui()
             polygon_layer.setName(area_name)
-            polygon_layer.setCustomProperty("rasterlinker/source_kind", "grid_area")
+            set_layer_property(polygon_layer, "source_kind", "grid_area")
             polygon_layer = self._persist_project_vector_layer_if_needed(
                 polygon_layer,
                 storage_mode=storage_mode,
@@ -278,7 +279,7 @@ class GridWorkflowMixin:
                     max_cells=120000,
                 )
                 if grid_layer is not None:
-                    grid_layer.setCustomProperty("rasterlinker/source_kind", "grid_cells")
+                    set_layer_property(grid_layer, "source_kind", "grid_cells")
                 grid_layer = self._persist_project_vector_layer_if_needed(
                     grid_layer,
                     storage_mode=storage_mode,
@@ -765,7 +766,7 @@ class GridWorkflowMixin:
                 y_axis_point=y_axis_point,
             )
             if grid_layer is not None:
-                grid_layer.setCustomProperty("rasterlinker/source_kind", "grid_oriented")
+                set_layer_property(grid_layer, "source_kind", "grid_oriented")
             grid_layer = self._persist_project_vector_layer_if_needed(
                 grid_layer,
                 storage_mode=storage_mode,

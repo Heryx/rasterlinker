@@ -4,6 +4,8 @@
 from qgis.PyQt.QtWidgets import QMessageBox, QInputDialog
 from qgis.core import QgsProject, QgsVectorLayer
 
+from .layer_property_utils import set_layer_property
+
 
 class TraceEditingMixin:
     def create_trace_line_layer(self, checked=False):
@@ -58,7 +60,7 @@ class TraceEditingMixin:
             else:
                 layer = persisted
         else:
-            layer.setCustomProperty("rasterlinker/storage_mode", "memory")
+            set_layer_property(layer, "storage_mode", "memory")
 
         QgsProject.instance().addMapLayer(layer, False)
         self._get_or_create_trace_group().addLayer(layer)

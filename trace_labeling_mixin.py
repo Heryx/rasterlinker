@@ -16,6 +16,8 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
+from .layer_property_utils import get_layer_property, set_layer_property
+
 
 class TraceLabelingMixin:
     def _iter_geometry_vertices_xy(self, geometry):
@@ -80,9 +82,9 @@ class TraceLabelingMixin:
                     continue
             except Exception:
                 continue
-            if str(lyr.customProperty("rasterlinker_vertex_labels", "")) != "1":
+            if str(get_layer_property(lyr, "vertex_labels", default="")) != "1":
                 continue
-            if str(lyr.customProperty("rasterlinker_trace_layer_id", "")) != str(source_layer_id):
+            if str(get_layer_property(lyr, "trace_layer_id", default="")) != str(source_layer_id):
                 continue
             return lyr
 
@@ -146,8 +148,8 @@ class TraceLabelingMixin:
         except Exception:
             pass
 
-        label_layer.setCustomProperty("rasterlinker_vertex_labels", "1")
-        label_layer.setCustomProperty("rasterlinker_trace_layer_id", str(source_layer_id))
+        set_layer_property(label_layer, "vertex_labels", "1")
+        set_layer_property(label_layer, "trace_layer_id", str(source_layer_id))
         QgsProject.instance().addMapLayer(label_layer, False)
         self._get_or_create_trace_group().addLayer(label_layer)
         return label_layer
