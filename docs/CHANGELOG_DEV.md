@@ -4,6 +4,11 @@ This file tracks implementation changes between formal releases.
 
 ## 2026-02-21 (branch: `dev/feature/ui-responsive-docking`)
 
+- `c15a902` Extract package import/export actions from Project Manager into dedicated mixin.
+- `a44ae11` Extract Trace Info UI state logic into dedicated `trace_info_state_mixin` module.
+- `38c8169` Add repository-switch checklist for metadata and update-check migration.
+- `19d5f7a` Rename remaining legacy dialog test file and make test skip safely outside QGIS runtime.
+- `d6d4dc3` Migrate layer `customProperty` keys to `geosurvey_studio/*` with legacy fallback.
 - `e281783` Improve update checker repo parsing and add `update_repository` metadata key.
 - `d40a3bf` Remove legacy Plugin Builder/GPR headers from core docs and build files.
 - `dac1ad4` Align test naming with GeoSurvey Studio and add safer dialog import fallback.

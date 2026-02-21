@@ -2,12 +2,12 @@
 
 Patch-line objective: stability, compatibility cleanup, and workflow hardening.
 
-## Open Issues
+## Issues Status
 
-- [ ] #8 Migrate `customProperty` namespace to `geosurvey_studio/*` with backward compatibility
-- [ ] #10 Rename remaining legacy dialog test filename
-- [ ] #9 Repository switch plan for metadata/update-check links
-- [ ] #11 Refactor large modules (`project_manager_dialog`, `trace_info_mixin`)
+- [x] #8 Migrate `customProperty` namespace to `geosurvey_studio/*` with backward compatibility
+- [x] #10 Rename remaining legacy dialog test filename
+- [x] #9 Repository switch plan for metadata/update-check links
+- [ ] #11 Refactor large modules (`project_manager_dialog`, `trace_info_mixin`) - in progress
 - [ ] #16 Package workflow hardening (Full vs Portable export + safer import)
 
 ## Recommended Execution Order
