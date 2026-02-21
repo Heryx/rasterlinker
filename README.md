@@ -15,6 +15,12 @@ especially where multiple raster slices or time/depth grids must be inspected se
 
 GeoSurvey Studio is designed to support non-invasive survey workflows and structured spatial analysis environments.
 
+## Development Docs
+- Project docs index: `docs/README.md`
+- Technical dev changelog: `docs/CHANGELOG_DEV.md`
+- Milestone tracking (`v1.1.x`): `docs/MILESTONE_1_1_X.md`
+- Workflow/versioning rules: `docs/WORKFLOW_AND_VERSIONING.md`
+
 ## How to Cite
 If GeoSurvey Studio supports your work, please cite it as:
 
