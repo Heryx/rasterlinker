@@ -16,6 +16,8 @@ It can be used as:
   - practical rules for commits, version bumps, milestones, and releases
 - `docs/REPOSITORY_SWITCH_CHECKLIST.md`
   - step-by-step procedure for changing canonical GitHub repository links safely
+- `docs/RELEASE_NOTES_v1.1.0.md`
+  - ready-to-paste release text (full and short) + issue closing comment template
 
 ## Maintenance Rule
 
