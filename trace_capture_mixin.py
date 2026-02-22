@@ -2,6 +2,7 @@
 """Trace capture/core mixin for GeoSurvey Studio plugin."""
 
 import json
+import math
 import os.path
 from functools import partial
 
@@ -866,13 +867,16 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
         ts_id = ""
         ts_name = ""
         group_name = ""
+        project_path = ""
         if isinstance(payload, dict):
             ts_id = str(payload.get("timeslice_id") or "").strip()
             group_name = str(payload.get("group_name") or "").strip()
+            project_path = str(payload.get("project_path") or "").strip()
         if isinstance(rec, dict):
             ts_id = ts_id or str(rec.get("id") or "").strip()
             ts_name = str(rec.get("normalized_name") or rec.get("name") or "").strip()
             group_name = group_name or str(rec.get("group_name") or "").strip()
+            project_path = project_path or str(rec.get("project_path") or "").strip()
         d0 = rec.get("depth_from") if isinstance(rec, dict) else None
         d1 = rec.get("depth_to") if isinstance(rec, dict) else None
         unit = (rec.get("unit") if isinstance(rec, dict) else "m") or "m"
@@ -880,6 +884,7 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             "timeslice_id": ts_id,
             "timeslice_name": ts_name,
             "group_name": group_name,
+            "project_path": project_path,
             "depth_from": d0,
             "depth_to": d1,
             "depth_unit": str(unit).strip() or "m",
@@ -1029,6 +1034,7 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                     "group_name": group_name,
                     "timeslice_id": ts_id,
                     "timeslice_name": ts_name,
+                    "project_path": project_path,
                     "rec": rec,
                 }
             )
@@ -1082,6 +1088,7 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                     "group_name": group_name,
                     "timeslice_id": ts_id,
                     "timeslice_name": ts_name,
+                    "project_path": project_path,
                     "rec": rec,
                 }
             )
@@ -1099,7 +1106,11 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             ts_id = str(row.get("timeslice_id") or "").strip()
             ts_name = str(row.get("timeslice_name") or "").strip()
             group_name = str(row.get("group_name") or "").strip()
+            project_path = str(row.get("project_path") or "").strip()
             rec = row.get("rec") if isinstance(row.get("rec"), dict) else None
+            if not project_path and isinstance(rec, dict):
+                project_path = str(rec.get("project_path") or "").strip()
+            layer = self._loaded_plugin_raster_layer_by_path(project_path) if project_path else None
             key = (
                 ts_id,
                 ts_name.lower(),
@@ -1111,10 +1122,11 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             seen.add(key)
             contexts.append(
                 {
-                    "layer": None,
+                    "layer": layer,
                     "group_name": group_name,
                     "timeslice_id": ts_id,
                     "timeslice_name": ts_name,
+                    "project_path": project_path,
                     "rec": rec,
                 }
             )
@@ -1167,6 +1179,7 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                         "group_name": str(group_node.name() or "").strip(),
                         "timeslice_id": ts_id,
                         "timeslice_name": ts_name,
+                        "project_path": str(rec.get("project_path") or "").strip() if isinstance(rec, dict) else str(layer.source() or "").split("|", 1)[0].strip(),
                         "rec": rec,
                     }
                 )
@@ -1195,28 +1208,98 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             merged.append(ctx)
         return merged
 
-    def _vertex_context_candidates(self, point_xy, contexts):
-        if not contexts:
-            return []
-        if point_xy is None:
-            return list(contexts)
-        inside = []
-        no_layer = []
-        for ctx in contexts or []:
-            layer = ctx.get("layer")
-            if layer is None or not isinstance(layer, QgsRasterLayer):
-                no_layer.append(ctx)
-                continue
+    def _context_raster_layer(self, ctx):
+        if not isinstance(ctx, dict):
+            return None
+        layer = ctx.get("layer")
+        if isinstance(layer, QgsRasterLayer) and layer.isValid():
+            return layer
+        project_path = str(ctx.get("project_path") or "").strip()
+        rec = ctx.get("rec") if isinstance(ctx.get("rec"), dict) else None
+        if not project_path and isinstance(rec, dict):
+            project_path = str(rec.get("project_path") or "").strip()
+        if not project_path:
+            return None
+        return self._loaded_plugin_raster_layer_by_path(project_path)
+
+    def _raster_point_has_pixel_hit(self, layer, point_xy):
+        if layer is None or not isinstance(layer, QgsRasterLayer) or not layer.isValid() or point_xy is None:
+            return False
+        try:
+            if not layer.extent().contains(point_xy):
+                return False
+        except Exception:
+            return False
+
+        provider = None
+        try:
+            provider = layer.dataProvider()
+        except Exception:
+            provider = None
+        if provider is None:
+            return False
+
+        try:
+            band_count = max(1, int(layer.bandCount()))
+        except Exception:
+            band_count = 1
+
+        for band in range(1, band_count + 1):
             try:
-                if layer.extent().contains(point_xy):
-                    inside.append(ctx)
+                sampled = provider.sample(point_xy, band)
             except Exception:
                 continue
-        if inside:
-            return inside + [ctx for ctx in no_layer if ctx not in inside]
-        if no_layer:
-            return no_layer
-        return list(contexts)
+
+            ok = True
+            value = sampled
+            if isinstance(sampled, (tuple, list)):
+                if len(sampled) >= 2:
+                    value = sampled[0]
+                    ok = bool(sampled[1])
+                elif len(sampled) == 1:
+                    value = sampled[0]
+            if not ok:
+                continue
+
+            num = self._safe_float(value)
+            if num is None:
+                continue
+            try:
+                if math.isnan(float(num)):
+                    continue
+            except Exception:
+                pass
+
+            nodata = None
+            try:
+                if provider.sourceHasNoDataValue(band):
+                    nodata = self._safe_float(provider.sourceNoDataValue(band))
+            except Exception:
+                nodata = None
+            if nodata is not None:
+                try:
+                    if abs(float(num) - float(nodata)) <= 1e-12:
+                        continue
+                except Exception:
+                    pass
+
+            return True
+        return False
+
+    def _vertex_context_candidates(self, point_xy, contexts):
+        # Issue 10 (local backlog): assign time-slice/depth only on true raster pixel hit.
+        if not contexts or point_xy is None:
+            return []
+        hits = []
+        for ctx in contexts or []:
+            layer = self._context_raster_layer(ctx)
+            if not self._raster_point_has_pixel_hit(layer, point_xy):
+                continue
+            if layer is not None and (not isinstance(ctx.get("layer"), QgsRasterLayer) or not ctx.get("layer").isValid()):
+                ctx = dict(ctx)
+                ctx["layer"] = layer
+            hits.append(ctx)
+        return hits
 
     def _serialize_vertex_depths(self, vertex_rows):
         clean = []
@@ -1277,24 +1360,6 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
         touched_records = []
         depth_list_values = []
         depth_bounds = []
-        for ctx in contexts:
-            ts_id = str(ctx.get("timeslice_id") or "").strip()
-            ts_name = str(ctx.get("timeslice_name") or "").strip()
-            group_name = str(ctx.get("group_name") or "").strip()
-            rec = ctx.get("rec")
-
-            if ts_id and ts_id not in touched_ids:
-                touched_ids.append(ts_id)
-            if ts_name and ts_name not in touched_names:
-                touched_names.append(ts_name)
-            if group_name and group_name not in touched_groups:
-                touched_groups.append(group_name)
-            if isinstance(rec, dict) and rec not in touched_records:
-                touched_records.append(rec)
-            if isinstance(rec, dict):
-                depth_txt = self._format_depth_pair(rec.get("depth_from"), rec.get("depth_to"), rec.get("unit") or "m")
-                if depth_txt and depth_txt not in depth_list_values:
-                    depth_list_values.append(depth_txt)
 
         vertices = self._iter_geometry_vertices_xy(geometry)
         vertex_rows = []
@@ -1327,6 +1392,17 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             vertex_ts_ids = []
             for ctx in vertex_candidates:
                 rec = ctx.get("rec") if isinstance(ctx, dict) else None
+                ts_id = str((ctx or {}).get("timeslice_id") or "").strip()
+                ts_name = str((ctx or {}).get("timeslice_name") or "").strip()
+                group_name = str((ctx or {}).get("group_name") or "").strip()
+                if ts_id and ts_id not in touched_ids:
+                    touched_ids.append(ts_id)
+                if ts_name and ts_name not in touched_names:
+                    touched_names.append(ts_name)
+                if group_name and group_name not in touched_groups:
+                    touched_groups.append(group_name)
+                if isinstance(rec, dict) and rec not in touched_records:
+                    touched_records.append(rec)
                 forced_d0 = ctx.get("depth_from") if isinstance(ctx, dict) else None
                 forced_d1 = ctx.get("depth_to") if isinstance(ctx, dict) else None
                 forced_u = ctx.get("depth_unit") if isinstance(ctx, dict) else None
@@ -1363,8 +1439,6 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                         vertex_depth_pairs.append((depth_num, depth_num))
                         depth_bounds.append((depth_num, depth_num))
                         z_values.append(depth_num)
-                ts_name = str((ctx or {}).get("timeslice_name") or "").strip()
-                ts_id = str((ctx or {}).get("timeslice_id") or "").strip()
                 if ts_name and ts_name not in vertex_ts_names:
                     vertex_ts_names.append(ts_name)
                 if ts_id and ts_id not in vertex_ts_ids:
