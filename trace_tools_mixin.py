@@ -8,11 +8,33 @@ from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 from PyQt5.QtWidgets import QWidget, QHBoxLayout, QToolButton, QMessageBox, QFrame
 from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes
+from .layer_property_utils import get_layer_property
 
 from .project_catalog import load_catalog
 
 
 class TraceToolsMixin:
+    def _layer_is_in_trace_group(self, layer):
+        if layer is None:
+            return False
+        try:
+            root = QgsProject.instance().layerTreeRoot()
+            node = root.findLayer(layer.id()) if root is not None else None
+        except Exception:
+            node = None
+        if node is None:
+            return False
+        try:
+            parent = node.parent()
+            while parent is not None:
+                name = str(parent.name() or "").strip().lower()
+                if name in ("line traces", "linetraces"):
+                    return True
+                parent = parent.parent()
+        except Exception:
+            return False
+        return False
+
     def _safe_feature_count(self, layer):
         if layer is None:
             return 0
@@ -39,6 +61,13 @@ class TraceToolsMixin:
     def _is_trace_related_line_layer(self, layer):
         if layer is None:
             return False
+        # Group-based fallback for legacy projects: any line under "Line Traces"
+        # is considered trace-related and can be schema-upgraded on demand.
+        if self._layer_is_in_trace_group(layer):
+            return True
+        source_kind = str(get_layer_property(layer, "source_kind", default="") or "").strip().lower()
+        if source_kind in ("trace2d", "trace2d_3d", "trace"):
+            return True
         try:
             field_names = {f.name() for f in layer.fields()}
         except Exception:
@@ -325,6 +354,14 @@ class TraceToolsMixin:
             "mActionFileSaveAs.svg",
             "mActionSaveAs.svg",
         )
+        self._add_trace_toolbar_action(
+            None,
+            "Generate Vertices",
+            self.generate_trace_vertex_layer,
+            "mActionExtractVertices.svg",
+            "mActionPointLayerFromTable.svg",
+            "mActionAddPointLayer.svg",
+        )
 
     def _init_trace_toolbar(self):
         if self.trace_toolbar is not None:
@@ -349,7 +386,7 @@ class TraceToolsMixin:
             if action is not None:
                 toolbar.addAction(action)
         toolbar.addSeparator()
-        for name in ("Build 3D", "Build 3D Batch", "Orthometric 3D", "Export Layer"):
+        for name in ("Generate Vertices", "Build 3D", "Build 3D Batch", "Orthometric 3D", "Export Layer"):
             action = self.trace_toolbar_actions.get(name)
             if action is not None:
                 toolbar.addAction(action)
@@ -408,7 +445,14 @@ class TraceToolsMixin:
         _add_separator()
 
         # Group 3: model/export/check utilities
-        for action_name in ("Build 3D", "Build 3D Batch", "Orthometric 3D", "Export Layer", "Workflow Check"):
+        for action_name in (
+            "Generate Vertices",
+            "Build 3D",
+            "Build 3D Batch",
+            "Orthometric 3D",
+            "Export Layer",
+            "Workflow Check",
+        ):
             _add_button(action_name)
 
         tools_layout.addStretch(1)

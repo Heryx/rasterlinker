@@ -331,7 +331,7 @@ class TraceLabelingMixin:
             }
         return by_idx
 
-    def _ensure_trace_vertex_label_layer(self, source_layer):
+    def _find_trace_vertex_label_layer(self, source_layer):
         if source_layer is None:
             return None
         source_layer_id = source_layer.id()
@@ -360,6 +360,14 @@ class TraceLabelingMixin:
                 set_layer_property(lyr, "trace_layer_id", str(source_layer_id))
             label_layer = lyr
             break
+
+        return label_layer
+
+    def _ensure_trace_vertex_label_layer(self, source_layer):
+        if source_layer is None:
+            return None
+        source_layer_id = source_layer.id()
+        label_layer = self._find_trace_vertex_label_layer(source_layer)
 
         if label_layer is None:
             crs_authid = source_layer.crs().authid() if source_layer.crs().isValid() else "EPSG:4326"
@@ -452,14 +460,17 @@ class TraceLabelingMixin:
         self._ensure_trace_vertex_relation(source_layer, label_layer)
         return label_layer
 
-    def _sync_trace_vertex_depth_labels(self, layer=None):
+    def _sync_trace_vertex_depth_labels(self, layer=None, create_if_missing=False):
         source_layer = layer
         if source_layer is None:
             source_layer = self._current_trace_layer(prefer_active=True, require_trace=True)
         if not self._is_trace_layer(source_layer):
             return
 
-        label_layer = self._ensure_trace_vertex_label_layer(source_layer)
+        if create_if_missing:
+            label_layer = self._ensure_trace_vertex_label_layer(source_layer)
+        else:
+            label_layer = self._find_trace_vertex_label_layer(source_layer)
         if label_layer is None:
             return
 

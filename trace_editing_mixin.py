@@ -360,7 +360,8 @@ class TraceEditingMixin:
                 self._set_draw_action_checked(True)
                 self._set_trace_draw_state_from_layer(layer)
                 return False
-            self._sync_trace_vertex_depth_labels(layer)
+            # Issue #20: keep vertex layer optional; update only if already present.
+            self._sync_trace_vertex_depth_labels(layer, create_if_missing=False)
             self._notify_info(
                 f"Edits saved and editing stopped. ({int((time.perf_counter() - t0) * 1000)} ms)",
                 duration=5,
@@ -432,3 +433,33 @@ class TraceEditingMixin:
         except Exception:
             if not self._trigger_iface_action("actionOpenTable"):
                 QMessageBox.warning(self._ui_parent(), "Attribute Table", "Unable to open attribute table.")
+
+    def generate_trace_vertex_layer(self, checked=False):
+        layer = self._current_trace_layer(prefer_active=True, require_trace=True)
+        if layer is None:
+            layer = self._select_line_layer_dialog(require_trace=True)
+        if layer is None:
+            return
+        self._set_active_trace_layer(layer)
+
+        if not hasattr(self, "_sync_trace_vertex_depth_labels"):
+            QMessageBox.warning(
+                self._ui_parent(),
+                "Generate Vertices",
+                "Vertex layer generation is not available in this build.",
+            )
+            return
+
+        try:
+            self._sync_trace_vertex_depth_labels(layer, create_if_missing=True)
+            self.refresh_trace_info_table()
+            self._notify_info(
+                f"Vertex layer generated/updated for '{layer.name()}'.",
+                duration=5,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self._ui_parent(),
+                "Generate Vertices",
+                f"Unable to generate vertex layer.\n{exc}",
+            )

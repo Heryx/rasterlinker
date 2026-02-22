@@ -28,6 +28,15 @@ from .project_catalog import load_catalog, update_raster_group
 
 
 class CatalogToolsMixin:
+    def _plugin_root_group_names(self):
+        primary = str(getattr(self, "plugin_layer_root_name", "") or "").strip()
+        names = []
+        for name in (primary, "RasterLinker", "rasterlinker"):
+            n = str(name or "").strip()
+            if n and n not in names:
+                names.append(n)
+        return names
+
     def _active_project_root(self):
         if self.project_manager_dialog is not None and self.project_manager_dialog.project_root:
             return self.project_manager_dialog.project_root
@@ -66,15 +75,27 @@ class CatalogToolsMixin:
 
     def _get_plugin_root_group(self):
         root = QgsProject.instance().layerTreeRoot()
-        group = next(
-            (
-                g for g in root.children()
-                if isinstance(g, QgsLayerTreeGroup) and g.name() == self.plugin_layer_root_name
-            ),
-            None,
-        )
+        aliases = self._plugin_root_group_names()
+        group = None
+        for alias in aliases:
+            group = next(
+                (
+                    g for g in root.children()
+                    if isinstance(g, QgsLayerTreeGroup) and str(g.name() or "").strip() == alias
+                ),
+                None,
+            )
+            if group is not None:
+                break
         if group is None:
             group = root.addGroup(self.plugin_layer_root_name)
+        else:
+            # Normalize legacy root naming without changing children content.
+            try:
+                if str(group.name() or "").strip() != str(self.plugin_layer_root_name):
+                    group.setName(self.plugin_layer_root_name)
+            except Exception:
+                pass
         return group
 
     def _get_or_create_plugin_qgis_group(self, group_name):
@@ -92,13 +113,17 @@ class CatalogToolsMixin:
 
     def _find_plugin_root_group(self):
         root = QgsProject.instance().layerTreeRoot()
-        return next(
-            (
-                g for g in root.children()
-                if isinstance(g, QgsLayerTreeGroup) and g.name() == self.plugin_layer_root_name
-            ),
-            None,
-        )
+        for alias in self._plugin_root_group_names():
+            found = next(
+                (
+                    g for g in root.children()
+                    if isinstance(g, QgsLayerTreeGroup) and str(g.name() or "").strip() == alias
+                ),
+                None,
+            )
+            if found is not None:
+                return found
+        return None
 
     def _remove_plugin_qgis_group(self, group_name):
         plugin_root = self._find_plugin_root_group()

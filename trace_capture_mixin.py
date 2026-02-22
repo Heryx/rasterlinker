@@ -293,6 +293,121 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             except Exception:
                 pass
 
+    def _is_trace_like_line_layer(self, layer):
+        if not self._is_line_layer(layer):
+            return False
+        try:
+            if self._is_trace_layer(layer):
+                return True
+        except Exception:
+            pass
+        if hasattr(self, "_is_trace_related_line_layer"):
+            try:
+                if self._is_trace_related_line_layer(layer):
+                    return True
+            except Exception:
+                pass
+        try:
+            lname = str(layer.name() or "").strip().lower()
+        except Exception:
+            lname = ""
+        if lname.startswith("trace2d") or "trace" in lname:
+            return True
+        try:
+            field_names = {f.name() for f in layer.fields()}
+        except Exception:
+            field_names = set()
+        hints = {"trace_id", "ts_id", "ts_name", "z_mode", "depth_from", "depth_to"}
+        return bool(field_names.intersection(hints))
+
+    def _bootstrap_trace_layer_from_project(self):
+        """
+        Recover trace layer after plugin restart even when active layer/id is not set.
+        Also keeps trace-like line layers grouped under "Line Traces" for consistency.
+        """
+        try:
+            all_layers = list(QgsProject.instance().mapLayers().values())
+        except Exception:
+            all_layers = []
+        if not all_layers:
+            return None
+
+        candidates = [lyr for lyr in all_layers if self._is_trace_like_line_layer(lyr)]
+        if not candidates:
+            return None
+
+        valid = []
+        for lyr in candidates:
+            try:
+                self._ensure_trace_layer_schema_and_form(lyr)
+            except Exception:
+                pass
+            try:
+                if self._is_trace_layer(lyr):
+                    valid.append(lyr)
+            except Exception:
+                continue
+        if not valid:
+            return None
+
+        # Move recognized trace layers under dedicated trace group (non-destructive in data).
+        try:
+            trace_group = self._get_or_create_trace_group()
+            root = QgsProject.instance().layerTreeRoot()
+        except Exception:
+            trace_group = None
+            root = None
+        if trace_group is not None and root is not None:
+            for lyr in valid:
+                try:
+                    node = root.findLayer(lyr.id())
+                    if node is None:
+                        continue
+                    parent = node.parent()
+                    if parent is trace_group:
+                        continue
+                    clone = node.clone()
+                    trace_group.insertChildNode(0, clone)
+                    if parent is not None:
+                        parent.removeChildNode(node)
+                except Exception:
+                    continue
+
+        # Pick stable preferred layer:
+        # active line -> id-linked -> highest feature count.
+        chosen = None
+        try:
+            active = self.iface.activeLayer()
+            if active in valid:
+                chosen = active
+        except Exception:
+            pass
+        if chosen is None and self.trace_line_layer_id:
+            try:
+                by_id = QgsProject.instance().mapLayer(self.trace_line_layer_id)
+                if by_id in valid:
+                    chosen = by_id
+            except Exception:
+                pass
+        if chosen is None:
+            def _count(lyr):
+                try:
+                    return int(lyr.featureCount())
+                except Exception:
+                    return 0
+            valid.sort(key=_count, reverse=True)
+            chosen = valid[0]
+
+        try:
+            self.trace_line_layer_id = chosen.id()
+        except Exception:
+            pass
+        try:
+            self._connect_trace_layer_signals(chosen)
+        except Exception:
+            pass
+        return chosen
+
     def _set_active_trace_layer(self, layer):
         if layer is None:
             return
@@ -335,11 +450,40 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             if self._is_line_layer(active):
                 if not require_trace or self._is_trace_layer(active):
                     return active
+                if require_trace and hasattr(self, "_is_trace_related_line_layer"):
+                    try:
+                        if self._is_trace_related_line_layer(active):
+                            self._ensure_trace_layer_schema_and_form(active)
+                            if self._is_trace_layer(active):
+                                self.trace_line_layer_id = active.id()
+                                return active
+                    except Exception:
+                        pass
         if self.trace_line_layer_id:
             layer = QgsProject.instance().mapLayer(self.trace_line_layer_id)
             if self._is_line_layer(layer):
                 if not require_trace or self._is_trace_layer(layer):
                     return layer
+                if require_trace and hasattr(self, "_is_trace_related_line_layer"):
+                    try:
+                        if self._is_trace_related_line_layer(layer):
+                            self._ensure_trace_layer_schema_and_form(layer)
+                            if self._is_trace_layer(layer):
+                                self.trace_line_layer_id = layer.id()
+                                return layer
+                    except Exception:
+                        pass
+
+        # Fallback discovery from project on plugin restart.
+        picked = self._bootstrap_trace_layer_from_project()
+        if picked is not None:
+            if not require_trace:
+                return picked
+            try:
+                if self._is_trace_layer(picked):
+                    return picked
+            except Exception:
+                pass
         return None
 
     def _select_line_layer_dialog(self, require_trace=False):
@@ -348,7 +492,16 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             if not self._is_line_layer(lyr):
                 continue
             if require_trace and not self._is_trace_layer(lyr):
-                continue
+                promoted = False
+                if hasattr(self, "_is_trace_related_line_layer"):
+                    try:
+                        if self._is_trace_related_line_layer(lyr):
+                            self._ensure_trace_layer_schema_and_form(lyr)
+                            promoted = self._is_trace_layer(lyr)
+                    except Exception:
+                        promoted = False
+                if not promoted:
+                    continue
             layers.append(lyr)
         if not layers:
             QMessageBox.warning(self._ui_parent(), "Line Layer", "No suitable line layer found.")
@@ -1686,20 +1839,16 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             if trace_id:
                 prompted_trace_ids.add(trace_id)
                 done_trace_ids.add(trace_id)
-            # Critical rule: never prompt while save/commit transition is in progress.
-            # Allow popup also when draw state is not strictly "drawing_active"
-            # (e.g. external/QGIS-driven digitize sessions), but keep it disabled
-            # for commit/save transitions to avoid re-appearing on Save.
-            can_prompt_in_state = prev_state != "saving"
-            if (
-                should_prompt
-                and can_prompt_in_state
-                and bool(getattr(self, "trace_prompt_interpretation_popup", False))
-            ):
+            # Prompt once per new feature when enabled.
+            # We intentionally do not block on "saving" state because some providers
+            # can emit featureAdded in save/commit transitions.
+            if should_prompt and bool(getattr(self, "trace_prompt_interpretation_popup", False)):
                 self._prompt_trace_interpretation_fields(layer, fid)
 
             layer.triggerRepaint()
-            self._sync_trace_vertex_depth_labels(layer)
+            # Issue #20: do not auto-create vertex layer during line capture.
+            # Only refresh it if it already exists.
+            self._sync_trace_vertex_depth_labels(layer, create_if_missing=False)
             self.refresh_trace_info_table()
             success = True
         finally:

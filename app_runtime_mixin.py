@@ -151,6 +151,11 @@ class AppRuntimeMixin:
             self._tune_visual_layout()
             self._apply_responsive_main_layout(self.dlg.width())
             self._apply_button_icons()
+            if hasattr(self, "_bootstrap_trace_layer_from_project"):
+                try:
+                    self._bootstrap_trace_layer_from_project()
+                except Exception:
+                    pass
             self.refresh_trace_info_table()
 
             # Collega il dial alla funzione di aggiornamento
@@ -168,6 +173,11 @@ class AppRuntimeMixin:
             self._apply_responsive_main_layout(self.dlg.width())
         if self.dlg is not None:
             self._apply_button_icons()
+            if hasattr(self, "_bootstrap_trace_layer_from_project"):
+                try:
+                    self._bootstrap_trace_layer_from_project()
+                except Exception:
+                    pass
             self.refresh_trace_info_table()
         if not self._active_project_root():
             self._notify_info(

@@ -114,7 +114,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             except Exception:
                 continue
             try:
-                self._sync_trace_vertex_depth_labels(lyr)
+                self._sync_trace_vertex_depth_labels(lyr, create_if_missing=False)
             except Exception:
                 continue
         try:
@@ -156,7 +156,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             try:
                 lyr = self._current_trace_layer(prefer_active=True, require_trace=False)
                 if lyr is not None and hasattr(self, "_sync_trace_vertex_depth_labels"):
-                    self._sync_trace_vertex_depth_labels(lyr)
+                    self._sync_trace_vertex_depth_labels(lyr, create_if_missing=False)
             except Exception:
                 pass
         if hasattr(self, "_apply_vertex_label_mode_to_layers"):
@@ -391,7 +391,11 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         if line_layer is None:
             return
         try:
-            label_layer = self._ensure_trace_vertex_label_layer(line_layer)
+            label_layer = (
+                self._find_trace_vertex_label_layer(line_layer)
+                if hasattr(self, "_find_trace_vertex_label_layer")
+                else None
+            )
         except Exception:
             label_layer = None
         if label_layer is None:
@@ -719,6 +723,9 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         interpretation_prompt_act.toggled.connect(
             lambda checked=False: self._set_trace_interpretation_prompt_enabled(bool(checked), persist=True)
         )
+        interpretation_prompt_act.triggered.connect(
+            lambda checked=False: self._set_trace_interpretation_prompt_enabled(bool(checked), persist=True)
+        )
 
         query_menu.addSeparator()
         clear_text_act = query_menu.addAction("Clear text filter")
@@ -979,6 +986,14 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             self.trace_info_dock.show()
             self.trace_info_dock.raise_()
             self.trace_info_dock.activateWindow()
+        try:
+            layer = self._current_trace_layer(prefer_active=True, require_trace=True)
+            if layer is not None:
+                self.trace_line_layer_id = layer.id()
+                if hasattr(self, "_connect_trace_layer_signals"):
+                    self._connect_trace_layer_signals(layer)
+        except Exception:
+            pass
         # Ensure line<->vertex relations and vertex label layers are present for existing traces.
         self._resync_vertex_layers_for_all_traces()
         self.refresh_trace_info_table()
@@ -1007,7 +1022,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
 
         vertex_counts = {}
         try:
-            vlyr = self._ensure_trace_vertex_label_layer(layer) if hasattr(self, "_ensure_trace_vertex_label_layer") else None
+            vlyr = self._find_trace_vertex_label_layer(layer) if hasattr(self, "_find_trace_vertex_label_layer") else None
             if vlyr is not None:
                 idx_tid = vlyr.fields().indexOf("trace_id")
                 if idx_tid >= 0:
@@ -1164,7 +1179,8 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
 
         if hasattr(self, "_sync_trace_vertex_depth_labels"):
             try:
-                self._sync_trace_vertex_depth_labels(layer)
+                # Issue #20: no implicit vertex-layer creation from panel refresh.
+                self._sync_trace_vertex_depth_labels(layer, create_if_missing=False)
             except Exception:
                 pass
         if hasattr(self, "_sync_draw_action_checked_for_layer"):
