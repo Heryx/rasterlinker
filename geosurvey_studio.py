@@ -111,15 +111,21 @@ class GeoSurveyStudioPlugin(
         self.trace_info_mode_combo = None
         self.trace_info_sort_field_combo = None
         self.trace_info_sort_order_combo = None
+        self.trace_info_depth_pick_combo = None
+        self.trace_info_depth_pick_btn = None
+        self.trace_depth_pick_mode = "off"
         self.trace_info_stack = None
         self.trace_info_form_list = None
         self.trace_info_form_fields = {}
+        self.trace_info_vertex_table = None
+        self.trace_info_source_layer_id = None
         self.trace_info_form_preview_combo = None
         self.trace_info_form_preview_key = "timeslice"
         self.trace_info_view_table_btn = None
         self.trace_info_view_form_btn = None
         self.trace_info_query_btn = None
         self.trace_info_query_panel = None
+        self.trace_info_interpretation_prompt_action = None
         self.trace_info_help_btn = None
         self.trace_info_help_panel = None
         self.trace_info_selection_guard = False
@@ -129,6 +135,16 @@ class GeoSurveyStudioPlugin(
         self.trace_z_grid_cache = {}
         self.trace_missing_z_prompt_shown = False
         self.trace_allow_missing_z_for_session = False
+        self.trace_prompt_interpretation_popup = True
+        self.trace_interpretation_prompted_keys = set()
+        self.trace_interpretation_prompted_trace_ids = set()
+        self.trace_draw_session_state = "idle"
+        self.trace_postprocess_inflight = set()
+        self.trace_postprocess_done = set()
+        self.trace_postprocess_done_trace_ids = set()
+        self.trace_canvas_click_filter = None
+        self.trace_canvas_click_capture_enabled = False
+        self.trace_pending_vertex_clicks = []
         self.check_updates_action = None
         self._update_checked_this_session = False
 
@@ -237,19 +253,41 @@ class GeoSurveyStudioPlugin(
             self.trace_info_mode_combo = None
             self.trace_info_sort_field_combo = None
             self.trace_info_sort_order_combo = None
+            self.trace_info_depth_pick_combo = None
+            self.trace_info_depth_pick_btn = None
+            self.trace_depth_pick_mode = "off"
             self.trace_info_stack = None
             self.trace_info_form_list = None
             self.trace_info_form_fields = {}
+            self.trace_info_vertex_table = None
+            self.trace_info_source_layer_id = None
             self.trace_info_form_preview_combo = None
             self.trace_info_form_preview_key = "timeslice"
             self.trace_info_view_table_btn = None
             self.trace_info_view_form_btn = None
             self.trace_info_query_btn = None
             self.trace_info_query_panel = None
+            self.trace_info_interpretation_prompt_action = None
             self.trace_info_help_btn = None
             self.trace_info_help_panel = None
             self.trace_info_selection_guard = False
             self.trace_info_is_docked = False
+        if self.trace_canvas_click_filter is not None:
+            try:
+                canvas = self.iface.mapCanvas()
+                if canvas is not None and canvas.viewport() is not None:
+                    canvas.viewport().removeEventFilter(self.trace_canvas_click_filter)
+            except Exception:
+                pass
+            self.trace_canvas_click_filter = None
+            self.trace_canvas_click_capture_enabled = False
+            self.trace_pending_vertex_clicks = []
+        self.trace_interpretation_prompted_keys = set()
+        self.trace_interpretation_prompted_trace_ids = set()
+        self.trace_draw_session_state = "idle"
+        self.trace_postprocess_inflight = set()
+        self.trace_postprocess_done = set()
+        self.trace_postprocess_done_trace_ids = set()
         if self.orientation_helper_dialog is not None:
             try:
                 self.orientation_helper_dialog.hide()

@@ -283,7 +283,10 @@ class TraceBuild3DMixin:
                 )
 
         QgsProject.instance().addMapLayer(out_layer, False)
-        self._get_or_create_trace_group().addLayer(out_layer)
+        if hasattr(self, "_add_layer_to_trace_group_top"):
+            self._add_layer_to_trace_group_top(out_layer)
+        else:
+            self._get_or_create_trace_group().addLayer(out_layer)
         return out_layer
 
     def _feature_z_from_linked_grid(self, source_layer, feat):

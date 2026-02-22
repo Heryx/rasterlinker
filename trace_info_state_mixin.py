@@ -68,6 +68,16 @@ class TraceInfoStateMixin:
             sort_order = "desc" if self.trace_info_sort_order_combo.currentData() == Qt.DescendingOrder else "asc"
         settings.setValue(self._trace_info_settings_key("sort_order"), sort_order)
 
+        depth_pick = str(getattr(self, "trace_depth_pick_mode", "off") or "off").strip().lower()
+        if self.trace_info_depth_pick_combo is not None:
+            depth_pick = str(self.trace_info_depth_pick_combo.currentData() or depth_pick).strip().lower()
+        if depth_pick not in ("off", "min", "mid", "max"):
+            depth_pick = "off"
+        settings.setValue(self._trace_info_settings_key("depth_pick"), depth_pick)
+
+        interpretation_prompt = bool(getattr(self, "trace_prompt_interpretation_popup", True))
+        settings.setValue(self._trace_info_settings_key("interpretation_prompt_on_draw"), interpretation_prompt)
+
         form_preview_key = str(getattr(self, "trace_info_form_preview_key", "timeslice") or "timeslice")
         settings.setValue(self._trace_info_settings_key("form_preview_key"), form_preview_key)
 
@@ -117,6 +127,14 @@ class TraceInfoStateMixin:
         mode_filter = str(settings.value(self._trace_info_settings_key("mode_filter"), "all") or "all").strip()
         sort_field = str(settings.value(self._trace_info_settings_key("sort_field"), "fid") or "fid").strip()
         sort_order_txt = str(settings.value(self._trace_info_settings_key("sort_order"), "asc") or "asc").strip().lower()
+        depth_pick = str(settings.value(self._trace_info_settings_key("depth_pick"), "off") or "off").strip().lower()
+        if depth_pick not in ("off", "min", "mid", "max"):
+            depth_pick = "off"
+        interpretation_prompt = settings.value(
+            self._trace_info_settings_key("interpretation_prompt_on_draw"),
+            True,
+            type=bool,
+        )
         form_preview_key = str(
             settings.value(self._trace_info_settings_key("form_preview_key"), "timeslice") or "timeslice"
         ).strip().lower()
@@ -155,6 +173,27 @@ class TraceInfoStateMixin:
             idx = self.trace_info_sort_order_combo.findData(order_value)
             if idx >= 0:
                 self.trace_info_sort_order_combo.setCurrentIndex(idx)
+        if self.trace_info_depth_pick_combo is not None:
+            idx = self.trace_info_depth_pick_combo.findData(depth_pick)
+            if idx >= 0:
+                self.trace_info_depth_pick_combo.setCurrentIndex(idx)
+        self.trace_depth_pick_mode = depth_pick
+        if hasattr(self, "_set_trace_depth_pick_mode"):
+            try:
+                self._set_trace_depth_pick_mode(depth_pick, persist=False)
+            except Exception:
+                pass
+        if hasattr(self, "_set_trace_interpretation_prompt_enabled"):
+            try:
+                self._set_trace_interpretation_prompt_enabled(bool(interpretation_prompt), persist=False)
+            except Exception:
+                self.trace_prompt_interpretation_popup = bool(interpretation_prompt)
+        else:
+            self.trace_prompt_interpretation_popup = bool(interpretation_prompt)
+        try:
+            self._update_trace_info_depth_pick_button()
+        except Exception:
+            pass
 
         self._toggle_trace_query_panel(False)
         self._toggle_trace_help_panel(bool(help_visible))
@@ -201,7 +240,7 @@ class TraceInfoStateMixin:
 
     def _set_trace_info_form_preview_column(self, key, persist=True):
         key_txt = str(key or "timeslice").strip().lower()
-        allowed = ("timeslice", "depth", "z_mode", "length")
+        allowed = ("timeslice", "depth", "z_mode", "length", "vertices")
         if key_txt not in allowed:
             key_txt = "timeslice"
         self.trace_info_form_preview_key = key_txt
@@ -211,10 +250,11 @@ class TraceInfoStateMixin:
             "depth": 3,
             "z_mode": 4,
             "length": 5,
+            "vertices": 6,
         }
         target_col = col_map.get(key_txt, 2)
         if self.trace_info_form_list is not None:
-            for col in range(6):
+            for col in range(7):
                 self.trace_info_form_list.setColumnHidden(col, col != target_col)
             try:
                 hdr = self.trace_info_form_list.horizontalHeader()

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Trace editing/capture mixin for GeoSurvey Studio plugin."""
 
+import time
+
 from qgis.PyQt.QtWidgets import QMessageBox, QInputDialog
 from qgis.core import QgsProject, QgsVectorLayer
 
@@ -8,6 +10,17 @@ from .layer_property_utils import set_layer_property
 
 
 class TraceEditingMixin:
+    def _set_trace_draw_session_state(self, state):
+        state_txt = str(state or "idle").strip().lower()
+        allowed = {"idle", "drawing_active", "saving", "postprocess"}
+        if state_txt not in allowed:
+            state_txt = "idle"
+        self.trace_draw_session_state = state_txt
+
+    def _set_trace_draw_state_from_layer(self, layer):
+        is_editing = bool(layer is not None and getattr(layer, "isEditable", lambda: False)())
+        self._set_trace_draw_session_state("drawing_active" if is_editing else "idle")
+
     def create_trace_line_layer(self, checked=False):
         default_name = "Trace2D"
         name, ok = QInputDialog.getText(
@@ -63,8 +76,17 @@ class TraceEditingMixin:
             set_layer_property(layer, "storage_mode", "memory")
 
         QgsProject.instance().addMapLayer(layer, False)
-        self._get_or_create_trace_group().addLayer(layer)
+        if hasattr(self, "_add_layer_to_trace_group_top"):
+            self._add_layer_to_trace_group_top(layer)
+        else:
+            self._get_or_create_trace_group().addLayer(layer)
         self._set_active_trace_layer(layer)
+        if hasattr(self, "_reset_trace_postprocess_cache"):
+            try:
+                self._reset_trace_postprocess_cache(layer.id())
+            except Exception:
+                pass
+        self._set_trace_draw_session_state("idle")
         if storage_mode == "gpkg" and created_path:
             self._notify_info(
                 f"Line layer '{layer_name}' created in GeoPackage: {created_path}",
@@ -111,6 +133,7 @@ class TraceEditingMixin:
         toggle_on = True if checked is None else bool(checked)
         layer = self._ensure_trace_layer_for_capture()
         if layer is None:
+            self._set_trace_draw_session_state("idle")
             self._set_draw_action_checked(False)
             return
         self._set_active_trace_layer(layer)
@@ -119,6 +142,9 @@ class TraceEditingMixin:
         if not toggle_on:
             if layer.isEditable():
                 self.stop_trace_layer_editing()
+            if hasattr(self, "_set_trace_canvas_click_capture_enabled"):
+                self._set_trace_canvas_click_capture_enabled(False)
+            self._set_trace_draw_session_state("idle")
             self._sync_draw_action_checked_for_layer(layer)
             return
 
@@ -127,15 +153,40 @@ class TraceEditingMixin:
                 layer.startEditing()
             except Exception:
                 QMessageBox.warning(self._ui_parent(), "Draw 2D Line", "Unable to start editing on target layer.")
+                self._set_trace_draw_session_state("idle")
                 self._set_draw_action_checked(False)
                 return
 
+        if hasattr(self, "_reset_trace_postprocess_cache"):
+            try:
+                self._reset_trace_postprocess_cache(layer.id())
+            except Exception:
+                pass
+
         self._sync_draw_action_checked_for_layer(layer)
+        self._set_trace_draw_session_state("drawing_active")
         rec, payload = self._active_timeslice_record()
         if rec is not None and not self._confirm_missing_z_for_capture(rec):
-            self._sync_draw_action_checked_for_layer(layer)
+            if hasattr(self, "_set_trace_canvas_click_capture_enabled"):
+                self._set_trace_canvas_click_capture_enabled(False)
+            self._set_draw_action_checked(False)
+            self._set_trace_draw_session_state("idle")
             return
+        if hasattr(self, "_sync_qgis_group_visibility_with_selection"):
+            try:
+                self._sync_qgis_group_visibility_with_selection()
+            except Exception:
+                pass
+        if hasattr(self, "_get_or_create_trace_group"):
+            try:
+                trace_group = self._get_or_create_trace_group()
+                if trace_group is not None and hasattr(trace_group, "setItemVisibilityChecked"):
+                    trace_group.setItemVisibilityChecked(True)
+            except Exception:
+                pass
         self.trace_capture_context = {"timeslice": rec, "payload": payload}
+        if hasattr(self, "_set_trace_canvas_click_capture_enabled"):
+            self._set_trace_canvas_click_capture_enabled(True)
         if rec is None:
             self._notify_info(
                 "No active time-slice selected. The new line will have empty time-slice metadata.",
@@ -143,11 +194,15 @@ class TraceEditingMixin:
             )
         if not self._trigger_iface_action("actionAddFeature"):
             QMessageBox.warning(self._ui_parent(), "Draw 2D Line", "Unable to activate Add Feature tool.")
-            self._sync_draw_action_checked_for_layer(layer)
+            if hasattr(self, "_set_trace_canvas_click_capture_enabled"):
+                self._set_trace_canvas_click_capture_enabled(False)
+            self._set_trace_draw_session_state("idle")
+            self._set_draw_action_checked(False)
             return
         self._notify_info("Digitize line on canvas (right-click to finish).", duration=5)
 
     def save_trace_layer_edits(self, checked=False):
+        t0 = time.perf_counter()
         layer = self._current_trace_layer(prefer_active=True, require_trace=True)
         if layer is None:
             layer = self._select_line_layer_dialog(require_trace=True)
@@ -156,6 +211,7 @@ class TraceEditingMixin:
         self._set_active_trace_layer(layer)
 
         if not layer.isEditable():
+            self._set_trace_draw_state_from_layer(layer)
             self._notify_info("Layer is not in edit mode; nothing to save.", duration=5)
             return
 
@@ -164,9 +220,11 @@ class TraceEditingMixin:
         except Exception:
             modified = True
         if not modified:
+            self._set_trace_draw_state_from_layer(layer)
             self._notify_info("No pending edits to save.", duration=4)
             return
 
+        self._set_trace_draw_session_state("saving")
         ok = False
         kept_editing = False
         try:
@@ -190,6 +248,7 @@ class TraceEditingMixin:
                 "Save Edits",
                 "Unable to save layer edits." + (f"\n{err_text}" if err_text else ""),
             )
+            self._set_trace_draw_state_from_layer(layer)
             return
 
         if not kept_editing:
@@ -200,24 +259,30 @@ class TraceEditingMixin:
                 kept_editing = False
 
         self._notify_info(
-            "Trace edits saved." + (" Editing session is still active." if kept_editing else ""),
+            "Trace edits saved."
+            + (" Editing session is still active." if kept_editing else "")
+            + f" ({int((time.perf_counter() - t0) * 1000)} ms)",
             duration=5,
         )
-        self._sync_trace_vertex_depth_labels(layer)
-        self.refresh_trace_info_table()
+        self._set_trace_draw_session_state("drawing_active" if kept_editing else "idle")
+        if self.trace_info_dock is not None and self.trace_info_dock.isVisible():
+            self.refresh_trace_info_table()
 
     def stop_trace_layer_editing(self, checked=False):
+        t0 = time.perf_counter()
         layer = self._current_trace_layer(prefer_active=True, require_trace=True)
         if layer is None:
             layer = self._select_line_layer_dialog(require_trace=True)
         if layer is None:
             self._set_draw_action_checked(False)
+            self._set_trace_draw_session_state("idle")
             return False
         self._set_active_trace_layer(layer)
 
         if not layer.isEditable():
             self._notify_info("Layer is not in edit mode.", duration=4)
             self._set_draw_action_checked(False)
+            self._set_trace_draw_session_state("idle")
             return False
 
         try:
@@ -228,6 +293,7 @@ class TraceEditingMixin:
         if not modified:
             closed = False
             try:
+                # Fast path after explicit Save: just close edit mode.
                 closed = bool(layer.rollBack())
             except Exception:
                 closed = False
@@ -242,11 +308,16 @@ class TraceEditingMixin:
                     "Stop Editing",
                     "Unable to close edit mode for the active layer.",
                 )
+                self._set_trace_draw_state_from_layer(layer)
                 self._sync_draw_action_checked_for_layer(layer)
                 return False
-            self._notify_info("Editing stopped.", duration=4)
-            self.refresh_trace_info_table()
+            self._notify_info(f"Editing stopped. ({int((time.perf_counter() - t0) * 1000)} ms)", duration=4)
+            if self.trace_info_dock is not None and self.trace_info_dock.isVisible():
+                self.refresh_trace_info_table()
             self._set_draw_action_checked(False)
+            self._set_trace_draw_session_state("idle")
+            if hasattr(self, "_set_trace_canvas_click_capture_enabled"):
+                self._set_trace_canvas_click_capture_enabled(False)
             return True
 
         msg = QMessageBox(self._ui_parent())
@@ -262,9 +333,11 @@ class TraceEditingMixin:
         clicked = msg.clickedButton()
         if clicked == cancel_btn or clicked is None:
             self._set_draw_action_checked(True)
+            self._set_trace_draw_state_from_layer(layer)
             return False
 
         if clicked == save_btn:
+            self._set_trace_draw_session_state("saving")
             ok = False
             try:
                 ok = bool(layer.commitChanges())
@@ -285,11 +358,19 @@ class TraceEditingMixin:
                     + (f"\n{err_text}" if err_text else ""),
                 )
                 self._set_draw_action_checked(True)
+                self._set_trace_draw_state_from_layer(layer)
                 return False
             self._sync_trace_vertex_depth_labels(layer)
-            self._notify_info("Edits saved and editing stopped.", duration=5)
-            self.refresh_trace_info_table()
+            self._notify_info(
+                f"Edits saved and editing stopped. ({int((time.perf_counter() - t0) * 1000)} ms)",
+                duration=5,
+            )
+            if self.trace_info_dock is not None and self.trace_info_dock.isVisible():
+                self.refresh_trace_info_table()
             self._set_draw_action_checked(False)
+            self._set_trace_draw_session_state("idle")
+            if hasattr(self, "_set_trace_canvas_click_capture_enabled"):
+                self._set_trace_canvas_click_capture_enabled(False)
             return True
 
         # Discard path
@@ -305,10 +386,18 @@ class TraceEditingMixin:
                 "Unable to discard edits and stop editing.",
             )
             self._set_draw_action_checked(True)
+            self._set_trace_draw_state_from_layer(layer)
             return False
-        self._notify_info("Edits discarded and editing stopped.", duration=5)
-        self.refresh_trace_info_table()
+        self._notify_info(
+            f"Edits discarded and editing stopped. ({int((time.perf_counter() - t0) * 1000)} ms)",
+            duration=5,
+        )
+        if self.trace_info_dock is not None and self.trace_info_dock.isVisible():
+            self.refresh_trace_info_table()
         self._set_draw_action_checked(False)
+        self._set_trace_draw_session_state("idle")
+        if hasattr(self, "_set_trace_canvas_click_capture_enabled"):
+            self._set_trace_canvas_click_capture_enabled(False)
         return True
 
     def activate_trace_vertex_tool(self, checked=False):

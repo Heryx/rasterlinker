@@ -61,7 +61,8 @@ class TraceInfoHelpMixin:
                     "Search box filters by id, time-slice, z mode, length.\n"
                     "Funnel icon toggles advanced filter/sort controls.\n"
                     "Mode: All / Only Missing Z / Only With Z.\n"
-                    "Sort by field and order (Asc/Desc)."
+                    "Sort by field and order (Asc/Desc).\n"
+                    "Depth from range: choose Min / Mid / Max for z_value and vertex depth."
                 ),
             ),
             (

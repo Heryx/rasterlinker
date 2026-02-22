@@ -5,8 +5,8 @@ from qgis.PyQt.QtCore import QAbstractTableModel, Qt
 
 
 class TraceInfoTableModel(QAbstractTableModel):
-    HEADERS = ["FID", "Trace ID", "Time-slice", "Depth", "Z mode", "Length"]
-    COLUMN_KEYS = ("fid", "trace_id", "timeslice", "depth_text", "z_mode", "length_text")
+    HEADERS = ["FID", "Trace ID", "Time-slice", "Depth", "Z mode", "Length", "Vertices"]
+    COLUMN_KEYS = ("fid", "trace_id", "timeslice", "depth_text", "z_mode", "length_text", "vertices_text")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,7 +50,7 @@ class TraceInfoTableModel(QAbstractTableModel):
         if role == Qt.UserRole:
             return row
 
-        if role == Qt.TextAlignmentRole and col_idx in (0, 3, 5):
+        if role == Qt.TextAlignmentRole and col_idx in (0, 3, 5, 6):
             return int(Qt.AlignRight | Qt.AlignVCenter)
 
         return None

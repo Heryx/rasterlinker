@@ -2,6 +2,7 @@
 """Trace info panel mixin for GeoSurvey Studio plugin."""
 
 from qgis.PyQt.QtCore import Qt
+from qgis.core import QgsProject
 from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QDockWidget,
@@ -16,9 +17,13 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QMenu,
     QToolButton,
+    QActionGroup,
     QHeaderView,
     QStackedWidget,
     QFormLayout,
+    QLabel,
+    QTableWidget,
+    QTableWidgetItem,
 )
 
 from .trace_info_table_model import TraceInfoTableModel
@@ -27,6 +32,145 @@ from .trace_info_state_mixin import TraceInfoStateMixin
 
 
 class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
+    def _set_trace_interpretation_prompt_enabled(self, enabled, persist=True):
+        self.trace_prompt_interpretation_popup = bool(enabled)
+        act = getattr(self, "trace_info_interpretation_prompt_action", None)
+        if act is not None and act.isChecked() != bool(enabled):
+            blocked = act.blockSignals(True)
+            act.setChecked(bool(enabled))
+            act.blockSignals(blocked)
+        if persist:
+            self._save_trace_info_ui_state()
+
+    def _resync_vertex_layers_for_all_traces(self):
+        """Recompute per-vertex depth values/labels and ensure parent-child relations."""
+        try:
+            project_layers = list(QgsProject.instance().mapLayers().values())
+        except Exception:
+            project_layers = []
+
+        candidates = []
+        seen = set()
+
+        def _add_candidate(layer):
+            if layer is None:
+                return
+            try:
+                lid = str(layer.id())
+            except Exception:
+                return
+            if lid in seen:
+                return
+            seen.add(lid)
+            candidates.append(layer)
+
+        # 1) Priority: layers under plugin trace group.
+        try:
+            grp = self._get_or_create_trace_group() if hasattr(self, "_get_or_create_trace_group") else None
+            if grp is not None and hasattr(grp, "findLayers"):
+                for child in grp.findLayers():
+                    layer = child.layer() if child is not None else None
+                    if layer is not None:
+                        _add_candidate(layer)
+        except Exception:
+            pass
+
+        # 2) Fallback: any line layer that already looks trace-related.
+        for lyr in project_layers:
+            try:
+                is_line = self._is_line_layer(lyr)
+            except Exception:
+                is_line = False
+            if not is_line:
+                continue
+            trace_like = False
+            try:
+                trace_like = self._is_trace_layer(lyr)
+            except Exception:
+                trace_like = False
+            if not trace_like and hasattr(self, "_is_trace_related_line_layer"):
+                try:
+                    trace_like = bool(self._is_trace_related_line_layer(lyr))
+                except Exception:
+                    trace_like = False
+            if trace_like:
+                _add_candidate(lyr)
+
+        # Ensure schema/ids for legacy layers, then sync labels+relations.
+        for lyr in candidates:
+            try:
+                if hasattr(self, "_ensure_trace_layer_schema_and_form"):
+                    self._ensure_trace_layer_schema_and_form(lyr)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "_connect_trace_layer_signals"):
+                    self._connect_trace_layer_signals(lyr)
+            except Exception:
+                pass
+            try:
+                if not self._is_trace_layer(lyr):
+                    continue
+            except Exception:
+                continue
+            try:
+                self._sync_trace_vertex_depth_labels(lyr)
+            except Exception:
+                continue
+        try:
+            self.refresh_trace_info_table()
+        except Exception:
+            pass
+
+    def _update_trace_info_depth_pick_button(self):
+        btn = getattr(self, "trace_info_depth_pick_btn", None)
+        combo = getattr(self, "trace_info_depth_pick_combo", None)
+        mode = str(getattr(self, "trace_depth_pick_mode", "off") or "off").strip().lower()
+        labels = {"off": "None", "min": "Min", "mid": "Mid", "max": "Max"}
+        if btn is not None:
+            btn.setText(f"Depth: {labels.get(mode, 'None')}")
+        if combo is not None:
+            idx = combo.findData(mode)
+            if idx >= 0 and combo.currentIndex() != idx:
+                blocked = combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(blocked)
+
+    def _set_trace_depth_pick_mode(self, mode, persist=True):
+        mode_txt = str(mode or "off").strip().lower()
+        if mode_txt not in ("off", "min", "mid", "max"):
+            mode_txt = "off"
+        old_mode = str(getattr(self, "trace_depth_pick_mode", "off") or "off").strip().lower()
+        combo = getattr(self, "trace_info_depth_pick_combo", None)
+        if combo is not None:
+            idx = combo.findData(mode_txt)
+            if idx >= 0 and combo.currentIndex() != idx:
+                blocked = combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(blocked)
+        self.trace_depth_pick_mode = mode_txt
+        self._update_trace_info_depth_pick_button()
+        if old_mode != mode_txt:
+            self._resync_vertex_layers_for_all_traces()
+        else:
+            try:
+                lyr = self._current_trace_layer(prefer_active=True, require_trace=False)
+                if lyr is not None and hasattr(self, "_sync_trace_vertex_depth_labels"):
+                    self._sync_trace_vertex_depth_labels(lyr)
+            except Exception:
+                pass
+        if hasattr(self, "_apply_vertex_label_mode_to_layers"):
+            try:
+                self._apply_vertex_label_mode_to_layers()
+            except Exception:
+                pass
+        try:
+            self.iface.mapCanvas().refreshAllLayers()
+        except Exception:
+            pass
+        if persist:
+            self._save_trace_info_ui_state()
+
 
     def _on_trace_info_table_selection_changed(self):
         if self.trace_info_selection_guard:
@@ -192,15 +336,114 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             "Depth": "depth_text",
             "Z mode": "z_mode",
             "Length": "length_text",
+            "Vertices": "vertices_text",
             "Group": "group_name",
             "Z source": "z_source",
             "Z grid path": "z_grid_path",
+            "Notes": "notes",
+            "Interpretation": "interpretation",
+            "Comment": "comment",
         }
         for label, widget in self.trace_info_form_fields.items():
             value = ""
             if isinstance(row_data, dict):
                 value = row_data.get(key_map.get(label, ""), "")
             widget.setText("" if value is None else str(value))
+        self._update_trace_info_vertex_child_table(row_data)
+
+    def _update_trace_info_vertex_child_table(self, row_data):
+        table = getattr(self, "trace_info_vertex_table", None)
+        if table is None:
+            return
+        table.setRowCount(0)
+        if not isinstance(row_data, dict):
+            return
+        trace_id = str(row_data.get("trace_id") or "").strip()
+        if not trace_id:
+            return
+        line_layer = None
+        src_layer_id = str(getattr(self, "trace_info_source_layer_id", "") or "").strip()
+        if src_layer_id:
+            try:
+                line_layer = QgsProject.instance().mapLayer(src_layer_id)
+            except Exception:
+                line_layer = None
+        if line_layer is None:
+            line_layer = self._current_trace_layer(prefer_active=True, require_trace=False)
+        if line_layer is None:
+            for lyr in QgsProject.instance().mapLayers().values():
+                try:
+                    if not self._is_line_layer(lyr):
+                        continue
+                    idx_tid = lyr.fields().indexOf("trace_id")
+                    if idx_tid < 0:
+                        continue
+                    found = False
+                    for feat in lyr.getFeatures():
+                        if str(feat.attribute(idx_tid) or "").strip() == trace_id:
+                            found = True
+                            break
+                    if found:
+                        line_layer = lyr
+                        break
+                except Exception:
+                    continue
+        if line_layer is None:
+            return
+        try:
+            label_layer = self._ensure_trace_vertex_label_layer(line_layer)
+        except Exception:
+            label_layer = None
+        if label_layer is None:
+            return
+        fields = label_layer.fields()
+        field_names = [f.name() for f in fields]
+        table.setColumnCount(len(field_names))
+        table.setHorizontalHeaderLabels(field_names)
+
+        idx_trace = fields.indexOf("trace_id")
+        idx_vertex = fields.indexOf("vertex_idx")
+        matched_features = []
+        for feat in label_layer.getFeatures():
+            try:
+                feat_trace = str(feat.attribute(idx_trace) or "").strip() if idx_trace >= 0 else ""
+            except Exception:
+                feat_trace = ""
+            if feat_trace != trace_id:
+                continue
+            matched_features.append(feat)
+
+        def _sort_key(feat_obj):
+            if idx_vertex < 0:
+                return 999999
+            try:
+                return int(feat_obj.attribute(idx_vertex))
+            except Exception:
+                return 999999
+
+        matched_features.sort(key=_sort_key)
+        table.setRowCount(len(matched_features))
+        for r, feat in enumerate(matched_features):
+            for c, fname in enumerate(field_names):
+                try:
+                    val = feat.attribute(fname)
+                except Exception:
+                    val = ""
+                if isinstance(val, float):
+                    txt = f"{val:.3f}"
+                else:
+                    txt = "" if val in (None, "") else str(val)
+                item = QTableWidgetItem(txt)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                table.setItem(r, c, item)
+        try:
+            hdr = table.horizontalHeader()
+            if hdr is not None:
+                for c in range(max(0, len(field_names) - 1)):
+                    hdr.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+                hdr.setStretchLastSection(True)
+        except Exception:
+            pass
 
     def _ensure_trace_info_dock(self):
         if self.trace_info_dock is not None and self.trace_info_table is not None:
@@ -251,7 +494,20 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         filter_field_combo.addItem("Depth", "depth")
         filter_field_combo.addItem("Z mode", "z_mode")
         filter_field_combo.addItem("Length", "length")
+        filter_field_combo.addItem("Vertices", "vertices")
+        filter_field_combo.addItem("Notes", "notes")
+        filter_field_combo.addItem("Interpretation", "interpretation")
+        filter_field_combo.addItem("Comment", "comment")
         filter_field_combo.setVisible(False)
+
+        # Hidden state holder for depth pick strategy when depth_from/depth_to range exists.
+        depth_pick_combo = QComboBox(left_widget)
+        depth_pick_combo.addItem("Depth: None", "off")
+        depth_pick_combo.addItem("Depth: Min", "min")
+        depth_pick_combo.addItem("Depth: Mid", "mid")
+        depth_pick_combo.addItem("Depth: Max", "max")
+        depth_pick_combo.setMinimumWidth(120)
+        depth_pick_combo.setMaximumWidth(140)
 
         filter_edit = QLineEdit(left_widget)
         filter_edit.setPlaceholderText("Filter traces...")
@@ -279,6 +535,8 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             form_view_btn.setText("Frm")
         top_row.addWidget(table_view_btn, 0)
         top_row.addWidget(form_view_btn, 0)
+
+        top_row.addWidget(depth_pick_combo, 0)
 
         query_btn = QToolButton(left_widget)
         query_btn.setAutoRaise(True)
@@ -328,6 +586,10 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             ("Depth", "depth"),
             ("Z mode", "z_mode"),
             ("Length", "length"),
+            ("Vertices", "vertices"),
+            ("Notes", "notes"),
+            ("Interpretation", "interpretation"),
+            ("Comment", "comment"),
         ):
             act = filter_menu.addAction(title)
             act.setCheckable(True)
@@ -367,6 +629,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             ("Depth", "depth"),
             ("Z mode", "z_mode"),
             ("Length", "length"),
+            ("Vertices", "vertices"),
         ):
             act = sort_menu.addAction(title)
             act.setCheckable(True)
@@ -396,6 +659,22 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             )
             order_actions[key] = act
 
+        depth_pick_menu = query_menu.addMenu("Depth from range")
+        depth_pick_actions = {}
+        depth_pick_action_group = QActionGroup(depth_pick_menu)
+        depth_pick_action_group.setExclusive(True)
+        for title, key in (
+            ("None (hide labels)", "off"),
+            ("Min", "min"),
+            ("Mid", "mid"),
+            ("Max", "max"),
+        ):
+            act = depth_pick_menu.addAction(title)
+            act.setCheckable(True)
+            depth_pick_action_group.addAction(act)
+            act.triggered.connect(lambda _checked=False, data_key=key: self._set_trace_depth_pick_mode(data_key, persist=True))
+            depth_pick_actions[key] = act
+
         preview_menu = query_menu.addMenu("Form preview")
         preview_actions = {}
         for title, key in (
@@ -403,6 +682,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             ("Depth", "depth"),
             ("Z mode", "z_mode"),
             ("Length", "length"),
+            ("Vertices", "vertices"),
         ):
             act = preview_menu.addAction(title)
             act.setCheckable(True)
@@ -410,6 +690,14 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
                 lambda _checked=False, data_key=key: self._set_trace_info_form_preview_column(data_key, persist=True)
             )
             preview_actions[key] = act
+
+        query_menu.addSeparator()
+        interpretation_prompt_act = query_menu.addAction("Prompt interpretation form after draw")
+        interpretation_prompt_act.setCheckable(True)
+        interpretation_prompt_act.setChecked(bool(getattr(self, "trace_prompt_interpretation_popup", True)))
+        interpretation_prompt_act.toggled.connect(
+            lambda checked=False: self._set_trace_interpretation_prompt_enabled(bool(checked), persist=True)
+        )
 
         query_menu.addSeparator()
         clear_text_act = query_menu.addAction("Clear text filter")
@@ -436,8 +724,15 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
                 act.setChecked(key == current_sort)
             for key, act in order_actions.items():
                 act.setChecked(key == current_order)
+            current_depth_pick = (
+                self.trace_info_depth_pick_combo.currentData() if self.trace_info_depth_pick_combo is not None else "off"
+            )
+            for key, act in depth_pick_actions.items():
+                act.setChecked(key == current_depth_pick)
+            self._update_trace_info_depth_pick_button()
             for key, act in preview_actions.items():
                 act.setChecked(key == current_preview)
+            interpretation_prompt_act.setChecked(bool(getattr(self, "trace_prompt_interpretation_popup", True)))
 
         query_menu.aboutToShow.connect(_sync_query_menu_checks)
 
@@ -464,6 +759,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         sort_field_combo.addItem("Sort: Depth", "depth")
         sort_field_combo.addItem("Sort: Z mode", "z_mode")
         sort_field_combo.addItem("Sort: Length", "length")
+        sort_field_combo.addItem("Sort: Vertices", "vertices")
         sort_field_combo.setMinimumWidth(120)
         sort_field_combo.setMaximumWidth(180)
         query_row.addWidget(sort_field_combo, 0)
@@ -505,6 +801,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         table.setColumnWidth(3, 90)   # Depth
         table.setColumnWidth(4, 90)   # Z mode
         table.setColumnWidth(5, 80)   # Length
+        table.setColumnWidth(6, 70)   # Vertices
         # Requested: keep FID/Trace ID internal, hide from visible table columns.
         table.setColumnHidden(0, True)
         table.setColumnHidden(1, True)
@@ -536,7 +833,12 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         form_page_layout.addWidget(form_list, 0)
 
         form_right_widget = QWidget(form_page)
-        form_layout = QFormLayout(form_right_widget)
+        form_right_layout = QVBoxLayout(form_right_widget)
+        form_right_layout.setContentsMargins(4, 6, 8, 6)
+        form_right_layout.setSpacing(6)
+
+        form_fields_widget = QWidget(form_right_widget)
+        form_layout = QFormLayout(form_fields_widget)
         form_layout.setContentsMargins(4, 8, 8, 8)
         form_layout.setSpacing(8)
         form_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -548,14 +850,42 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             "Depth",
             "Z mode",
             "Length",
+            "Vertices",
             "Group",
             "Z source",
             "Z grid path",
+            "Notes",
+            "Interpretation",
+            "Comment",
         ):
             field = QLineEdit(form_right_widget)
             field.setReadOnly(True)
             form_layout.addRow(f"{label_text}:", field)
             form_fields[label_text] = field
+        form_right_layout.addWidget(form_fields_widget, 0)
+
+        vertices_title = QLabel("Vertices (child by Trace ID)", form_right_widget)
+        vertices_title.setStyleSheet("color: #444;")
+        form_right_layout.addWidget(vertices_title, 0)
+
+        vertices_table = QTableWidget(form_right_widget)
+        vertices_table.setColumnCount(4)
+        vertices_table.setHorizontalHeaderLabels(["Vertex", "Depth", "Min", "Max"])
+        vertices_table.verticalHeader().setVisible(False)
+        vertices_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        vertices_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        vertices_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        vertices_table.setWordWrap(False)
+        try:
+            vh = vertices_table.horizontalHeader()
+            vh.setStretchLastSection(True)
+            vh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            vh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            vh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        except Exception:
+            pass
+        vertices_table.setMinimumHeight(120)
+        form_right_layout.addWidget(vertices_table, 1)
         form_page_layout.addWidget(form_right_widget, 1)
         stack.addWidget(form_page)
         left_layout.addWidget(stack, 1)
@@ -570,6 +900,10 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         sort_field_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
         sort_order_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
         sort_order_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
+        depth_pick_combo.currentIndexChanged.connect(
+            lambda _idx=0: self._set_trace_depth_pick_mode(depth_pick_combo.currentData(), persist=True)
+        )
+        depth_pick_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
         table_selection_model = table.selectionModel()
         if table_selection_model is not None:
             table_selection_model.selectionChanged.connect(
@@ -592,19 +926,24 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         self.trace_info_mode_combo = mode_combo
         self.trace_info_sort_field_combo = sort_field_combo
         self.trace_info_sort_order_combo = sort_order_combo
+        self.trace_info_depth_pick_combo = depth_pick_combo
+        self.trace_info_depth_pick_btn = None
         self.trace_info_stack = stack
         self.trace_info_form_list = form_list
         self.trace_info_form_fields = form_fields
+        self.trace_info_vertex_table = vertices_table
         self.trace_info_form_preview_combo = None
         self.trace_info_view_table_btn = table_view_btn
         self.trace_info_view_form_btn = form_view_btn
         self.trace_info_query_btn = query_btn
         self.trace_info_query_panel = query_panel
+        self.trace_info_interpretation_prompt_action = interpretation_prompt_act
         self.trace_info_help_btn = help_btn
         self.trace_info_help_panel = help_panel
         self._set_trace_info_view_mode("table", persist=False)
         self._set_trace_info_form_preview_column(getattr(self, "trace_info_form_preview_key", "timeslice"), persist=False)
         self._apply_trace_info_ui_state()
+        self._update_trace_info_depth_pick_button()
 
     def open_trace_info_tab(self, checked=False):
         self._ensure_trace_info_dock()
@@ -612,6 +951,8 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             self.trace_info_dock.show()
             self.trace_info_dock.raise_()
             self.trace_info_dock.activateWindow()
+        # Ensure line<->vertex relations and vertex label layers are present for existing traces.
+        self._resync_vertex_layers_for_all_traces()
         self.refresh_trace_info_table()
 
     def refresh_trace_info_table(self, checked=False):
@@ -631,8 +972,24 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         selected_trace_id = str(getattr(self, "trace_info_saved_selected_trace_id", "") or "").strip()
         self.trace_info_model.set_rows([])
         if not self._is_line_layer(layer):
+            self.trace_info_source_layer_id = None
             self._update_trace_info_form_from_table_selection()
             return
+        self.trace_info_source_layer_id = layer.id()
+
+        vertex_counts = {}
+        try:
+            vlyr = self._ensure_trace_vertex_label_layer(layer) if hasattr(self, "_ensure_trace_vertex_label_layer") else None
+            if vlyr is not None:
+                idx_tid = vlyr.fields().indexOf("trace_id")
+                if idx_tid >= 0:
+                    for vfeat in vlyr.getFeatures():
+                        tid = str(vfeat.attribute(idx_tid) or "").strip()
+                        if not tid:
+                            continue
+                        vertex_counts[tid] = int(vertex_counts.get(tid, 0)) + 1
+        except Exception:
+            vertex_counts = {}
 
         filter_text = ""
         if self.trace_info_filter_edit is not None:
@@ -661,26 +1018,36 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             ts_name = feat.attribute("ts_name") if layer.fields().indexOf("ts_name") >= 0 else ""
             ts_id = feat.attribute("ts_id") if layer.fields().indexOf("ts_id") >= 0 else ""
             group_name = feat.attribute("group_name") if layer.fields().indexOf("group_name") >= 0 else ""
+            depth_list = feat.attribute("depth_list") if layer.fields().indexOf("depth_list") >= 0 else ""
             depth_from = feat.attribute("depth_from") if layer.fields().indexOf("depth_from") >= 0 else None
             depth_to = feat.attribute("depth_to") if layer.fields().indexOf("depth_to") >= 0 else None
             depth_unit = feat.attribute("depth_unit") if layer.fields().indexOf("depth_unit") >= 0 else "m"
             z_source = feat.attribute("z_source") if layer.fields().indexOf("z_source") >= 0 else ""
             z_grid_path = feat.attribute("z_grid_path") if layer.fields().indexOf("z_grid_path") >= 0 else ""
             z_mode = feat.attribute("z_mode") if layer.fields().indexOf("z_mode") >= 0 else ""
+            notes = feat.attribute("notes") if layer.fields().indexOf("notes") >= 0 else ""
+            interpretation = feat.attribute("interpretation") if layer.fields().indexOf("interpretation") >= 0 else ""
+            comment = feat.attribute("comment") if layer.fields().indexOf("comment") >= 0 else ""
             depth_txt = ""
             depth_num = None
+            if depth_list not in (None, ""):
+                depth_txt = str(depth_list)
             try:
                 if depth_from not in (None, "") and depth_to not in (None, ""):
-                    depth_txt = f"{float(depth_from):.3f}-{float(depth_to):.3f} {depth_unit}"
                     depth_num = (float(depth_from) + float(depth_to)) / 2.0
+                    if not depth_txt:
+                        depth_txt = f"{float(depth_from):.3f}-{float(depth_to):.3f} {depth_unit}"
                 elif depth_from not in (None, ""):
-                    depth_txt = f"from {float(depth_from):.3f} {depth_unit}"
                     depth_num = float(depth_from)
+                    if not depth_txt:
+                        depth_txt = f"from {float(depth_from):.3f} {depth_unit}"
                 elif depth_to not in (None, ""):
-                    depth_txt = f"to {float(depth_to):.3f} {depth_unit}"
                     depth_num = float(depth_to)
+                    if not depth_txt:
+                        depth_txt = f"to {float(depth_to):.3f} {depth_unit}"
             except Exception:
-                depth_txt = str(depth_from or depth_to or "")
+                if not depth_txt:
+                    depth_txt = str(depth_from or depth_to or "")
             length_val = feat.geometry().length() if feat.geometry() is not None else 0.0
             ts_label = ts_name or ts_id or ""
 
@@ -700,6 +1067,10 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
                     "depth": str(depth_txt),
                     "z_mode": str(z_mode_text),
                     "length": f"{float(length_val):.2f}",
+                    "vertices": str(vertex_counts.get(trace_text, 0)),
+                    "notes": str(notes or ""),
+                    "interpretation": str(interpretation or ""),
+                    "comment": str(comment or ""),
                 }
                 if str(filter_field or "all") == "all":
                     hay = " ".join(field_values.values()).lower()
@@ -718,20 +1089,30 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
                     "z_mode": z_mode_text,
                     "length_num": float(length_val),
                     "length_text": f"{float(length_val):.2f}",
+                    "vertices_text": str(vertex_counts.get(trace_text, 0)),
                     "group_name": group_name or "",
                     "z_source": z_source or "",
                     "z_grid_path": z_grid_path or "",
+                    "notes": notes or "",
+                    "interpretation": interpretation or "",
+                    "comment": comment or "",
                 }
             )
 
-        if sort_field in ("fid", "depth", "length"):
-            value_key = {"fid": "fid", "depth": "depth_num", "length": "length_num"}[sort_field]
+        if sort_field in ("fid", "depth", "length", "vertices"):
+            value_key = {"fid": "fid", "depth": "depth_num", "length": "length_num", "vertices": "vertices_num"}[sort_field]
+            if value_key == "vertices_num":
+                for r in rows:
+                    try:
+                        r["vertices_num"] = int(str(r.get("vertices_text") or "0"))
+                    except Exception:
+                        r["vertices_num"] = 0
             with_val = [r for r in rows if r.get(value_key) is not None]
             without_val = [r for r in rows if r.get(value_key) is None]
             with_val.sort(key=lambda r: r.get(value_key), reverse=sort_desc)
             rows = with_val + without_val
         else:
-            value_key = {"trace_id": "trace_id", "timeslice": "timeslice", "z_mode": "z_mode"}.get(sort_field, "trace_id")
+            value_key = {"trace_id": "trace_id", "timeslice": "timeslice", "z_mode": "z_mode", "vertices": "vertices_text"}.get(sort_field, "trace_id")
             rows.sort(key=lambda r: str(r.get(value_key) or "").lower(), reverse=sort_desc)
 
         self.trace_info_model.set_rows(rows)
