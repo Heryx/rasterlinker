@@ -145,6 +145,7 @@ class GeoSurveyStudioPlugin(
         self.trace_canvas_click_filter = None
         self.trace_canvas_click_capture_enabled = False
         self.trace_pending_vertex_clicks = []
+        self.trace_canvas_wheel_modifier = "alt"
         self.check_updates_action = None
         self._update_checked_this_session = False
 
@@ -282,6 +283,7 @@ class GeoSurveyStudioPlugin(
             self.trace_canvas_click_filter = None
             self.trace_canvas_click_capture_enabled = False
             self.trace_pending_vertex_clicks = []
+            self.trace_canvas_wheel_modifier = "alt"
         self.trace_interpretation_prompted_keys = set()
         self.trace_interpretation_prompted_trace_ids = set()
         self.trace_draw_session_state = "idle"

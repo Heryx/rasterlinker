@@ -675,6 +675,27 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             act.triggered.connect(lambda _checked=False, data_key=key: self._set_trace_depth_pick_mode(data_key, persist=True))
             depth_pick_actions[key] = act
 
+        wheel_mod_menu = query_menu.addMenu("Canvas wheel modifier")
+        wheel_mod_actions = {}
+        wheel_mod_action_group = QActionGroup(wheel_mod_menu)
+        wheel_mod_action_group.setExclusive(True)
+        for title, key in (
+            ("Alt", "alt"),
+            ("Shift", "shift"),
+            ("Ctrl", "ctrl"),
+        ):
+            act = wheel_mod_menu.addAction(title)
+            act.setCheckable(True)
+            wheel_mod_action_group.addAction(act)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: (
+                    self._set_trace_canvas_wheel_modifier(data_key, persist=True)
+                    if hasattr(self, "_set_trace_canvas_wheel_modifier")
+                    else None
+                )
+            )
+            wheel_mod_actions[key] = act
+
         preview_menu = query_menu.addMenu("Form preview")
         preview_actions = {}
         for title, key in (
@@ -730,6 +751,13 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             for key, act in depth_pick_actions.items():
                 act.setChecked(key == current_depth_pick)
             self._update_trace_info_depth_pick_button()
+            wheel_mod = (
+                str(getattr(self, "_trace_canvas_wheel_modifier", lambda: "alt")() or "alt").strip().lower()
+                if hasattr(self, "_trace_canvas_wheel_modifier")
+                else "alt"
+            )
+            for key, act in wheel_mod_actions.items():
+                act.setChecked(key == wheel_mod)
             for key, act in preview_actions.items():
                 act.setChecked(key == current_preview)
             interpretation_prompt_act.setChecked(bool(getattr(self, "trace_prompt_interpretation_popup", False)))

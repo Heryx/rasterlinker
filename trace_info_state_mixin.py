@@ -77,6 +77,15 @@ class TraceInfoStateMixin:
 
         interpretation_prompt = bool(getattr(self, "trace_prompt_interpretation_popup", False))
         settings.setValue(self._trace_info_settings_key("interpretation_prompt_on_draw"), interpretation_prompt)
+        wheel_mod = "alt"
+        if hasattr(self, "_trace_canvas_wheel_modifier"):
+            try:
+                wheel_mod = str(self._trace_canvas_wheel_modifier() or "alt").strip().lower()
+            except Exception:
+                wheel_mod = "alt"
+        if wheel_mod not in ("alt", "shift", "ctrl"):
+            wheel_mod = "alt"
+        settings.setValue(self._trace_info_settings_key("canvas_wheel_modifier"), wheel_mod)
 
         form_preview_key = str(getattr(self, "trace_info_form_preview_key", "timeslice") or "timeslice")
         settings.setValue(self._trace_info_settings_key("form_preview_key"), form_preview_key)
@@ -135,6 +144,9 @@ class TraceInfoStateMixin:
             False,
             type=bool,
         )
+        wheel_mod = str(settings.value(self._trace_info_settings_key("canvas_wheel_modifier"), "alt") or "alt").strip().lower()
+        if wheel_mod not in ("alt", "shift", "ctrl"):
+            wheel_mod = "alt"
         form_preview_key = str(
             settings.value(self._trace_info_settings_key("form_preview_key"), "timeslice") or "timeslice"
         ).strip().lower()
@@ -190,6 +202,11 @@ class TraceInfoStateMixin:
                 self.trace_prompt_interpretation_popup = bool(interpretation_prompt)
         else:
             self.trace_prompt_interpretation_popup = bool(interpretation_prompt)
+        if hasattr(self, "_set_trace_canvas_wheel_modifier"):
+            try:
+                self._set_trace_canvas_wheel_modifier(wheel_mod, persist=False)
+            except Exception:
+                pass
         try:
             self._update_trace_info_depth_pick_button()
         except Exception:

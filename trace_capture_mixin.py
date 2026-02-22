@@ -574,7 +574,12 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             viewport = None
         if viewport is None:
             return None
-        flt = TraceCanvasClickFilter(on_left_click=self._on_trace_canvas_left_click, parent=viewport)
+        flt = TraceCanvasClickFilter(
+            on_left_click=self._on_trace_canvas_left_click,
+            on_wheel=self._on_trace_canvas_wheel,
+            wheel_modifier_getter=self._trace_canvas_wheel_modifier,
+            parent=viewport,
+        )
         try:
             viewport.installEventFilter(flt)
         except Exception:
@@ -600,6 +605,60 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
         if len(queue) > 500:
             queue = queue[-500:]
         self.trace_pending_vertex_clicks = queue
+
+    def _trace_canvas_wheel_modifier(self):
+        mode = str(getattr(self, "trace_canvas_wheel_modifier", "alt") or "alt").strip().lower()
+        if mode not in ("alt", "shift", "ctrl"):
+            mode = "alt"
+        return mode
+
+    def _set_trace_canvas_wheel_modifier(self, mode, persist=True):
+        mode_txt = str(mode or "alt").strip().lower()
+        if mode_txt not in ("alt", "shift", "ctrl"):
+            mode_txt = "alt"
+        self.trace_canvas_wheel_modifier = mode_txt
+        if persist and hasattr(self, "_save_trace_info_ui_state"):
+            try:
+                self._save_trace_info_ui_state()
+            except Exception:
+                pass
+
+    def _on_trace_canvas_wheel(self, delta):
+        if not bool(getattr(self, "trace_canvas_click_capture_enabled", False)):
+            return False
+        state = str(getattr(self, "trace_draw_session_state", "idle") or "idle").strip().lower()
+        if state != "drawing_active":
+            return False
+        if self.dlg is None or not hasattr(self.dlg, "rasterListWidget") or not hasattr(self.dlg, "Dial"):
+            return False
+        total = int(self.dlg.rasterListWidget.count())
+        if total <= 0:
+            return False
+        current = int(self.dlg.Dial.value())
+        # Wheel up -> previous slice, wheel down -> next slice.
+        step = -1 if int(delta) > 0 else 1
+        target = max(0, min(current + step, total - 1))
+        if target == current:
+            return True
+        try:
+            self.update_visibility_with_dial(target)
+            self._update_navigation_controls(target)
+        except Exception:
+            try:
+                self.dlg.Dial.setValue(target)
+            except Exception:
+                return False
+        try:
+            widget = self.dlg.rasterListWidget
+            if 0 <= target < widget.count():
+                item = widget.item(target)
+                if item is not None:
+                    widget.blockSignals(True)
+                    widget.setCurrentItem(item)
+                    widget.blockSignals(False)
+        except Exception:
+            pass
+        return True
 
     def _consume_pending_click_contexts(self, vertex_count):
         try:

@@ -62,7 +62,8 @@ class TraceInfoHelpMixin:
                     "Funnel icon toggles advanced filter/sort controls.\n"
                     "Mode: All / Only Missing Z / Only With Z.\n"
                     "Sort by field and order (Asc/Desc).\n"
-                    "Depth from range: choose Min / Mid / Max for z_value and vertex depth."
+                    "Depth from range: choose Min / Mid / Max for z_value and vertex depth.\n"
+                    "Canvas wheel modifier: choose Alt / Shift / Ctrl to change slices while drawing."
                 ),
             ),
             (
