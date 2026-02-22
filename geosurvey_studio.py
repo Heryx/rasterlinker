@@ -135,7 +135,7 @@ class GeoSurveyStudioPlugin(
         self.trace_z_grid_cache = {}
         self.trace_missing_z_prompt_shown = False
         self.trace_allow_missing_z_for_session = False
-        self.trace_prompt_interpretation_popup = True
+        self.trace_prompt_interpretation_popup = False
         self.trace_interpretation_prompted_keys = set()
         self.trace_interpretation_prompted_trace_ids = set()
         self.trace_draw_session_state = "idle"

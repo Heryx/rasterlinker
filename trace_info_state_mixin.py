@@ -75,7 +75,7 @@ class TraceInfoStateMixin:
             depth_pick = "off"
         settings.setValue(self._trace_info_settings_key("depth_pick"), depth_pick)
 
-        interpretation_prompt = bool(getattr(self, "trace_prompt_interpretation_popup", True))
+        interpretation_prompt = bool(getattr(self, "trace_prompt_interpretation_popup", False))
         settings.setValue(self._trace_info_settings_key("interpretation_prompt_on_draw"), interpretation_prompt)
 
         form_preview_key = str(getattr(self, "trace_info_form_preview_key", "timeslice") or "timeslice")
@@ -132,7 +132,7 @@ class TraceInfoStateMixin:
             depth_pick = "off"
         interpretation_prompt = settings.value(
             self._trace_info_settings_key("interpretation_prompt_on_draw"),
-            True,
+            False,
             type=bool,
         )
         form_preview_key = str(

@@ -1623,7 +1623,7 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             if (
                 should_prompt
                 and can_prompt_in_state
-                and bool(getattr(self, "trace_prompt_interpretation_popup", True))
+                and bool(getattr(self, "trace_prompt_interpretation_popup", False))
             ):
                 self._prompt_trace_interpretation_fields(layer, fid)
 

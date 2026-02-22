@@ -694,7 +694,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         query_menu.addSeparator()
         interpretation_prompt_act = query_menu.addAction("Prompt interpretation form after draw")
         interpretation_prompt_act.setCheckable(True)
-        interpretation_prompt_act.setChecked(bool(getattr(self, "trace_prompt_interpretation_popup", True)))
+        interpretation_prompt_act.setChecked(bool(getattr(self, "trace_prompt_interpretation_popup", False)))
         interpretation_prompt_act.toggled.connect(
             lambda checked=False: self._set_trace_interpretation_prompt_enabled(bool(checked), persist=True)
         )
@@ -732,7 +732,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             self._update_trace_info_depth_pick_button()
             for key, act in preview_actions.items():
                 act.setChecked(key == current_preview)
-            interpretation_prompt_act.setChecked(bool(getattr(self, "trace_prompt_interpretation_popup", True)))
+            interpretation_prompt_act.setChecked(bool(getattr(self, "trace_prompt_interpretation_popup", False)))
 
         query_menu.aboutToShow.connect(_sync_query_menu_checks)
 
