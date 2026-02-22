@@ -571,18 +571,30 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             canvas = self.iface.mapCanvas()
             viewport = canvas.viewport() if canvas is not None else None
         except Exception:
+            canvas = None
             viewport = None
-        if viewport is None:
+        if viewport is None and canvas is None:
             return None
         flt = TraceCanvasClickFilter(
             on_left_click=self._on_trace_canvas_left_click,
             on_wheel=self._on_trace_canvas_wheel,
             wheel_modifier_getter=self._trace_canvas_wheel_modifier,
-            parent=viewport,
+            parent=viewport if viewport is not None else canvas,
         )
+        installed = False
         try:
-            viewport.installEventFilter(flt)
+            if viewport is not None:
+                viewport.installEventFilter(flt)
+                installed = True
         except Exception:
+            pass
+        try:
+            if canvas is not None:
+                canvas.installEventFilter(flt)
+                installed = True
+        except Exception:
+            pass
+        if not installed:
             return None
         self.trace_canvas_click_filter = flt
         return flt

@@ -276,8 +276,10 @@ class GeoSurveyStudioPlugin(
         if self.trace_canvas_click_filter is not None:
             try:
                 canvas = self.iface.mapCanvas()
-                if canvas is not None and canvas.viewport() is not None:
-                    canvas.viewport().removeEventFilter(self.trace_canvas_click_filter)
+                if canvas is not None:
+                    if canvas.viewport() is not None:
+                        canvas.viewport().removeEventFilter(self.trace_canvas_click_filter)
+                    canvas.removeEventFilter(self.trace_canvas_click_filter)
             except Exception:
                 pass
             self.trace_canvas_click_filter = None
