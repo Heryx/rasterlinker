@@ -2,6 +2,12 @@
 
 Minor-line objective: Atlas/Layout integration for fast, repeatable survey reporting.
 
+## Related Prerequisite Workstream
+
+- Drawing workflow stabilization/refactor drafts:
+  - `docs/DRAWING_WORKFLOW_SPEC.md`
+  - `docs/ISSUE_DRAFTS_DRAWING_REFACTOR.md`
+
 ## Scope (Planned)
 
 - [ ] Atlas bridge for GeoSurvey groups/time-slices (QGIS Layout Atlas integration)

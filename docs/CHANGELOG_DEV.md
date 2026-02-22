@@ -2,8 +2,15 @@
 
 This file tracks implementation changes between formal releases.
 
+## 2026-02-22 (planning/docs)
+
+- Add full drawing workflow proposal document: `docs/DRAWING_WORKFLOW_SPEC.md`.
+- Add ready-to-publish GitHub issue drafts for drawing refactor backlog: `docs/ISSUE_DRAFTS_DRAWING_REFACTOR.md`.
+- Link drawing refactor backlog as prerequisite context in `docs/MILESTONE_1_2_0.md`.
+
 ## 2026-02-21 (branch: `dev/feature/ui-responsive-docking`)
 
+- Simplify time-slice import validation popup: compact CRS-focused summary + English `View Details`; non-georeferenced images are now skipped automatically, with explicit compatibility options for mismatched CRS.
 - Add project catalog compatibility check on project open, with automatic migration backup and plugin version stamping (`created_with_plugin` / `last_opened_with_plugin`).
 - Initialize `v1.2.0` milestone tracker for Atlas/Layout roadmap (`docs/MILESTONE_1_2_0.md`).
 - Bump plugin metadata to `v1.1.1` and add `v1.1.1` release-notes draft.
