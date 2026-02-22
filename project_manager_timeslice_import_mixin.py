@@ -6,6 +6,7 @@ import os
 from PyQt5.QtWidgets import QDialog, QInputDialog, QMessageBox
 from qgis.core import QgsProject, QgsRasterLayer
 from qgis.gui import QgsProjectionSelectionDialog
+from .timeslice_validation_dialog import choose_timeslice_import_action
 
 
 class ProjectManagerTimesliceImportMixin:
@@ -218,67 +219,36 @@ class ProjectManagerTimesliceImportMixin:
         if not issue_rows:
             return records, 0, False
 
-        details = []
-        for rec in issue_rows[:12]:
-            name = os.path.basename(rec.get("source_path") or "")
-            warns = "; ".join(rec.get("warnings") or [])
-            details.append(f"- {name}: {warns}")
-        extra = len(issue_rows) - len(details)
-        if extra > 0:
-            details.append(f"... and {extra} more.")
+        project_crs_authid = ""
+        try:
+            prj = QgsProject.instance().crs()
+            if prj is not None and prj.isValid():
+                project_crs_authid = prj.authid()
+        except Exception:
+            project_crs_authid = ""
 
-        summary = (
-            f"Detected issues in {len(issue_rows)} / {len(records)} {scope_label}.\n"
-            f"- Missing CRS: {missing_crs_count}\n"
-            f"- CRS mismatch: {mismatch_count}\n"
-            f"- Suspicious extent: {suspicious_count}\n\n"
-            "Choose how to proceed:\n"
-            "- Assign Default CRS + Import All: fills missing CRS only.\n"
-            "- Import All Anyway: keep all selected files unchanged.\n"
-            "- Skip Problematic: import only files without any issue.\n\n"
-            + "\n".join(details)
+        action = choose_timeslice_import_action(
+            parent=self,
+            records=records,
+            issue_rows=issue_rows,
+            missing_crs_count=missing_crs_count,
+            mismatch_count=mismatch_count,
+            suspicious_count=suspicious_count,
+            project_crs_authid=project_crs_authid,
+            scope_label=scope_label,
         )
 
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Warning)
-        msg.setWindowTitle("Time-slice Import Validation")
-        msg.setText("Potential georeference issues detected.")
-        msg.setInformativeText(summary)
-        assign_btn = None
-        if missing_crs_count > 0:
-            assign_btn = msg.addButton("Assign Default CRS + Import All", QMessageBox.AcceptRole)
-        import_all_btn = msg.addButton("Import All Anyway", QMessageBox.AcceptRole)
-        safe_btn = msg.addButton("Skip Problematic", QMessageBox.ActionRole)
-        cancel_btn = msg.addButton(QMessageBox.Cancel)
-        msg.setDefaultButton(safe_btn)
-        msg.exec_()
-
-        clicked = msg.clickedButton()
-        if clicked == cancel_btn:
+        if action == "cancel":
             return records, 0, True
 
-        if clicked == safe_btn:
+        if action == "compatible":
             filtered = [r for r in records if not ((r.get("issues") or {}).get("has_issue"))]
             skipped = max(0, len(records) - len(filtered))
             return filtered, skipped, False
 
-        if assign_btn is not None and clicked == assign_btn:
-            preferred = self._ensure_preferred_import_crs()
-            if preferred is None or not preferred.isValid():
-                return records, 0, True
-            authid = preferred.authid()
-            for rec in records:
-                issues = rec.get("issues") or {}
-                if issues.get("missing_crs"):
-                    rec["assigned_crs"] = authid
-                    rec_meta = rec.get("meta") if isinstance(rec.get("meta"), dict) else {}
-                    rec_meta["crs"] = authid
-                    rec["meta"] = rec_meta
-                    rec["issues"] = self._timeslice_georef_issues(rec_meta)
-                    rec["warnings"] = list((rec.get("issues") or {}).get("warnings") or [])
-            return records, 0, False
-
-        if clicked == import_all_btn:
-            return records, 0, False
+        if action == "all_georef":
+            filtered = [r for r in records if not ((r.get("issues") or {}).get("missing_crs"))]
+            skipped = max(0, len(records) - len(filtered))
+            return filtered, skipped, False
 
         return records, 0, True
