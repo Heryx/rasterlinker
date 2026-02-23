@@ -454,13 +454,16 @@ class TraceEditingMixin:
             return False
 
         if clicked == save_btn:
+            t_backend_start = time.perf_counter()
             pre_sync_fids, pre_sync_trace_ids = self._collect_trace_sync_targets_pre_commit(layer)
             self._set_trace_draw_session_state("saving")
             ok = False
+            t_commit_start = time.perf_counter()
             try:
                 ok = bool(layer.commitChanges())
             except Exception:
                 ok = False
+            t_commit_ms = int((time.perf_counter() - t_commit_start) * 1000)
             if not ok:
                 err_text = ""
                 try:
@@ -490,8 +493,9 @@ class TraceEditingMixin:
                 sync_note = f" Vertex sync: {len(resolved_sync_fids)} trace(s) in {sync_ms} ms."
             elif sync_ms < 0:
                 sync_note = " Vertex sync skipped due to an update error."
+            backend_ms = int((time.perf_counter() - t_backend_start) * 1000)
             self._notify_info(
-                f"Edits saved and editing stopped. ({int((time.perf_counter() - t0) * 1000)} ms){sync_note}",
+                f"Edits saved and editing stopped. (backend {backend_ms} ms, commit {t_commit_ms} ms){sync_note}",
                 duration=5,
             )
             if self.trace_info_dock is not None and self.trace_info_dock.isVisible():
