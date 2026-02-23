@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Trace Build 3D and export mixin for GeoSurvey Studio plugin."""
 
+import json
 import os.path
 
 from qgis.PyQt.QtWidgets import QMessageBox, QInputDialog, QFileDialog
@@ -138,6 +139,54 @@ class TraceBuild3DMixin:
         except Exception:
             return None
         return None
+
+    def _feature_vertex_hit_stats(self, layer, feat):
+        """Return tuple (total_vertices, hit_vertices, no_hit_vertices) from vertex_depths metadata.
+
+        If metadata is missing/unusable, returns (0, 0, 0) and caller can ignore.
+        """
+        if layer is None or feat is None:
+            return 0, 0, 0
+        idx = layer.fields().indexOf("vertex_depths")
+        if idx < 0:
+            return 0, 0, 0
+        raw = feat.attribute(idx)
+        if raw in (None, ""):
+            return 0, 0, 0
+        try:
+            items = json.loads(str(raw))
+        except Exception:
+            return 0, 0, 0
+        if not isinstance(items, list) or not items:
+            return 0, 0, 0
+
+        total = 0
+        hit = 0
+        no_hit = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            total += 1
+            st = str(item.get("s") or "").strip().lower()
+            if st not in ("hit", "no_raster_hit"):
+                d = item.get("d")
+                dmin = item.get("dmin")
+                dmax = item.get("dmax")
+                if d in (None, "") and dmin in (None, "") and dmax in (None, ""):
+                    st = "no_raster_hit"
+                else:
+                    st = "hit"
+            if st == "no_raster_hit":
+                no_hit += 1
+            else:
+                hit += 1
+        return total, hit, no_hit
+
+    def _feature_is_all_no_raster_hit(self, layer, feat):
+        total, hit, no_hit = self._feature_vertex_hit_stats(layer, feat)
+        if total <= 0:
+            return False
+        return hit <= 0 and no_hit > 0
 
     def _geometry_with_constant_z(self, geometry, z_value):
         if geometry is None or geometry.isEmpty():
@@ -353,12 +402,17 @@ class TraceBuild3DMixin:
             "invalid_geom": 0,
             "sample_fail": 0,
             "outside_dtm_extent": 0,
+            "no_raster_hit_only": 0,
         }
         for feat in source_layer.getFeatures():
             stats["total"] += 1
             geom = feat.geometry()
             if geom is None or geom.isEmpty():
                 stats["invalid_geom"] += 1
+                continue
+            # Do not build 3D from traces whose vertices are all outside raster coverage.
+            if self._feature_is_all_no_raster_hit(source_layer, feat):
+                stats["no_raster_hit_only"] += 1
                 continue
 
             if mode == "constant":
@@ -421,10 +475,25 @@ class TraceBuild3DMixin:
         out_provider = out_layer.dataProvider()
         features_out = []
         skipped = 0
+        skip_reasons = {
+            "missing_depth": 0,
+            "missing_grid": 0,
+            "invalid_geom": 0,
+            "sample_fail": 0,
+            "outside_dtm_extent": 0,
+            "no_raster_hit_only": 0,
+            "other": 0,
+        }
         for feat in source_layer.getFeatures():
             geom_in = feat.geometry()
             if geom_in is None or geom_in.isEmpty():
                 skipped += 1
+                skip_reasons["invalid_geom"] += 1
+                continue
+
+            if self._feature_is_all_no_raster_hit(source_layer, feat):
+                skipped += 1
+                skip_reasons["no_raster_hit_only"] += 1
                 continue
 
             z_used = None
@@ -435,12 +504,14 @@ class TraceBuild3DMixin:
                 z_used = self._feature_depth_value(source_layer, feat)
                 if z_used is None:
                     skipped += 1
+                    skip_reasons["missing_depth"] += 1
                     continue
                 geom3d = self._geometry_with_constant_z(geom_in, z_used)
             elif mode == "linked_grid":
                 z_used = self._feature_z_from_linked_grid(source_layer, feat)
                 if z_used is None:
                     skipped += 1
+                    skip_reasons["missing_grid"] += 1
                     continue
                 z_path_idx = source_layer.fields().indexOf("z_grid_path")
                 if z_path_idx >= 0:
@@ -450,14 +521,44 @@ class TraceBuild3DMixin:
                 depth_val = self._feature_depth_value(source_layer, feat)
                 if depth_val is None:
                     skipped += 1
+                    skip_reasons["missing_depth"] += 1
+                    continue
+                point_xy = self._first_xy_from_geometry(geom_in)
+                if point_xy is None:
+                    skipped += 1
+                    skip_reasons["invalid_geom"] += 1
+                    continue
+                try:
+                    dtm_point = point_xy
+                    if (
+                        dtm_layer is not None
+                        and source_layer.crs().isValid()
+                        and dtm_layer.crs().isValid()
+                        and source_layer.crs() != dtm_layer.crs()
+                    ):
+                        tr = QgsCoordinateTransform(source_layer.crs(), dtm_layer.crs(), QgsProject.instance())
+                        transformed = tr.transform(point_xy)
+                        dtm_point = QgsPointXY(transformed.x(), transformed.y())
+                    if dtm_layer is not None and not dtm_layer.extent().contains(dtm_point):
+                        skipped += 1
+                        skip_reasons["outside_dtm_extent"] += 1
+                        continue
+                except Exception:
+                    skipped += 1
+                    skip_reasons["sample_fail"] += 1
                     continue
                 geom3d = self._geometry_with_dtm_minus_depth(geom_in, dtm_layer, depth_val)
             else:
                 skipped += 1
+                skip_reasons["other"] += 1
                 continue
 
             if geom3d is None:
                 skipped += 1
+                if mode == "orthometric":
+                    skip_reasons["sample_fail"] += 1
+                else:
+                    skip_reasons["invalid_geom"] += 1
                 continue
 
             new_feat = QgsFeature(out_layer.fields())
@@ -496,7 +597,7 @@ class TraceBuild3DMixin:
             out_provider.addFeatures(features_out)
             out_layer.updateExtents()
             out_layer.triggerRepaint()
-        return len(features_out), skipped
+        return len(features_out), skipped, skip_reasons
 
     def _run_build_3d_workflow(self, default_mode="constant", batch=False):
         if batch:
@@ -555,6 +656,7 @@ class TraceBuild3DMixin:
                 "invalid_geom": 0,
                 "sample_fail": 0,
                 "outside_dtm_extent": 0,
+                "no_raster_hit_only": 0,
             }
             for lyr in source_layers:
                 stats = self._precheck_build_3d(lyr, mode, dtm_layer=dtm_layer)
@@ -569,6 +671,7 @@ class TraceBuild3DMixin:
                 totals["invalid_geom"] += int(stats.get("invalid_geom", 0))
                 totals["sample_fail"] += int(stats.get("sample_fail", 0))
                 totals["outside_dtm_extent"] += int(stats.get("outside_dtm_extent", 0))
+                totals["no_raster_hit_only"] += int(stats.get("no_raster_hit_only", 0))
 
             if totals["features_ready"] <= 0:
                 QMessageBox.warning(
@@ -589,15 +692,16 @@ class TraceBuild3DMixin:
             if len(per_layer) > 12:
                 layer_lines.append(f"... and {len(per_layer) - 12} more layers.")
 
-            details = (
-                f"Mode: {mode_label}\n"
-                f"Layers (ready/total): {totals['layers_ready']}/{totals['layers_total']}\n"
-                f"Features (ready/total): {totals['features_ready']}/{totals['features_total']}\n"
-                f"Will be skipped: {totals['features_total'] - totals['features_ready']}\n\n"
-                f"Details - missing depth: {totals['missing_depth']}, "
-                f"missing grid: {totals['missing_grid']}, "
-                f"invalid geom: {totals['invalid_geom']}, sample fail: {totals['sample_fail']}"
-            )
+                details = (
+                    f"Mode: {mode_label}\n"
+                    f"Layers (ready/total): {totals['layers_ready']}/{totals['layers_total']}\n"
+                    f"Features (ready/total): {totals['features_ready']}/{totals['features_total']}\n"
+                    f"Will be skipped: {totals['features_total'] - totals['features_ready']}\n\n"
+                    f"Details - missing depth: {totals['missing_depth']}, "
+                    f"missing grid: {totals['missing_grid']}, "
+                    f"invalid geom: {totals['invalid_geom']}, sample fail: {totals['sample_fail']}, "
+                    f"no raster hit-only: {totals['no_raster_hit_only']}"
+                )
             if mode == "orthometric":
                 details += f", out of DTM extent: {totals['outside_dtm_extent']}"
             details += "\n\nLayers preview:\n" + "\n".join(layer_lines) + "\n\nContinue?"
@@ -615,6 +719,7 @@ class TraceBuild3DMixin:
             built_layers = []
             created_total = 0
             skipped_total = 0
+            skipped_no_hit_total = 0
             for lyr, st in per_layer:
                 if st.get("ready", 0) <= 0:
                     continue
@@ -622,11 +727,12 @@ class TraceBuild3DMixin:
                 out_layer = self._create_3d_output_layer(lyr, out_name)
                 if out_layer is None:
                     continue
-                created, skipped = self._build_3d_with_mode(lyr, out_layer, mode, dtm_layer=dtm_layer)
+                created, skipped, skip_reasons = self._build_3d_with_mode(lyr, out_layer, mode, dtm_layer=dtm_layer)
                 if created <= 0:
                     continue
                 created_total += int(created)
                 skipped_total += int(skipped)
+                skipped_no_hit_total += int((skip_reasons or {}).get("no_raster_hit_only", 0))
                 built_layers.append(out_layer)
 
             if not built_layers:
@@ -641,7 +747,8 @@ class TraceBuild3DMixin:
             self._notify_info(
                 (
                     f"3D batch completed ({mode_label}): "
-                    f"layers created: {len(built_layers)}, features created: {created_total}, skipped: {skipped_total}."
+                    f"layers created: {len(built_layers)}, features created: {created_total}, skipped: {skipped_total}, "
+                    f"no-raster-hit skipped: {skipped_no_hit_total}."
                 ),
                 duration=8,
             )
@@ -680,7 +787,7 @@ class TraceBuild3DMixin:
                     "No valid feature to convert with selected mode.\n"
                     f"Total: {preview['total']}, missing depth: {preview['missing_depth']}, "
                     f"missing grid: {preview['missing_grid']}, invalid geom: {preview['invalid_geom']}, "
-                    f"sample fail: {preview['sample_fail']}{extra}."
+                    f"sample fail: {preview['sample_fail']}, no raster hit-only: {preview.get('no_raster_hit_only', 0)}{extra}."
                 ),
             )
             return
@@ -703,7 +810,8 @@ class TraceBuild3DMixin:
                 f"Will be skipped: {preview['total'] - preview['ready']}\n\n"
                 f"Details - missing depth: {preview['missing_depth']}, "
                 f"missing grid: {preview['missing_grid']}, "
-                f"invalid geom: {preview['invalid_geom']}, sample fail: {preview['sample_fail']}{extra}.\n\n"
+                f"invalid geom: {preview['invalid_geom']}, sample fail: {preview['sample_fail']}, "
+                f"no raster hit-only: {preview.get('no_raster_hit_only', 0)}{extra}.\n\n"
                 "Continue?"
             ),
             QMessageBox.Yes | QMessageBox.No,
@@ -717,9 +825,12 @@ class TraceBuild3DMixin:
             QMessageBox.critical(self._ui_parent(), "Build 3D", "Unable to create 3D output layer.")
             return
 
-        created, skipped = self._build_3d_with_mode(source_layer, out_layer, mode, dtm_layer=dtm_layer)
+        created, skipped, skip_reasons = self._build_3d_with_mode(source_layer, out_layer, mode, dtm_layer=dtm_layer)
         self._notify_info(
-            f"3D build completed ({mode_label}): {created} feature(s), skipped: {skipped}.",
+            (
+                f"3D build completed ({mode_label}): {created} feature(s), skipped: {skipped}, "
+                f"no-raster-hit skipped: {int((skip_reasons or {}).get('no_raster_hit_only', 0))}."
+            ),
             duration=7,
         )
         self.iface.setActiveLayer(out_layer)
