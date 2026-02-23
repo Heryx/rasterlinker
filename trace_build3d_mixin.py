@@ -692,16 +692,16 @@ class TraceBuild3DMixin:
             if len(per_layer) > 12:
                 layer_lines.append(f"... and {len(per_layer) - 12} more layers.")
 
-                details = (
-                    f"Mode: {mode_label}\n"
-                    f"Layers (ready/total): {totals['layers_ready']}/{totals['layers_total']}\n"
-                    f"Features (ready/total): {totals['features_ready']}/{totals['features_total']}\n"
-                    f"Will be skipped: {totals['features_total'] - totals['features_ready']}\n\n"
-                    f"Details - missing depth: {totals['missing_depth']}, "
-                    f"missing grid: {totals['missing_grid']}, "
-                    f"invalid geom: {totals['invalid_geom']}, sample fail: {totals['sample_fail']}, "
-                    f"no raster hit-only: {totals['no_raster_hit_only']}"
-                )
+            details = (
+                f"Mode: {mode_label}\n"
+                f"Layers (ready/total): {totals['layers_ready']}/{totals['layers_total']}\n"
+                f"Features (ready/total): {totals['features_ready']}/{totals['features_total']}\n"
+                f"Will be skipped: {totals['features_total'] - totals['features_ready']}\n\n"
+                f"Details - missing depth: {totals['missing_depth']}, "
+                f"missing grid: {totals['missing_grid']}, "
+                f"invalid geom: {totals['invalid_geom']}, sample fail: {totals['sample_fail']}, "
+                f"no raster hit-only: {totals['no_raster_hit_only']}"
+            )
             if mode == "orthometric":
                 details += f", out of DTM extent: {totals['outside_dtm_extent']}"
             details += "\n\nLayers preview:\n" + "\n".join(layer_lines) + "\n\nContinue?"
