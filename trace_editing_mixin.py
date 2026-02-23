@@ -421,6 +421,148 @@ class TraceEditingMixin:
         if not self._trigger_iface_action("actionDeleteSelected", "actionDeleteSelectedFeatures"):
             QMessageBox.warning(self._ui_parent(), "Delete", "Unable to delete selected feature(s).")
 
+    def clean_orphan_traces(self, checked=False):
+        t0 = time.perf_counter()
+        layer = self._current_trace_layer(prefer_active=True, require_trace=True)
+        if layer is None:
+            layer = self._select_line_layer_dialog(require_trace=True)
+        if layer is None:
+            return
+        self._set_active_trace_layer(layer)
+
+        idx_ts = layer.fields().indexOf("ts_id")
+        if idx_ts < 0:
+            QMessageBox.warning(
+                self._ui_parent(),
+                "Clean Orphans",
+                "The selected layer has no 'ts_id' field.",
+            )
+            return
+
+        orphan_fids = []
+        total = 0
+        try:
+            for feat in layer.getFeatures():
+                total += 1
+                ts_val = str(feat.attribute(idx_ts) or "").strip()
+                if not ts_val:
+                    orphan_fids.append(int(feat.id()))
+        except Exception as exc:
+            QMessageBox.warning(
+                self._ui_parent(),
+                "Clean Orphans",
+                f"Unable to scan layer features.\n{exc}",
+            )
+            return
+
+        if not orphan_fids:
+            self._notify_info("No orphan traces found (all features have ts_id).", duration=4)
+            return
+
+        answer = QMessageBox.question(
+            self._ui_parent(),
+            "Clean Orphans",
+            (
+                f"Found {len(orphan_fids)} orphan trace(s) out of {total} feature(s).\n"
+                "Orphan = empty time-slice id (ts_id).\n\n"
+                "Delete these features now?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        was_editing = bool(layer.isEditable())
+        started_here = False
+        if not was_editing:
+            try:
+                started_here = bool(layer.startEditing())
+            except Exception:
+                started_here = False
+            if not started_here:
+                QMessageBox.warning(
+                    self._ui_parent(),
+                    "Clean Orphans",
+                    "Unable to start editing on the selected layer.",
+                )
+                return
+
+        deleted_count = 0
+        try:
+            if layer.deleteFeatures(orphan_fids):
+                deleted_count = len(orphan_fids)
+            else:
+                for fid in orphan_fids:
+                    try:
+                        if layer.deleteFeature(fid):
+                            deleted_count += 1
+                    except Exception:
+                        continue
+        except Exception:
+            for fid in orphan_fids:
+                try:
+                    if layer.deleteFeature(fid):
+                        deleted_count += 1
+                except Exception:
+                    continue
+
+        if started_here:
+            if deleted_count > 0:
+                ok = False
+                try:
+                    ok = bool(layer.commitChanges())
+                except Exception:
+                    ok = False
+                if not ok:
+                    err_text = ""
+                    try:
+                        errs = layer.commitErrors() or []
+                        err_text = "\n".join(str(e) for e in errs if e)
+                    except Exception:
+                        err_text = ""
+                    QMessageBox.warning(
+                        self._ui_parent(),
+                        "Clean Orphans",
+                        "Unable to save orphan cleanup changes."
+                        + (f"\n{err_text}" if err_text else ""),
+                    )
+                    self._set_trace_draw_state_from_layer(layer)
+                    self._sync_draw_action_checked_for_layer(layer)
+                    return
+            else:
+                try:
+                    layer.rollBack()
+                except Exception:
+                    pass
+        else:
+            try:
+                layer.triggerRepaint()
+            except Exception:
+                pass
+
+        if hasattr(self, "_sync_trace_vertex_depth_labels"):
+            try:
+                # Update existing vertex layer if present, do not auto-create it.
+                self._sync_trace_vertex_depth_labels(layer, create_if_missing=False)
+            except Exception:
+                pass
+
+        if self.trace_info_dock is not None and self.trace_info_dock.isVisible():
+            self.refresh_trace_info_table()
+
+        if was_editing:
+            self._set_trace_draw_session_state("drawing_active")
+        else:
+            self._set_trace_draw_session_state("idle")
+        self._sync_draw_action_checked_for_layer(layer)
+
+        self._notify_info(
+            f"Cleaned orphan traces: {deleted_count}/{len(orphan_fids)} deleted. "
+            f"({int((time.perf_counter() - t0) * 1000)} ms)",
+            duration=6,
+        )
+
     def open_trace_attribute_table(self, checked=False):
         layer = self._current_trace_layer(prefer_active=True, require_trace=False)
         if layer is None:

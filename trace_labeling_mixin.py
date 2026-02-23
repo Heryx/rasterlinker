@@ -5,6 +5,7 @@ import json
 
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (
+    QgsEditorWidgetSetup,
     QgsFeature,
     QgsGeometry,
     QgsMarkerSymbol,
@@ -434,6 +435,18 @@ class TraceLabelingMixin:
         self._configure_vertex_labeling(label_layer)
         try:
             label_layer.setLabelsEnabled(self._vertex_labels_enabled_for_mode())
+        except Exception:
+            pass
+
+        # Avoid noisy warnings like:
+        # "Relazione mancante nella configurazione" on trace_id field
+        # by forcing a plain text editor widget on vertex metadata keys.
+        try:
+            for field_name in ("trace_id", "trace_fid", "vertex_idx", "trace_layer_id"):
+                idx = label_layer.fields().indexOf(field_name)
+                if idx < 0:
+                    continue
+                label_layer.setEditorWidgetSetup(idx, QgsEditorWidgetSetup("TextEdit", {}))
         except Exception:
             pass
 

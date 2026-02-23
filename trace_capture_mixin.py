@@ -3,7 +3,7 @@
 
 import json
 import math
-import os.path
+import os
 from functools import partial
 
 from qgis.PyQt.QtCore import Qt, QVariant
@@ -17,17 +17,22 @@ from qgis.PyQt.QtWidgets import (
     QPlainTextEdit,
 )
 from qgis.core import (
+    QgsCoordinateTransform,
     QgsEditorWidgetSetup,
     QgsField,
+    QgsMessageLog,
+    Qgis,
     QgsLayerTreeGroup,
     QgsLayerTreeLayer,
     QgsPointXY,
     QgsProject,
     QgsRasterLayer,
+    QgsRaster,
     QgsVectorLayer,
     QgsWkbTypes,
     QgsFeature,
     QgsGeometry,
+    QgsPolygon,
 )
 from PyQt5.QtWidgets import QCheckBox
 
@@ -38,6 +43,32 @@ from .trace_storage_mixin import TraceStorageMixin
 
 
 class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin):
+    def _trace_debug_enabled(self):
+        try:
+            raw_local = getattr(self, "trace_debug_logging", None)
+            if isinstance(raw_local, bool):
+                return raw_local
+            if raw_local is not None:
+                txt_local = str(raw_local).strip().lower()
+                if txt_local in ("1", "true", "yes", "on", "debug"):
+                    return True
+                if txt_local in ("0", "false", "no", "off", ""):
+                    return False
+        except Exception:
+            pass
+        try:
+            raw = str(os.environ.get("GEOSURVEY_TRACE_DEBUG", "") or "").strip().lower()
+            return raw in ("1", "true", "yes", "on", "debug")
+        except Exception:
+            return False
+
+    def _trace_debug_log(self, message, level=Qgis.Info):
+        if level != Qgis.Critical and not self._trace_debug_enabled():
+            return
+        try:
+            QgsMessageLog.logMessage(str(message), "GeoSurvey Studio", level)
+        except Exception:
+            pass
 
     def _is_line_layer(self, layer):
         return (
@@ -1222,13 +1253,12 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             return None
         return self._loaded_plugin_raster_layer_by_path(project_path)
 
-    def _raster_point_has_pixel_hit(self, layer, point_xy):
+    def _point_in_raster_grid(self, layer, point_xy):
+        """True only when world point maps inside raster pixel grid.
+
+        This is stricter than extent().contains() and correctly handles rotated rasters.
+        """
         if layer is None or not isinstance(layer, QgsRasterLayer) or not layer.isValid() or point_xy is None:
-            return False
-        try:
-            if not layer.extent().contains(point_xy):
-                return False
-        except Exception:
             return False
 
         provider = None
@@ -1239,14 +1269,225 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
         if provider is None:
             return False
 
+        # Try affine transform based check first (works for rotated grids).
+        try:
+            gt = provider.geoTransform()
+        except Exception:
+            gt = None
+        try:
+            if gt and len(gt) >= 6:
+                g0, g1, g2, g3, g4, g5 = [float(v) for v in list(gt)[:6]]
+                det = (g1 * g5) - (g2 * g4)
+                if abs(det) > 1e-18:
+                    dx = float(point_xy.x()) - g0
+                    dy = float(point_xy.y()) - g3
+                    col = ((dx * g5) - (dy * g2)) / det
+                    row = ((dy * g1) - (dx * g4)) / det
+                    try:
+                        w = int(provider.xSize())
+                        h = int(provider.ySize())
+                    except Exception:
+                        w = int(getattr(layer, "width", lambda: 0)() or 0)
+                        h = int(getattr(layer, "height", lambda: 0)() or 0)
+                    if w > 0 and h > 0:
+                        inside_grid = (col >= 0.0) and (row >= 0.0) and (col < float(w)) and (row < float(h))
+                        if not inside_grid:
+                            return False
+                        # Additional strict check against true raster footprint polygon.
+                        # This prevents false positives caused by rotated rasters/bounding approximations.
+                        def _xy(c, r):
+                            return QgsPointXY(g0 + c * g1 + r * g2, g3 + c * g4 + r * g5)
+
+                        p0 = _xy(0.0, 0.0)
+                        p1 = _xy(float(w), 0.0)
+                        p2 = _xy(float(w), float(h))
+                        p3 = _xy(0.0, float(h))
+                        ring = [p0, p1, p2, p3, p0]
+                        footprint = QgsGeometry.fromPolygonXY([ring])
+                        pt_geom = QgsGeometry.fromPointXY(point_xy)
+                        try:
+                            return bool(footprint.intersects(pt_geom))
+                        except Exception:
+                            return inside_grid
+        except Exception:
+            pass
+
+        # Fallback: use provider identify (do NOT fallback to extent bbox,
+        # which can produce false positives with rotated/no-data scenarios).
+        try:
+            ident = provider.identify(point_xy, QgsRaster.IdentifyFormatValue)
+            if ident is None or not ident.isValid():
+                return False
+            results = ident.results()
+            return bool(results)
+        except Exception:
+            return False
+
+    def _trace_source_crs(self, layer_id=None):
+        layer = None
+        if layer_id:
+            try:
+                layer = QgsProject.instance().mapLayer(layer_id)
+            except Exception:
+                layer = None
+        if layer is None and hasattr(self, "_current_trace_layer"):
+            try:
+                layer = self._current_trace_layer(prefer_active=True, require_trace=False)
+            except Exception:
+                layer = None
+        try:
+            crs = layer.crs() if layer is not None else None
+            if crs is not None and crs.isValid():
+                return crs
+        except Exception:
+            pass
+        return None
+
+    def _transform_point_to_layer_crs(self, point_xy, target_layer, source_crs=None):
+        if point_xy is None or target_layer is None:
+            return None
+        try:
+            target_crs = target_layer.crs()
+            if target_crs is None or not target_crs.isValid():
+                return point_xy
+        except Exception:
+            return point_xy
+        if source_crs is None:
+            source_crs = self._trace_source_crs()
+        try:
+            if source_crs is None or not source_crs.isValid():
+                return point_xy
+            if source_crs == target_crs:
+                return point_xy
+            xform = QgsCoordinateTransform(source_crs, target_crs, QgsProject.instance())
+            return xform.transform(point_xy)
+        except Exception:
+            return None
+
+    def _raster_point_has_pixel_hit(self, layer, point_xy):
+        return self._raster_point_has_pixel_hit_with_crs(layer, point_xy, source_crs=None)
+
+    def _raster_point_has_pixel_hit_with_crs(self, layer, point_xy, source_crs=None):
+        if layer is None or not isinstance(layer, QgsRasterLayer) or not layer.isValid() or point_xy is None:
+            self._trace_debug_log("Trace hit-check: invalid layer/point -> FALSE")
+            return False
+        point_on_raster = self._transform_point_to_layer_crs(point_xy, layer, source_crs=source_crs)
+        if point_on_raster is None:
+            self._trace_debug_log(
+                f"Trace hit-check: CRS transform failed for layer='{layer.name()}' -> FALSE"
+            )
+            return False
+        try:
+            inside_grid = bool(self._point_in_raster_grid(layer, point_on_raster))
+            if not inside_grid:
+                self._trace_debug_log(
+                    f"Trace hit-check: outside raster grid layer='{layer.name()}' point=({point_on_raster.x():.3f},{point_on_raster.y():.3f}) -> FALSE"
+                )
+                return False
+        except Exception:
+            self._trace_debug_log(
+                f"Trace hit-check: grid check exception layer='{layer.name()}' -> FALSE"
+            )
+            return False
+
+        provider = None
+        try:
+            provider = layer.dataProvider()
+        except Exception:
+            provider = None
+        if provider is None:
+            self._trace_debug_log(
+                f"Trace hit-check: missing provider layer='{layer.name()}' -> FALSE"
+            )
+            return False
+
+        # Identify guard first: if provider says no valid identify at this point,
+        # treat as no raster hit.
+        try:
+            ident = provider.identify(point_on_raster, QgsRaster.IdentifyFormatValue)
+            if ident is None or not ident.isValid():
+                self._trace_debug_log(
+                    f"Trace hit-check: identify invalid layer='{layer.name()}' point=({point_on_raster.x():.3f},{point_on_raster.y():.3f}) -> FALSE"
+                )
+                return False
+            ident_results = ident.results() or {}
+            if not ident_results:
+                self._trace_debug_log(
+                    f"Trace hit-check: identify empty layer='{layer.name()}' point=({point_on_raster.x():.3f},{point_on_raster.y():.3f}) -> FALSE"
+                )
+                return False
+        except Exception:
+            self._trace_debug_log(
+                f"Trace hit-check: identify exception layer='{layer.name()}' -> FALSE"
+            )
+            return False
+
         try:
             band_count = max(1, int(layer.bandCount()))
         except Exception:
             band_count = 1
 
+        # If raster has an alpha band and alpha is 0 at point, treat as no hit.
+        alpha_band = 0
+        for b in range(1, band_count + 1):
+            ci_name = ""
+            try:
+                ci_name = str(provider.colorInterpretationName(b) or "").strip().lower()
+            except Exception:
+                ci_name = ""
+            if "alpha" in ci_name:
+                alpha_band = b
+                break
+        if alpha_band > 0:
+            try:
+                a_sample = provider.sample(point_on_raster, alpha_band)
+                a_ok = True
+                a_val = a_sample
+                if isinstance(a_sample, (tuple, list)):
+                    if len(a_sample) >= 2:
+                        a_val = a_sample[0]
+                        a_ok = bool(a_sample[1])
+                    elif len(a_sample) == 1:
+                        a_val = a_sample[0]
+                a_num = self._safe_float(a_val)
+                if (not a_ok) or (a_num is None) or (float(a_num) <= 0.0):
+                    self._trace_debug_log(
+                        f"Trace hit-check: alpha=0/no-data layer='{layer.name()}' alpha_band={alpha_band} -> FALSE"
+                    )
+                    return False
+            except Exception:
+                # If alpha sampling fails, continue with normal checks.
+                pass
+
+        def _is_nodata_value(band_idx, value_num):
+            # Source NoData
+            try:
+                if provider.sourceHasNoDataValue(band_idx):
+                    nd = self._safe_float(provider.sourceNoDataValue(band_idx))
+                    if nd is not None and abs(float(value_num) - float(nd)) <= 1e-12:
+                        return True
+            except Exception:
+                pass
+
+            # User NoData ranges (layer/provider-side)
+            try:
+                ranges = provider.userNoDataValues(band_idx)
+            except Exception:
+                ranges = None
+            if ranges:
+                for rng in ranges:
+                    try:
+                        lo = float(rng.min())
+                        hi = float(rng.max())
+                    except Exception:
+                        continue
+                    if lo <= float(value_num) <= hi:
+                        return True
+            return False
+
         for band in range(1, band_count + 1):
             try:
-                sampled = provider.sample(point_xy, band)
+                sampled = provider.sample(point_on_raster, band)
             except Exception:
                 continue
 
@@ -1270,35 +1511,68 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             except Exception:
                 pass
 
-            nodata = None
-            try:
-                if provider.sourceHasNoDataValue(band):
-                    nodata = self._safe_float(provider.sourceNoDataValue(band))
-            except Exception:
-                nodata = None
-            if nodata is not None:
-                try:
-                    if abs(float(num) - float(nodata)) <= 1e-12:
-                        continue
-                except Exception:
-                    pass
+            if _is_nodata_value(band, num):
+                continue
 
+            try:
+                src_crs_txt = source_crs.authid() if source_crs is not None and source_crs.isValid() else "unknown"
+            except Exception:
+                src_crs_txt = "unknown"
+            try:
+                dst_crs_txt = layer.crs().authid() if layer.crs().isValid() else "unknown"
+            except Exception:
+                dst_crs_txt = "unknown"
+            self._trace_debug_log(
+                "Trace hit-check: TRUE "
+                f"layer='{layer.name()}' band={band} value={float(num):.6f} "
+                f"src=({point_xy.x():.3f},{point_xy.y():.3f})[{src_crs_txt}] "
+                f"dst=({point_on_raster.x():.3f},{point_on_raster.y():.3f})[{dst_crs_txt}]"
+            )
             return True
+        self._trace_debug_log(
+            f"Trace hit-check: all sampled values are NoData layer='{layer.name()}' -> FALSE"
+        )
         return False
 
-    def _vertex_context_candidates(self, point_xy, contexts):
+    def _vertex_context_candidates(self, point_xy, contexts, source_crs=None):
         # Issue 10 (local backlog): assign time-slice/depth only on true raster pixel hit.
         if not contexts or point_xy is None:
             return []
         hits = []
+        attempted = 0
+        attempted_labels = []
         for ctx in contexts or []:
+            attempted += 1
             layer = self._context_raster_layer(ctx)
-            if not self._raster_point_has_pixel_hit(layer, point_xy):
+            ts_lbl = str((ctx or {}).get("timeslice_name") or (ctx or {}).get("timeslice_id") or "").strip()
+            lyr_lbl = ""
+            try:
+                lyr_lbl = str(layer.name() or "")
+            except Exception:
+                lyr_lbl = ""
+            if ts_lbl or lyr_lbl:
+                attempted_labels.append(f"{ts_lbl or '?'}->{lyr_lbl or 'no_layer'}")
+            hit = self._raster_point_has_pixel_hit_with_crs(layer, point_xy, source_crs=source_crs)
+            if not hit:
                 continue
             if layer is not None and (not isinstance(ctx.get("layer"), QgsRasterLayer) or not ctx.get("layer").isValid()):
                 ctx = dict(ctx)
                 ctx["layer"] = layer
             hits.append(ctx)
+        if not hits and attempted > 0:
+            try:
+                src_txt = source_crs.authid() if source_crs is not None and source_crs.isValid() else "unknown"
+            except Exception:
+                src_txt = "unknown"
+            try:
+                x_txt = f"{float(point_xy.x()):.3f}"
+                y_txt = f"{float(point_xy.y()):.3f}"
+            except Exception:
+                x_txt = "nan"
+                y_txt = "nan"
+            self._trace_debug_log(
+                f"Trace metadata debug: no raster-hit for vertex at ({x_txt}, {y_txt}); src_crs={src_txt}; attempted={attempted}; contexts={attempted_labels}"
+            )
         return hits
 
     def _serialize_vertex_depths(self, vertex_rows):
@@ -1330,6 +1604,7 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
         fid=None,
     ):
         depth_pick_mode = self._trace_depth_pick_mode()
+        source_crs = self._trace_source_crs(layer_id)
         contexts = self._visible_timeslice_contexts_for_geometry(geometry)
         contexts = self._merge_timeslice_contexts(contexts, self._selected_timeslice_contexts_from_ui())
         # Include all currently listed time-slices in UI to keep metadata coherent across
@@ -1371,20 +1646,40 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             if idx <= len(captured_vertices):
                 crow = captured_vertices[idx - 1]
                 c_rec = crow.get("rec") if isinstance(crow.get("rec"), dict) else None
-                vertex_candidates = [
-                    {
-                        "layer": None,
-                        "group_name": str(crow.get("group_name") or ""),
-                        "timeslice_id": str(crow.get("timeslice_id") or ""),
-                        "timeslice_name": str(crow.get("timeslice_name") or ""),
-                        "rec": c_rec,
-                        "depth_from": crow.get("depth_from"),
-                        "depth_to": crow.get("depth_to"),
-                        "depth_unit": crow.get("depth_unit") or "m",
-                    }
-                ]
+                captured_ctx = {
+                    "layer": None,
+                    "group_name": str(crow.get("group_name") or ""),
+                    "timeslice_id": str(crow.get("timeslice_id") or ""),
+                    "timeslice_name": str(crow.get("timeslice_name") or ""),
+                    "project_path": str(crow.get("project_path") or ""),
+                    "rec": c_rec,
+                    "depth_from": crow.get("depth_from"),
+                    "depth_to": crow.get("depth_to"),
+                    "depth_unit": crow.get("depth_unit") or "m",
+                }
+                # Backlog local Issue 10:
+                # even when a click context exists, assign depth metadata only if
+                # the corresponding raster has a valid pixel hit at this vertex.
+                captured_layer = self._context_raster_layer(captured_ctx)
+                if self._raster_point_has_pixel_hit_with_crs(captured_layer, point_xy, source_crs=source_crs):
+                    if captured_layer is not None:
+                        captured_ctx["layer"] = captured_layer
+                    vertex_candidates = [captured_ctx]
+                else:
+                    # Fallback: try visible contexts at this vertex position.
+                    vertex_candidates = self._vertex_context_candidates(point_xy, contexts, source_crs=source_crs)
             else:
-                vertex_candidates = self._vertex_context_candidates(point_xy, contexts)
+                vertex_candidates = self._vertex_context_candidates(point_xy, contexts, source_crs=source_crs)
+            try:
+                x_txt = f"{float(point_xy.x()):.3f}" if point_xy is not None else "nan"
+                y_txt = f"{float(point_xy.y()):.3f}" if point_xy is not None else "nan"
+                cand_names = [str((c or {}).get("timeslice_name") or (c or {}).get("timeslice_id") or "").strip() for c in (vertex_candidates or [])]
+                cand_names = [c for c in cand_names if c]
+                self._trace_debug_log(
+                    f"Trace metadata debug [fid={fid}] vertex#{idx} at ({x_txt}, {y_txt}) -> hits={len(vertex_candidates)} {cand_names}"
+                )
+            except Exception:
+                pass
             vertex_depth_pairs = []
             vertex_modes = []
             vertex_units = []
@@ -1533,6 +1828,12 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
         ts_name_text = " | ".join(touched_names)
         group_name_text = " | ".join(touched_groups)
         depth_list_text = " | ".join(depth_list_values)
+        try:
+            self._trace_debug_log(
+                f"Trace metadata summary [fid={fid}] ts='{ts_name_text}' depth='{depth_list_text}' z_mode='{z_mode}' z_value={z_value}"
+            )
+        except Exception:
+            pass
 
         return {
             "ts_id": ts_id_text,
@@ -1797,12 +2098,17 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                 continue
 
     def _on_trace_feature_added(self, layer_id, fid):
+        self._trace_debug_log(f"Trace postprocess start: layer_id={layer_id}, fid={fid}")
         layer = QgsProject.instance().mapLayer(layer_id)
         if not self._is_trace_layer(layer):
+            self._trace_debug_log(f"Trace postprocess skipped: layer not trace-compatible (layer_id={layer_id})")
             return
         token, key = self._begin_trace_feature_postprocess(layer_id, fid)
         if token is None:
             # Duplicate signal for same feature, ignore side-effects.
+            self._trace_debug_log(
+                f"Trace postprocess skipped: duplicate/inflight key={key} (layer_id={layer_id}, fid={fid})"
+            )
             self.refresh_trace_info_table()
             return
 
@@ -1814,11 +2120,25 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                 pass
 
         success = False
-        self._ensure_trace_layer_schema_and_form(layer)
+        try:
+            self._ensure_trace_layer_schema_and_form(layer)
+        except Exception as exc:
+            self._trace_debug_log(
+                f"Trace postprocess aborted: schema/form setup failed (layer_id={layer_id}, fid={fid}, error={exc})",
+                Qgis.Critical,
+            )
+            self._end_trace_feature_postprocess(token, False)
+            if hasattr(self, "_set_trace_draw_session_state"):
+                self._set_trace_draw_session_state("idle")
+            return
         if not layer.isEditable():
             try:
                 layer.startEditing()
-            except Exception:
+            except Exception as exc:
+                self._trace_debug_log(
+                    f"Trace postprocess aborted: unable to start editing (layer_id={layer_id}, fid={fid}, error={exc})",
+                    Qgis.Critical,
+                )
                 self._end_trace_feature_postprocess(token, False)
                 if hasattr(self, "_set_trace_draw_session_state"):
                     self._set_trace_draw_session_state("idle")
@@ -1843,12 +2163,18 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
 
             _inflight, done_keys, prompted_keys, prompted_trace_ids, done_trace_ids = self._trace_postprocess_sets()
             if existing_trace_id and (existing_trace_id in done_trace_ids or existing_trace_id in prompted_trace_ids):
+                self._trace_debug_log(
+                    f"Trace postprocess skipped: trace_id already done/prompted ({existing_trace_id})"
+                )
                 done_keys.add(key)
                 success = True
                 self.refresh_trace_info_table()
                 return
             if existing_trace_id and existing_created_at:
                 # Feature already enriched once (typical temp-fid -> provider-fid save transition).
+                self._trace_debug_log(
+                    f"Trace postprocess skipped: feature already enriched trace_id={existing_trace_id} created_at={existing_created_at}"
+                )
                 done_keys.add(key)
                 prompted_keys.add(key)
                 done_trace_ids.add(existing_trace_id)
@@ -1889,6 +2215,29 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                 layer_id=layer_id,
                 fid=fid,
             )
+            # If the trace does not intersect any valid raster pixel, discard it.
+            # This avoids creating "orphan" traces drawn fully outside time-slice imagery.
+            if not str(metadata.get("ts_id") or "").strip():
+                try:
+                    layer.deleteFeature(fid)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, "_notify_info"):
+                        self._notify_info(
+                            "Trace discarded: no raster pixel hit detected.",
+                            duration=5,
+                        )
+                except Exception:
+                    pass
+                self._trace_debug_log(
+                    f"Trace discarded: no raster pixel hit detected (layer_id={layer_id}, fid={fid})",
+                    Qgis.Warning,
+                )
+                self.refresh_trace_info_table()
+                success = True
+                return
+
             trace_id = f"tr_{fid}_{utc_now_iso()}".replace(":", "").replace("+", "_")
 
             self._set_feature_attr(layer, fid, "trace_id", trace_id)
@@ -1905,6 +2254,11 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             self._set_feature_attr(layer, fid, "z_value", metadata.get("z_value"))
             self._set_feature_attr(layer, fid, "vertex_depths", metadata.get("vertex_depths"))
             self._set_feature_attr(layer, fid, "created_at", utc_now_iso())
+            self._trace_debug_log(
+                "Trace metadata summary "
+                f"[fid={fid}] ts='{metadata.get('ts_name')}' depth='{metadata.get('depth_list')}' "
+                f"z_mode='{metadata.get('z_mode')}' z_value={metadata.get('z_value')}"
+            )
 
             # Prompt (optional) only once per newly processed feature.
             _, _, prompted_keys, prompted_trace_ids, done_trace_ids = self._trace_postprocess_sets()
@@ -1925,8 +2279,16 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             self._sync_trace_vertex_depth_labels(layer, create_if_missing=False)
             self.refresh_trace_info_table()
             success = True
+        except Exception as exc:
+            self._trace_debug_log(
+                f"Trace postprocess exception: layer_id={layer_id}, fid={fid}, error={exc}",
+                Qgis.Critical,
+            )
         finally:
             self._end_trace_feature_postprocess(token, success)
+            self._trace_debug_log(
+                f"Trace postprocess end: layer_id={layer_id}, fid={fid}, success={success}"
+            )
             if hasattr(self, "_set_trace_draw_session_state"):
                 try:
                     # Restore state deterministically after postprocess.

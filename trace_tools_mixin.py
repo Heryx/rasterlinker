@@ -314,6 +314,14 @@ class TraceToolsMixin:
         )
         self._add_trace_toolbar_action(
             None,
+            "Clean Orphans",
+            self.clean_orphan_traces,
+            "mActionDeleteSelected.svg",
+            "mActionDeleteAllFeatures.svg",
+            "mActionRemoveLayer.svg",
+        )
+        self._add_trace_toolbar_action(
+            None,
             "Draw Panel",
             self.open_trace_info_tab,
             "mActionOpenTable.svg",
@@ -379,6 +387,7 @@ class TraceToolsMixin:
             "Copy",
             "Paste",
             "Delete",
+            "Clean Orphans",
             "Draw Panel",
             "Workflow Check",
         ):
@@ -440,7 +449,7 @@ class TraceToolsMixin:
         _add_separator()
 
         # Group 2: geometry editing tools
-        for action_name in ("Vertex Tool", "Split Feature", "Copy", "Paste", "Delete"):
+        for action_name in ("Vertex Tool", "Split Feature", "Copy", "Paste", "Delete", "Clean Orphans"):
             _add_button(action_name)
         _add_separator()
 
