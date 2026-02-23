@@ -570,7 +570,7 @@ class TraceLabelingMixin:
         self._ensure_trace_vertex_relation(source_layer, label_layer)
         return label_layer
 
-    def _sync_trace_vertex_depth_labels(self, layer=None, create_if_missing=False):
+    def _sync_trace_vertex_depth_labels(self, layer=None, create_if_missing=False, only_fids=None):
         source_layer = layer
         if source_layer is None:
             source_layer = self._current_trace_layer(prefer_active=True, require_trace=True)
@@ -588,16 +588,85 @@ class TraceLabelingMixin:
         if provider is None:
             return
 
-        existing_ids = [f.id() for f in label_layer.getFeatures()]
-        if existing_ids:
+        target_fids = set()
+        if only_fids not in (None, ""):
             try:
-                provider.deleteFeatures(existing_ids)
+                for raw in only_fids:
+                    try:
+                        target_fids.add(int(raw))
+                    except Exception:
+                        continue
+            except Exception:
+                target_fids = set()
+
+        trace_id_idx = source_layer.fields().indexOf("trace_id")
+        source_features = []
+        target_trace_ids = set()
+        for feat in source_layer.getFeatures():
+            try:
+                fid_int = int(feat.id())
+            except Exception:
+                fid_int = None
+            if target_fids and fid_int not in target_fids:
+                continue
+            source_features.append(feat)
+            try:
+                tval = feat.attribute(trace_id_idx) if trace_id_idx >= 0 else ""
+                ttxt = str(tval or "").strip()
+                if ttxt:
+                    target_trace_ids.add(ttxt)
             except Exception:
                 pass
 
+        if target_fids:
+            idx_l_trace_fid = label_layer.fields().indexOf("trace_fid")
+            idx_l_trace_id = label_layer.fields().indexOf("trace_id")
+            idx_l_trace_layer_id = label_layer.fields().indexOf("trace_layer_id")
+            source_layer_id_txt = str(source_layer.id() or "")
+            delete_ids = []
+            for lf in label_layer.getFeatures():
+                try:
+                    if idx_l_trace_layer_id >= 0:
+                        owner = str(lf.attribute(idx_l_trace_layer_id) or "").strip()
+                        if owner and owner != source_layer_id_txt:
+                            continue
+                except Exception:
+                    pass
+                matched = False
+                if idx_l_trace_fid >= 0:
+                    try:
+                        lf_fid = lf.attribute(idx_l_trace_fid)
+                        if lf_fid not in (None, "") and int(lf_fid) in target_fids:
+                            matched = True
+                    except Exception:
+                        matched = False
+                if not matched and target_trace_ids and idx_l_trace_id >= 0:
+                    try:
+                        lf_tid = str(lf.attribute(idx_l_trace_id) or "").strip()
+                        if lf_tid and lf_tid in target_trace_ids:
+                            matched = True
+                    except Exception:
+                        matched = False
+                if matched:
+                    try:
+                        delete_ids.append(int(lf.id()))
+                    except Exception:
+                        continue
+            if delete_ids:
+                try:
+                    provider.deleteFeatures(delete_ids)
+                except Exception:
+                    pass
+        else:
+            existing_ids = [f.id() for f in label_layer.getFeatures()]
+            if existing_ids:
+                try:
+                    provider.deleteFeatures(existing_ids)
+                except Exception:
+                    pass
+
         new_features = []
-        trace_id_idx = source_layer.fields().indexOf("trace_id")
-        for feat in source_layer.getFeatures():
+        for feat in source_features:
             geom = feat.geometry()
             vertices = self._iter_geometry_vertices_xy(geom)
             if not vertices:

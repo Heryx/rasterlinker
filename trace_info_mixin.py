@@ -1267,12 +1267,8 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             self._update_trace_info_form_from_table_selection()
         self._save_trace_info_ui_state()
 
-        if hasattr(self, "_sync_trace_vertex_depth_labels"):
-            try:
-                # Issue #20: no implicit vertex-layer creation from panel refresh.
-                self._sync_trace_vertex_depth_labels(layer, create_if_missing=False)
-            except Exception:
-                pass
+        # Keep refresh lightweight: do not rebuild vertex layers here.
+        # Vertex sync is executed in explicit draw/save/generate workflows.
         if hasattr(self, "_sync_draw_action_checked_for_layer"):
             try:
                 self._sync_draw_action_checked_for_layer(layer)

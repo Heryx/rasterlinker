@@ -2286,7 +2286,7 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             layer.triggerRepaint()
             # Issue #20: do not auto-create vertex layer during line capture.
             # Only refresh it if it already exists.
-            self._sync_trace_vertex_depth_labels(layer, create_if_missing=False)
+            self._sync_trace_vertex_depth_labels(layer, create_if_missing=False, only_fids=[fid])
             self.refresh_trace_info_table()
             success = True
         except Exception as exc:
