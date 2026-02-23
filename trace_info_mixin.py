@@ -2,6 +2,7 @@
 """Trace info panel mixin for GeoSurvey Studio plugin."""
 
 from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor
 from qgis.core import QgsProject
 from qgis.PyQt.QtWidgets import (
     QMessageBox,
@@ -402,6 +403,13 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             return
         fields = label_layer.fields()
         field_names = [f.name() for f in fields]
+        idx_status = fields.indexOf("depth_status")
+        idx_depth_val = fields.indexOf("depth_val")
+        idx_depth_min = fields.indexOf("depth_min")
+        idx_depth_max = fields.indexOf("depth_max")
+        if idx_status < 0:
+            # Keep UI consistent even for legacy vertex layers missing explicit status.
+            field_names.append("depth_status")
         table.setColumnCount(len(field_names))
         table.setHorizontalHeaderLabels(field_names)
 
@@ -428,17 +436,53 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         matched_features.sort(key=_sort_key)
         table.setRowCount(len(matched_features))
         for r, feat in enumerate(matched_features):
-            for c, fname in enumerate(field_names):
+            depth_status = ""
+            try:
+                if idx_status >= 0:
+                    depth_status = str(feat.attribute(idx_status) or "").strip().lower()
+            except Exception:
+                depth_status = ""
+            if depth_status not in ("hit", "no_raster_hit"):
+                d_val = None
+                d_min = None
+                d_max = None
                 try:
-                    val = feat.attribute(fname)
+                    if idx_depth_val >= 0:
+                        d_val = feat.attribute(idx_depth_val)
                 except Exception:
-                    val = ""
+                    d_val = None
+                try:
+                    if idx_depth_min >= 0:
+                        d_min = feat.attribute(idx_depth_min)
+                except Exception:
+                    d_min = None
+                try:
+                    if idx_depth_max >= 0:
+                        d_max = feat.attribute(idx_depth_max)
+                except Exception:
+                    d_max = None
+                if d_val in (None, "") and d_min in (None, "") and d_max in (None, ""):
+                    depth_status = "no_raster_hit"
+                else:
+                    depth_status = "hit"
+            for c, fname in enumerate(field_names):
+                if fname == "depth_status":
+                    val = depth_status
+                else:
+                    try:
+                        val = feat.attribute(fname)
+                    except Exception:
+                        val = ""
                 if isinstance(val, float):
                     txt = f"{val:.3f}"
                 else:
                     txt = "" if val in (None, "") else str(val)
                 item = QTableWidgetItem(txt)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if depth_status == "no_raster_hit":
+                    item.setBackground(QColor(255, 236, 236))
+                    item.setForeground(QColor(130, 45, 45))
+                    item.setToolTip("No raster hit: depth/time-slice metadata is intentionally empty for this vertex.")
                 table.setItem(r, c, item)
         try:
             hdr = table.horizontalHeader()

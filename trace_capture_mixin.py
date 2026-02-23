@@ -1581,6 +1581,12 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             depth_val = self._safe_float(row.get("d"))
             depth_min = self._safe_float(row.get("dmin"))
             depth_max = self._safe_float(row.get("dmax"))
+            depth_status = str(row.get("s") or "").strip().lower()
+            if depth_status not in ("hit", "no_raster_hit"):
+                if depth_val is None and depth_min is None and depth_max is None:
+                    depth_status = "no_raster_hit"
+                else:
+                    depth_status = "hit"
             clean.append(
                 {
                     "i": int(row.get("i") or 0),
@@ -1588,6 +1594,7 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                     "dmin": depth_min,
                     "dmax": depth_max,
                     "u": str(row.get("u") or "m"),
+                    "s": depth_status,
                 }
             )
         try:
@@ -1751,10 +1758,12 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                 v_min = min(p[0] for p in vertex_depth_pairs)
                 v_max = max(p[1] for p in vertex_depth_pairs)
                 v_mid = self._depth_value_from_pair(v_min, v_max, depth_pick_mode)
+                v_status = "hit"
             else:
                 v_min = None
                 v_max = None
                 v_mid = None
+                v_status = "no_raster_hit"
 
             vertex_rows.append(
                 {
@@ -1763,6 +1772,7 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                     "dmin": v_min,
                     "dmax": v_max,
                     "u": depth_unit,
+                    "s": v_status,
                     "ts": "|".join(vertex_ts_names),
                     "id": "|".join(vertex_ts_ids),
                 }

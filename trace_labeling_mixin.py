@@ -343,11 +343,22 @@ class TraceLabelingMixin:
             except Exception:
                 depth_max = None
             unit = str(item.get("u") or "m").strip() or "m"
+            depth_status = str(item.get("s") or "").strip().lower()
+            if depth_status not in ("hit", "no_raster_hit"):
+                if depth_val is None and depth_min is None and depth_max is None:
+                    depth_status = "no_raster_hit"
+                else:
+                    depth_status = "hit"
             # Always derive display value from interval when available, so switching
             # Min/Mid/Max mode updates existing vertex labels without redrawing.
             if depth_min is not None or depth_max is not None:
                 depth_val = self._pick_depth_value_for_display(depth_min, depth_max)
-            if depth_min is not None and depth_max is not None and abs(depth_max - depth_min) > 1e-9:
+            if depth_status == "no_raster_hit":
+                label = ""
+                depth_val = None
+                depth_min = None
+                depth_max = None
+            elif depth_min is not None and depth_max is not None and abs(depth_max - depth_min) > 1e-9:
                 label = f"{depth_min:.2f}-{depth_max:.2f} {unit}"
             elif depth_val is None and depth_min is not None:
                 depth_val = self._pick_depth_value_for_display(depth_min, depth_max)
@@ -365,6 +376,7 @@ class TraceLabelingMixin:
                 "depth_max": depth_max,
                 "depth_unit": unit,
                 "depth_lbl": label,
+                "depth_status": depth_status,
             }
         return by_idx
 
@@ -461,6 +473,7 @@ class TraceLabelingMixin:
                 "&field=depth_min:double"
                 "&field=depth_max:double"
                 "&field=depth_unit:string(16)"
+                "&field=depth_status:string(32)"
                 "&field=trace_layer_id:string(64)"
             )
             label_layer = QgsVectorLayer(uri, layer_name, "memory")
@@ -489,6 +502,12 @@ class TraceLabelingMixin:
                 from qgis.core import QgsField
                 from qgis.PyQt.QtCore import QVariant
                 to_add.append(QgsField("depth_max", QVariant.Double))
+            if "depth_status" not in existing:
+                from qgis.core import QgsField
+                from qgis.PyQt.QtCore import QVariant
+                fld_status = QgsField("depth_status", QVariant.String)
+                fld_status.setLength(32)
+                to_add.append(fld_status)
             if to_add:
                 label_layer.dataProvider().addAttributes(to_add)
                 label_layer.updateFields()
@@ -594,6 +613,17 @@ class TraceLabelingMixin:
                 current_min = vertex_meta.get("depth_min", None)
                 current_max = vertex_meta.get("depth_max", None)
                 current_unit = vertex_meta.get("depth_unit", depth_unit)
+                current_status = str(vertex_meta.get("depth_status", "") or "").strip().lower()
+                if current_status not in ("hit", "no_raster_hit"):
+                    if current_val is None and current_min is None and current_max is None:
+                        current_status = "no_raster_hit"
+                    else:
+                        current_status = "hit"
+                if current_status == "no_raster_hit":
+                    current_lbl = ""
+                    current_val = None
+                    current_min = None
+                    current_max = None
                 row = QgsFeature(label_layer.fields())
                 row.setGeometry(QgsGeometry.fromPointXY(point_xy))
                 row.setAttribute("trace_fid", int(feat.id()))
@@ -606,6 +636,8 @@ class TraceLabelingMixin:
                 if label_layer.fields().indexOf("depth_max") >= 0:
                     row.setAttribute("depth_max", current_max)
                 row.setAttribute("depth_unit", current_unit)
+                if label_layer.fields().indexOf("depth_status") >= 0:
+                    row.setAttribute("depth_status", current_status)
                 row.setAttribute("trace_layer_id", source_layer.id())
                 new_features.append(row)
 

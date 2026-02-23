@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Workflow tests for vector storage/persistence and draw toggle behavior."""
 
+import json
 import tempfile
 import unittest
 
@@ -218,6 +219,35 @@ class TraceVectorWorkflowTest(unittest.TestCase):
         self.assertEqual(len(harness.persist_calls), 1)
         self.assertEqual(harness.persist_calls[0]["source_kind"], "trace3d")
         self.assertIsNotNone(QgsProject.instance().mapLayer(out.id()))
+
+    def test_vertex_depth_status_serialization_and_parse(self):
+        harness = _DrawHarness(self.iface)
+        layer = self._new_trace_layer(harness, name="Trace2D_Status")
+        self.iface.setActiveLayer(layer)
+        harness.trace_line_layer_id = layer.id()
+
+        rows = [
+            {"i": 1, "d": 0.15, "dmin": 0.10, "dmax": 0.20, "u": "m", "s": "hit"},
+            {"i": 2, "d": None, "dmin": None, "dmax": None, "u": "m", "s": "no_raster_hit"},
+        ]
+        raw = harness._serialize_vertex_depths(rows)
+        payload = json.loads(raw)
+        self.assertEqual(payload[0].get("s"), "hit")
+        self.assertEqual(payload[1].get("s"), "no_raster_hit")
+
+        idx = layer.fields().indexOf("vertex_depths")
+        self.assertGreaterEqual(idx, 0)
+        feat = next(layer.getFeatures())
+        layer.startEditing()
+        layer.changeAttributeValue(feat.id(), idx, raw)
+        layer.commitChanges()
+
+        feat_updated = next(layer.getFeatures())
+        by_vertex = harness._per_vertex_depth_map(layer, feat_updated)
+        self.assertEqual(by_vertex[1].get("depth_status"), "hit")
+        self.assertEqual(by_vertex[2].get("depth_status"), "no_raster_hit")
+        self.assertEqual(by_vertex[2].get("depth_lbl"), "")
+        self.assertIsNone(by_vertex[2].get("depth_val"))
 
 
 if __name__ == "__main__":
