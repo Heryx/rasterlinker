@@ -129,6 +129,123 @@ class TraceEditingMixin:
         is_editing = bool(layer is not None and getattr(layer, "isEditable", lambda: False)())
         self._set_draw_action_checked(is_editing)
 
+    def _collect_trace_sync_targets_pre_commit(self, layer):
+        """Collect trace IDs/FIDs likely affected by upcoming commit."""
+        fids = set()
+        trace_ids = set()
+        if layer is None:
+            return fids, trace_ids
+        try:
+            edit_buffer = layer.editBuffer()
+        except Exception:
+            edit_buffer = None
+        if edit_buffer is None:
+            return fids, trace_ids
+
+        try:
+            for raw_fid in (edit_buffer.changedGeometries() or {}).keys():
+                try:
+                    fid = int(raw_fid)
+                except Exception:
+                    continue
+                if fid >= 0:
+                    fids.add(fid)
+        except Exception:
+            pass
+
+        try:
+            for raw_fid in (edit_buffer.changedAttributeValues() or {}).keys():
+                try:
+                    fid = int(raw_fid)
+                except Exception:
+                    continue
+                if fid >= 0:
+                    fids.add(fid)
+        except Exception:
+            pass
+
+        idx_trace_id = -1
+        try:
+            idx_trace_id = layer.fields().indexOf("trace_id")
+        except Exception:
+            idx_trace_id = -1
+
+        try:
+            for raw_fid, feat in (edit_buffer.addedFeatures() or {}).items():
+                try:
+                    fid = int(raw_fid)
+                except Exception:
+                    fid = -1
+                if fid >= 0:
+                    fids.add(fid)
+                if idx_trace_id >= 0 and feat is not None:
+                    try:
+                        tid = str(feat.attribute(idx_trace_id) or "").strip()
+                    except Exception:
+                        tid = ""
+                    if tid:
+                        trace_ids.add(tid)
+        except Exception:
+            pass
+
+        return fids, trace_ids
+
+    def _resolve_trace_sync_fids_post_commit(self, layer, pre_fids, pre_trace_ids):
+        """Resolve final provider FIDs to sync after commit completed."""
+        resolved = set()
+        if layer is None:
+            return resolved
+
+        # Existing provider FIDs that remained stable.
+        for raw_fid in (pre_fids or set()):
+            try:
+                fid = int(raw_fid)
+            except Exception:
+                continue
+            if fid < 0:
+                continue
+            try:
+                feat = layer.getFeature(fid)
+                if feat is not None and feat.isValid():
+                    resolved.add(fid)
+            except Exception:
+                continue
+
+        # Newly committed features from temporary IDs: match by trace_id.
+        trace_ids = {str(t).strip() for t in (pre_trace_ids or set()) if str(t).strip()}
+        if trace_ids:
+            idx_trace_id = layer.fields().indexOf("trace_id")
+            if idx_trace_id >= 0:
+                for feat in layer.getFeatures():
+                    try:
+                        tid = str(feat.attribute(idx_trace_id) or "").strip()
+                    except Exception:
+                        tid = ""
+                    if not tid or tid not in trace_ids:
+                        continue
+                    try:
+                        resolved.add(int(feat.id()))
+                    except Exception:
+                        continue
+        return resolved
+
+    def _sync_vertex_layer_after_commit_targets(self, layer, sync_fids):
+        """Sync derived vertex layer for changed traces only."""
+        if layer is None or not hasattr(self, "_sync_trace_vertex_depth_labels"):
+            return 0
+        if not sync_fids:
+            return 0
+        t0 = time.perf_counter()
+        try:
+            self._sync_trace_vertex_depth_labels(
+                layer,
+                create_if_missing=False,
+                only_fids=sorted(int(fid) for fid in sync_fids),
+            )
+        except Exception:
+            return -1
+        return int((time.perf_counter() - t0) * 1000)
+
     def start_trace_capture(self, checked=None):
         toggle_on = True if checked is None else bool(checked)
         layer = self._ensure_trace_layer_for_capture()
@@ -337,6 +454,7 @@ class TraceEditingMixin:
             return False
 
         if clicked == save_btn:
+            pre_sync_fids, pre_sync_trace_ids = self._collect_trace_sync_targets_pre_commit(layer)
             self._set_trace_draw_session_state("saving")
             ok = False
             try:
@@ -360,10 +478,20 @@ class TraceEditingMixin:
                 self._set_draw_action_checked(True)
                 self._set_trace_draw_state_from_layer(layer)
                 return False
-            # Issue #20: keep vertex layer optional; update only if already present.
-            self._sync_trace_vertex_depth_labels(layer, create_if_missing=False)
+            # Issue #20: keep vertex layer optional and sync only changed traces.
+            resolved_sync_fids = self._resolve_trace_sync_fids_post_commit(
+                layer,
+                pre_sync_fids,
+                pre_sync_trace_ids,
+            )
+            sync_ms = self._sync_vertex_layer_after_commit_targets(layer, resolved_sync_fids)
+            sync_note = ""
+            if sync_ms > 0:
+                sync_note = f" Vertex sync: {len(resolved_sync_fids)} trace(s) in {sync_ms} ms."
+            elif sync_ms < 0:
+                sync_note = " Vertex sync skipped due to an update error."
             self._notify_info(
-                f"Edits saved and editing stopped. ({int((time.perf_counter() - t0) * 1000)} ms)",
+                f"Edits saved and editing stopped. ({int((time.perf_counter() - t0) * 1000)} ms){sync_note}",
                 duration=5,
             )
             if self.trace_info_dock is not None and self.trace_info_dock.isVisible():
