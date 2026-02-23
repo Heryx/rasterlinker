@@ -65,6 +65,46 @@ class TraceBuild3DMixin:
             return None
         return choices[labels.index(chosen_label)][1]
 
+    def _build3d_strict_no_raster_hit_default(self):
+        try:
+            settings = getattr(self, "settings", None)
+            if settings is None:
+                return True
+            raw = str(settings.value("GeoSurveyStudio/build3d_strict_no_raster_hit", "1") or "").strip().lower()
+            return raw in ("1", "true", "yes", "on")
+        except Exception:
+            return True
+
+    def _set_build3d_strict_no_raster_hit_default(self, enabled):
+        try:
+            settings = getattr(self, "settings", None)
+            if settings is not None:
+                settings.setValue("GeoSurveyStudio/build3d_strict_no_raster_hit", "1" if bool(enabled) else "0")
+        except Exception:
+            pass
+
+    def _choose_build3d_raster_hit_policy(self, title="Build 3D"):
+        strict_default = self._build3d_strict_no_raster_hit_default()
+        choices = [
+            ("Strict raster hit (skip traces with no raster-hit vertices)", True),
+            ("Allow no-raster-hit traces", False),
+        ]
+        labels = [c[0] for c in choices]
+        default_idx = 0 if strict_default else 1
+        chosen_label, ok = QInputDialog.getItem(
+            self._ui_parent(),
+            title,
+            "Raster-hit policy:",
+            labels,
+            default_idx,
+            False,
+        )
+        if not ok:
+            return None
+        strict = choices[labels.index(chosen_label)][1]
+        self._set_build3d_strict_no_raster_hit_default(strict)
+        return bool(strict)
+
     def _build3d_batch_source_layers(self):
         layers = []
         for lyr in QgsProject.instance().mapLayers().values():
@@ -393,7 +433,7 @@ class TraceBuild3DMixin:
             return None, None
         return mode, output_name.strip()
 
-    def _precheck_build_3d(self, source_layer, mode, dtm_layer=None):
+    def _precheck_build_3d(self, source_layer, mode, dtm_layer=None, strict_no_raster_hit=True):
         stats = {
             "total": 0,
             "ready": 0,
@@ -411,7 +451,7 @@ class TraceBuild3DMixin:
                 stats["invalid_geom"] += 1
                 continue
             # Do not build 3D from traces whose vertices are all outside raster coverage.
-            if self._feature_is_all_no_raster_hit(source_layer, feat):
+            if strict_no_raster_hit and self._feature_is_all_no_raster_hit(source_layer, feat):
                 stats["no_raster_hit_only"] += 1
                 continue
 
@@ -471,7 +511,7 @@ class TraceBuild3DMixin:
 
         return stats
 
-    def _build_3d_with_mode(self, source_layer, out_layer, mode, dtm_layer=None):
+    def _build_3d_with_mode(self, source_layer, out_layer, mode, dtm_layer=None, strict_no_raster_hit=True):
         out_provider = out_layer.dataProvider()
         features_out = []
         skipped = 0
@@ -491,7 +531,7 @@ class TraceBuild3DMixin:
                 skip_reasons["invalid_geom"] += 1
                 continue
 
-            if self._feature_is_all_no_raster_hit(source_layer, feat):
+            if strict_no_raster_hit and self._feature_is_all_no_raster_hit(source_layer, feat):
                 skipped += 1
                 skip_reasons["no_raster_hit_only"] += 1
                 continue
@@ -633,6 +673,9 @@ class TraceBuild3DMixin:
             mode = self._choose_build_3d_mode_only(default_mode=default_mode)
             if not mode:
                 return
+            strict_no_raster_hit = self._choose_build3d_raster_hit_policy("Build 3D Batch")
+            if strict_no_raster_hit is None:
+                return
             dtm_layer = None
             if mode == "orthometric":
                 dtm_layer = self._choose_dtm_layer()
@@ -659,7 +702,12 @@ class TraceBuild3DMixin:
                 "no_raster_hit_only": 0,
             }
             for lyr in source_layers:
-                stats = self._precheck_build_3d(lyr, mode, dtm_layer=dtm_layer)
+                stats = self._precheck_build_3d(
+                    lyr,
+                    mode,
+                    dtm_layer=dtm_layer,
+                    strict_no_raster_hit=bool(strict_no_raster_hit),
+                )
                 per_layer.append((lyr, stats))
                 totals["layers_total"] += 1
                 if stats.get("ready", 0) > 0:
@@ -694,6 +742,7 @@ class TraceBuild3DMixin:
 
             details = (
                 f"Mode: {mode_label}\n"
+                f"Raster-hit policy: {'Strict (skip no-raster-hit traces)' if strict_no_raster_hit else 'Allow no-raster-hit traces'}\n"
                 f"Layers (ready/total): {totals['layers_ready']}/{totals['layers_total']}\n"
                 f"Features (ready/total): {totals['features_ready']}/{totals['features_total']}\n"
                 f"Will be skipped: {totals['features_total'] - totals['features_ready']}\n\n"
@@ -727,7 +776,13 @@ class TraceBuild3DMixin:
                 out_layer = self._create_3d_output_layer(lyr, out_name)
                 if out_layer is None:
                     continue
-                created, skipped, skip_reasons = self._build_3d_with_mode(lyr, out_layer, mode, dtm_layer=dtm_layer)
+                created, skipped, skip_reasons = self._build_3d_with_mode(
+                    lyr,
+                    out_layer,
+                    mode,
+                    dtm_layer=dtm_layer,
+                    strict_no_raster_hit=bool(strict_no_raster_hit),
+                )
                 if created <= 0:
                     continue
                 created_total += int(created)
@@ -769,13 +824,21 @@ class TraceBuild3DMixin:
         mode, output_name = self._choose_build_3d_mode(source_layer, default_mode=default_mode)
         if not mode or not output_name:
             return
+        strict_no_raster_hit = self._choose_build3d_raster_hit_policy("Build 3D")
+        if strict_no_raster_hit is None:
+            return
         dtm_layer = None
         if mode == "orthometric":
             dtm_layer = self._choose_dtm_layer()
             if dtm_layer is None:
                 return
 
-        preview = self._precheck_build_3d(source_layer, mode, dtm_layer=dtm_layer)
+        preview = self._precheck_build_3d(
+            source_layer,
+            mode,
+            dtm_layer=dtm_layer,
+            strict_no_raster_hit=bool(strict_no_raster_hit),
+        )
         if preview["ready"] <= 0:
             extra = ""
             if mode == "orthometric":
@@ -805,6 +868,7 @@ class TraceBuild3DMixin:
             "Build 3D - Preview",
             (
                 f"Mode: {mode_label}\n"
+                f"Raster-hit policy: {'Strict (skip no-raster-hit traces)' if strict_no_raster_hit else 'Allow no-raster-hit traces'}\n"
                 f"Total features: {preview['total']}\n"
                 f"Ready: {preview['ready']}\n"
                 f"Will be skipped: {preview['total'] - preview['ready']}\n\n"
@@ -825,7 +889,13 @@ class TraceBuild3DMixin:
             QMessageBox.critical(self._ui_parent(), "Build 3D", "Unable to create 3D output layer.")
             return
 
-        created, skipped, skip_reasons = self._build_3d_with_mode(source_layer, out_layer, mode, dtm_layer=dtm_layer)
+        created, skipped, skip_reasons = self._build_3d_with_mode(
+            source_layer,
+            out_layer,
+            mode,
+            dtm_layer=dtm_layer,
+            strict_no_raster_hit=bool(strict_no_raster_hit),
+        )
         self._notify_info(
             (
                 f"3D build completed ({mode_label}): {created} feature(s), skipped: {skipped}, "
