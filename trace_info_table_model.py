@@ -2,6 +2,7 @@
 """Qt table model for GeoSurvey Studio line info rows."""
 
 from qgis.PyQt.QtCore import QAbstractTableModel, Qt
+from qgis.PyQt.QtGui import QColor
 
 
 class TraceInfoTableModel(QAbstractTableModel):
@@ -49,6 +50,33 @@ class TraceInfoTableModel(QAbstractTableModel):
 
         if role == Qt.UserRole:
             return row
+
+        if role == Qt.BackgroundRole:
+            try:
+                if bool(row.get("has_no_raster_hit")):
+                    return QColor(255, 244, 244)
+            except Exception:
+                return None
+            return None
+
+        if role == Qt.ForegroundRole:
+            try:
+                if bool(row.get("has_no_raster_hit")):
+                    return QColor(145, 40, 40)
+            except Exception:
+                return None
+            return None
+
+        if role == Qt.ToolTipRole:
+            try:
+                misses = int(row.get("no_raster_hit_count") or 0)
+            except Exception:
+                misses = 0
+            if misses > 0:
+                return (
+                    f"{misses} vertex/vertices have no raster pixel hit. "
+                    "Depth/time-slice metadata is excluded for those vertices."
+                )
 
         if role == Qt.TextAlignmentRole and col_idx in (0, 3, 5, 6):
             return int(Qt.AlignRight | Qt.AlignVCenter)

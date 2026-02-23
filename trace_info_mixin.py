@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Trace info panel mixin for GeoSurvey Studio plugin."""
 
+import json
+
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 from qgis.core import QgsProject
@@ -656,6 +658,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             ("All", "all"),
             ("Only Missing Z", "missing_z"),
             ("Only With Z", "with_z"),
+            ("Only No Raster Hit", "no_raster_hit"),
         ):
             act = mode_menu.addAction(title)
             act.setCheckable(True)
@@ -827,6 +830,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         mode_combo.addItem("All", "all")
         mode_combo.addItem("Only Missing Z", "missing_z")
         mode_combo.addItem("Only With Z", "with_z")
+        mode_combo.addItem("Only No Raster Hit", "no_raster_hit")
         mode_combo.setMinimumWidth(110)
         mode_combo.setMaximumWidth(150)
         query_row.addWidget(mode_combo, 0)
@@ -1112,6 +1116,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             z_source = feat.attribute("z_source") if layer.fields().indexOf("z_source") >= 0 else ""
             z_grid_path = feat.attribute("z_grid_path") if layer.fields().indexOf("z_grid_path") >= 0 else ""
             z_mode = feat.attribute("z_mode") if layer.fields().indexOf("z_mode") >= 0 else ""
+            vertex_depths_raw = feat.attribute("vertex_depths") if layer.fields().indexOf("vertex_depths") >= 0 else ""
             notes = feat.attribute("notes") if layer.fields().indexOf("notes") >= 0 else ""
             interpretation = feat.attribute("interpretation") if layer.fields().indexOf("interpretation") >= 0 else ""
             comment = feat.attribute("comment") if layer.fields().indexOf("comment") >= 0 else ""
@@ -1140,9 +1145,46 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
 
             z_mode_text = str(z_mode or "")
             missing_z = z_mode_text.lower().startswith("missing")
+            hit_count = 0
+            no_hit_count = 0
+            parsed_vertices = False
+            if vertex_depths_raw not in (None, ""):
+                try:
+                    items = json.loads(str(vertex_depths_raw))
+                except Exception:
+                    items = []
+                if isinstance(items, list) and items:
+                    parsed_vertices = True
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        st = str(item.get("s") or "").strip().lower()
+                        if st not in ("hit", "no_raster_hit"):
+                            d = item.get("d")
+                            dmin = item.get("dmin")
+                            dmax = item.get("dmax")
+                            if d in (None, "") and dmin in (None, "") and dmax in (None, ""):
+                                st = "no_raster_hit"
+                            else:
+                                st = "hit"
+                        if st == "no_raster_hit":
+                            no_hit_count += 1
+                        else:
+                            hit_count += 1
+            if not parsed_vertices:
+                try:
+                    total_vertices = int(vertex_counts.get(trace_id or f"fid_{fid}", 0))
+                except Exception:
+                    total_vertices = 0
+                hit_count = max(0, total_vertices)
+                no_hit_count = 0
+            has_no_raster_hit = no_hit_count > 0
+
             if mode_filter == "missing_z" and not missing_z:
                 continue
             if mode_filter == "with_z" and missing_z:
+                continue
+            if mode_filter == "no_raster_hit" and not has_no_raster_hit:
                 continue
 
             trace_text = trace_id or f"fid_{fid}"
@@ -1155,6 +1197,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
                     "z_mode": str(z_mode_text),
                     "length": f"{float(length_val):.2f}",
                     "vertices": str(vertex_counts.get(trace_text, 0)),
+                    "no_raster_hit": str(no_hit_count),
                     "notes": str(notes or ""),
                     "interpretation": str(interpretation or ""),
                     "comment": str(comment or ""),
@@ -1177,6 +1220,9 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
                     "length_num": float(length_val),
                     "length_text": f"{float(length_val):.2f}",
                     "vertices_text": str(vertex_counts.get(trace_text, 0)),
+                    "has_no_raster_hit": has_no_raster_hit,
+                    "hit_count": int(hit_count),
+                    "no_raster_hit_count": int(no_hit_count),
                     "group_name": group_name or "",
                     "z_source": z_source or "",
                     "z_grid_path": z_grid_path or "",
