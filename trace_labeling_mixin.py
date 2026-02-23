@@ -6,12 +6,15 @@ import json
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (
     QgsEditorWidgetSetup,
+    QgsExpression,
     QgsFeature,
     QgsGeometry,
+    QgsMessageLog,
     QgsMarkerSymbol,
     QgsPalLayerSettings,
     QgsPointXY,
     QgsProject,
+    Qgis,
     QgsRelation,
     QgsTextBufferSettings,
     QgsTextFormat,
@@ -39,10 +42,14 @@ class TraceLabelingMixin:
             field_names = {f.name() for f in layer.fields()}
         except Exception:
             field_names = set()
-        # Be permissive for legacy layers: trace_layer_id may be missing.
-        required = {"trace_id", "vertex_idx"}
         has_depth = ("depth_val" in field_names) or ("depth_lbl" in field_names)
-        if required.issubset(field_names) and has_depth:
+        has_trace_keys = (
+            ("trace_id" in field_names)
+            or ("trace_fid" in field_names)
+            or ("trace_layer_id" in field_names)
+        )
+        # Be permissive for legacy layers: trace_layer_id/trace_id may be missing.
+        if has_trace_keys and has_depth:
             try:
                 set_layer_property(layer, "vertex_labels", "1")
             except Exception:
@@ -52,7 +59,7 @@ class TraceLabelingMixin:
 
     def _configure_vertex_labeling(self, layer):
         if layer is None or not isinstance(layer, QgsVectorLayer) or not layer.isValid():
-            return
+            return False
         try:
             has_depth_val = layer.fields().indexOf("depth_val") >= 0
         except Exception:
@@ -62,19 +69,39 @@ class TraceLabelingMixin:
         except Exception:
             has_depth_lbl = False
         if not has_depth_val and not has_depth_lbl:
-            return
+            return False
+        expr = None
         try:
             pal = QgsPalLayerSettings()
             pal.enabled = True
             pal.isExpression = True
             if has_depth_val:
-                pal.fieldName = (
-                    "CASE WHEN \"depth_val\" IS NULL THEN '' "
-                    "ELSE to_string(round(\"depth_val\", 3)) END"
+                # Keep expression string-typed to avoid parser/provider incompatibilities.
+                expr = (
+                    "CASE "
+                    "WHEN \"depth_val\" IS NULL THEN coalesce(\"depth_lbl\", '') "
+                    "ELSE concat(round(\"depth_val\", 3), '') "
+                    "END"
                 )
             else:
-                pal.fieldName = "coalesce(\"depth_lbl\", '')"
-            pal.placement = QgsPalLayerSettings.OverPoint
+                expr = "coalesce(\"depth_lbl\", '')"
+            try:
+                check_expr = QgsExpression(expr)
+                if check_expr.hasParserError():
+                    expr = "coalesce(\"depth_lbl\", '')"
+            except Exception:
+                expr = "coalesce(\"depth_lbl\", '')"
+            pal.fieldName = expr
+            # QGIS API compatibility:
+            # newer versions expect Qgis.LabelPlacement enum, while older
+            # versions use QgsPalLayerSettings.OverPoint.
+            try:
+                pal.placement = Qgis.LabelPlacement.OverPoint
+            except Exception:
+                try:
+                    pal.placement = QgsPalLayerSettings.OverPoint
+                except Exception:
+                    pass
             try:
                 pal.displayAll = True
             except Exception:
@@ -93,8 +120,17 @@ class TraceLabelingMixin:
                 layer.setScaleBasedVisibility(False)
             except Exception:
                 pass
-        except Exception:
-            pass
+            return True
+        except Exception as exc:
+            try:
+                QgsMessageLog.logMessage(
+                    f"Vertex labeling configure failed for '{layer.name()}': {exc}",
+                    "GeoSurvey Studio",
+                    Qgis.Critical,
+                )
+            except Exception:
+                pass
+            return False
 
     def _vertex_labels_enabled_for_mode(self):
         mode = "off"
@@ -114,6 +150,10 @@ class TraceLabelingMixin:
             try:
                 if not self._is_vertex_depth_label_layer(lyr):
                     continue
+                try:
+                    set_layer_property(lyr, "vertex_labels", "1")
+                except Exception:
+                    pass
                 self._configure_vertex_labeling(lyr)
                 lyr.setLabelsEnabled(bool(enabled))
                 if enabled:
@@ -125,10 +165,6 @@ class TraceLabelingMixin:
                     except Exception:
                         pass
                 lyr.triggerRepaint()
-                try:
-                    lyr.reload()
-                except Exception:
-                    pass
             except Exception:
                 continue
         try:
@@ -337,11 +373,23 @@ class TraceLabelingMixin:
             return None
         source_layer_id = source_layer.id()
         label_layer = None
+        fallback_by_name = None
+        sole_candidate = None
+        candidates = []
         for lyr in QgsProject.instance().mapLayers().values():
             if not self._is_vertex_depth_label_layer(lyr):
                 continue
+            candidates.append(lyr)
             trace_lid_prop = str(get_layer_property(lyr, "trace_layer_id", default="") or "").strip()
             if trace_lid_prop and trace_lid_prop != str(source_layer_id):
+                # Keep as possible fallback by naming.
+                try:
+                    l_name = str(lyr.name() or "").strip().lower()
+                    s_name = str(source_layer.name() or "").strip().lower()
+                    if s_name and l_name.startswith(s_name) and "vertex" in l_name:
+                        fallback_by_name = lyr
+                except Exception:
+                    pass
                 continue
             if not trace_lid_prop:
                 idx = lyr.fields().indexOf("trace_layer_id")
@@ -355,12 +403,42 @@ class TraceLabelingMixin:
                         except Exception:
                             continue
                     if not found:
+                        try:
+                            l_name = str(lyr.name() or "").strip().lower()
+                            s_name = str(source_layer.name() or "").strip().lower()
+                            if s_name and l_name.startswith(s_name) and "vertex" in l_name:
+                                fallback_by_name = lyr
+                        except Exception:
+                            pass
                         continue
                 else:
+                    try:
+                        l_name = str(lyr.name() or "").strip().lower()
+                        s_name = str(source_layer.name() or "").strip().lower()
+                        if s_name and l_name.startswith(s_name) and "vertex" in l_name:
+                            fallback_by_name = lyr
+                    except Exception:
+                        pass
                     continue
                 set_layer_property(lyr, "trace_layer_id", str(source_layer_id))
             label_layer = lyr
             break
+
+        if label_layer is None:
+            if fallback_by_name is not None:
+                label_layer = fallback_by_name
+                try:
+                    set_layer_property(label_layer, "trace_layer_id", str(source_layer_id))
+                except Exception:
+                    pass
+            elif len(candidates) == 1:
+                # Last-resort fallback for legacy projects with a single vertex layer.
+                sole_candidate = candidates[0]
+                label_layer = sole_candidate
+                try:
+                    set_layer_property(label_layer, "trace_layer_id", str(source_layer_id))
+                except Exception:
+                    pass
 
         return label_layer
 
@@ -539,11 +617,11 @@ class TraceLabelingMixin:
         label_layer.updateExtents()
         self._configure_vertex_labeling(label_layer)
         try:
+            set_layer_property(label_layer, "vertex_labels", "1")
+        except Exception:
+            pass
+        try:
             label_layer.setLabelsEnabled(self._vertex_labels_enabled_for_mode())
         except Exception:
             pass
         label_layer.triggerRepaint()
-        try:
-            label_layer.reload()
-        except Exception:
-            pass

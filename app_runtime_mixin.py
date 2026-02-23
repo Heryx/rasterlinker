@@ -7,6 +7,37 @@ from .project_manager_dialog import ProjectManagerDialog
 
 
 class AppRuntimeMixin:
+    def _sync_depth_mode_on_plugin_start(self):
+        """Apply persisted depth mode to derived vertex layers on startup.
+
+        This keeps point label visibility and derived depth values coherent
+        even before opening the 2D/3D Draw Panel.
+        """
+        try:
+            if hasattr(self, "_trace_depth_pick_mode"):
+                self.trace_depth_pick_mode = self._trace_depth_pick_mode()
+        except Exception:
+            pass
+
+        # Prefer full resync when available (updates derived depth_val + labels).
+        if hasattr(self, "_resync_vertex_layers_for_all_traces"):
+            try:
+                self._resync_vertex_layers_for_all_traces()
+            except Exception:
+                pass
+
+        # Always enforce label visibility on all detected vertex layers,
+        # including legacy/existing ones that might be outside strict resync scope.
+        if hasattr(self, "_apply_vertex_label_mode_to_layers"):
+            try:
+                self._apply_vertex_label_mode_to_layers()
+            except Exception:
+                pass
+        try:
+            self.iface.mapCanvas().refreshAllLayers()
+        except Exception:
+            pass
+
     def _split_setting_list(self, value):
         if value is None:
             return []
@@ -156,6 +187,7 @@ class AppRuntimeMixin:
                     self._bootstrap_trace_layer_from_project()
                 except Exception:
                     pass
+            self._sync_depth_mode_on_plugin_start()
             self.refresh_trace_info_table()
 
             # Collega il dial alla funzione di aggiornamento
@@ -178,6 +210,7 @@ class AppRuntimeMixin:
                     self._bootstrap_trace_layer_from_project()
                 except Exception:
                     pass
+            self._sync_depth_mode_on_plugin_start()
             self.refresh_trace_info_table()
         if not self._active_project_root():
             self._notify_info(
