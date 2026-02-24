@@ -481,6 +481,119 @@ class CatalogToolsMixin:
         )
         return answer == QMessageBox.Yes
 
+    def _atlas_theme_visible_layer_ids(self, theme_name):
+        project = QgsProject.instance()
+        coll = project.mapThemeCollection() if project is not None else None
+        if coll is None:
+            return []
+        try:
+            ids = list(coll.mapThemeVisibleLayerIds(theme_name))
+            if ids:
+                return [str(i) for i in ids if str(i).strip()]
+        except Exception:
+            pass
+        try:
+            layers = list(coll.mapThemeVisibleLayers(theme_name))
+            out = []
+            for lyr in layers:
+                try:
+                    lid = str(lyr.id() or "").strip()
+                    if lid:
+                        out.append(lid)
+                except Exception:
+                    continue
+            return out
+        except Exception:
+            return []
+
+    def _atlas_layers_from_ids(self, layer_ids):
+        project = QgsProject.instance()
+        result = []
+        seen = set()
+        for lid in layer_ids or []:
+            key = str(lid or "").strip()
+            if not key or key in seen:
+                continue
+            lyr = project.mapLayer(key) if project is not None else None
+            if lyr is None:
+                continue
+            seen.add(key)
+            result.append(lyr)
+        return result
+
+    def _atlas_export_map_context(self):
+        mode_label, ok_mode = QInputDialog.getItem(
+            self.dlg,
+            "Export Group Layout",
+            "Map content:",
+            [
+                "Raster only (time-slice layer only)",
+                "Current canvas view (visible layers + current extent)",
+                "Map theme (visible layers from selected theme + current extent)",
+            ],
+            0,
+            False,
+        )
+        if not ok_mode:
+            return None
+
+        canvas = self.iface.mapCanvas() if self.iface is not None else None
+        canvas_extent = QgsRectangle(canvas.extent()) if canvas is not None else None
+        if mode_label.startswith("Raster only"):
+            return {
+                "mode": "raster_only",
+                "layer_ids": [],
+                "extent": None,
+                "theme_name": "",
+            }
+
+        if mode_label.startswith("Current canvas view"):
+            ids = []
+            try:
+                ids = [str(lyr.id() or "").strip() for lyr in (canvas.layers() or []) if lyr is not None]
+                ids = [i for i in ids if i]
+            except Exception:
+                ids = []
+            return {
+                "mode": "canvas_view",
+                "layer_ids": ids,
+                "extent": canvas_extent,
+                "theme_name": "",
+            }
+
+        project = QgsProject.instance()
+        coll = project.mapThemeCollection() if project is not None else None
+        names = []
+        try:
+            names = list(coll.mapThemes()) if coll is not None else []
+        except Exception:
+            names = []
+        names = [str(n).strip() for n in names if str(n).strip()]
+        if not names:
+            QMessageBox.warning(
+                self.dlg,
+                "Export Group Layout",
+                "No map themes found in current project. Create a map theme or choose another map content mode.",
+            )
+            return None
+        theme_name, ok_theme = QInputDialog.getItem(
+            self.dlg,
+            "Export Group Layout",
+            "Map theme:",
+            names,
+            0,
+            False,
+        )
+        if not ok_theme:
+            return None
+        ids = self._atlas_theme_visible_layer_ids(theme_name)
+        return {
+            "mode": "map_theme",
+            "layer_ids": ids,
+            "extent": canvas_extent,
+            "theme_name": str(theme_name or "").strip(),
+        }
+
     def _plugin_root_group_names(self):
         primary = str(getattr(self, "plugin_layer_root_name", "") or "").strip()
         names = []
@@ -1098,6 +1211,9 @@ class CatalogToolsMixin:
         if not layers:
             QMessageBox.warning(self.dlg, "Export Group Layout", "No loaded layers for the selected group.")
             return
+        context = self._atlas_export_map_context()
+        if context is None:
+            return
         out_dir = QFileDialog.getExistingDirectory(self.dlg, "Select output folder for PDF export")
         if not out_dir:
             return
@@ -1151,10 +1267,26 @@ class CatalogToolsMixin:
         targets.sort(key=lambda it: (it[0], it[1]))
         used_names = {}
         exported = 0
+        context_mode = str(context.get("mode") or "raster_only").strip().lower()
+        context_extent = context.get("extent")
+        context_layers = self._atlas_layers_from_ids(context.get("layer_ids") or [])
         for _sort_key, _name_key, lyr, row, base_name in targets:
             try:
-                map_item.setLayers([lyr])
-                map_item.zoomToExtent(lyr.extent())
+                if context_mode == "raster_only":
+                    map_layers = [lyr]
+                else:
+                    map_layers = list(context_layers)
+                    if all(str(x.id()) != str(lyr.id()) for x in map_layers):
+                        map_layers.insert(0, lyr)
+                    if not map_layers:
+                        map_layers = [lyr]
+                map_item.setLayers(map_layers)
+                if context_mode == "raster_only":
+                    map_item.zoomToExtent(lyr.extent())
+                elif context_extent is not None:
+                    map_item.setExtent(context_extent)
+                else:
+                    map_item.zoomToExtent(lyr.extent())
                 label_ts_name = str(row.get("ts_name") or lyr.name()) if isinstance(row, dict) else str(lyr.name())
                 label_depth = str(row.get("depth_label") or "") if isinstance(row, dict) else ""
                 if label_depth:
