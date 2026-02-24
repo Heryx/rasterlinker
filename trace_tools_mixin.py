@@ -443,7 +443,7 @@ class TraceToolsMixin:
             sep.setMidLineWidth(0)
             tools_layout.addWidget(sep, 0)
 
-        def _add_menu_button(title, action_names, icon_from=None):
+        def _add_menu_button(title, action_names, icon_from=None, tooltip=None):
             menu = QMenu(tools_widget)
             has_items = False
             for action_name in action_names:
@@ -460,7 +460,7 @@ class TraceToolsMixin:
             btn.setMenu(menu)
             btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             btn.setMinimumHeight(26)
-            btn.setToolTip(title)
+            btn.setToolTip(tooltip or title)
             if icon_from:
                 icon_action = self.trace_toolbar_actions.get(icon_from)
                 if icon_action is not None and icon_action.icon() is not None:
@@ -474,23 +474,25 @@ class TraceToolsMixin:
 
         # Advanced edit tools (collapsed in menu).
         _add_menu_button(
-            "Edit",
+            "Edit Tools",
             ("Vertex Tool", "Split Feature", "Copy", "Paste", "Delete", "Clean Orphans"),
             icon_from="Vertex Tool",
+            tooltip="Geometry editing and cleanup tools",
         )
 
         # Build/export/check utilities (collapsed in menu).
         _add_menu_button(
-            "More",
+            "Build/Export",
             (
-            "Generate Vertices",
-            "Build 3D",
-            "Build 3D Batch",
-            "Orthometric 3D",
-            "Export Layer",
-            "Workflow Check",
+                "Build 3D",
+                "Build 3D Batch",
+                "Orthometric 3D",
+                "Generate Vertices",
+                "Export Layer",
+                "Workflow Check",
             ),
             icon_from="Build 3D",
+            tooltip="3D build, vertices generation, export and workflow checks",
         )
 
         tools_layout.addStretch(1)
