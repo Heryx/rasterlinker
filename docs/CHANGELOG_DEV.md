@@ -9,6 +9,12 @@ This file tracks implementation changes between formal releases.
 - Added focused trace policy debug logs for raster-hit decisions during feature postprocess.
 - Simplified Draw Panel tools: core actions stay visible, advanced tools moved into compact `Edit Tools` and `Build/Export` menus.
 - Added automated tests for discard-outside-raster policy defaults and toggle behavior (`test/test_trace_vector_workflows.py`).
+- Atlas bridge groundwork:
+  - Added idempotent coverage layer generator per selected group (`Atlas Coverage` subgroup).
+  - Coverage fields now include `ts_id`, `group_name`, `depth_from`, `depth_to`, `depth_label`, `sort_key`, `raster_path` (+ validation flags).
+  - `Export PDF` now supports `coverage-only` refresh mode.
+  - Added pre-export validation report (missing depth/path/geometry, CRS mismatch).
+  - Quick PDF export now uses deterministic ordering and naming from coverage metadata.
 
 ## 2026-02-22 (planning/docs)
 

@@ -1,11 +1,14 @@
 import os
 import re
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QVariant
 from qgis.PyQt.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 from qgis.core import (
     QgsContrastEnhancement,
     QgsCoordinateTransform,
+    QgsFeature,
+    QgsField,
+    QgsGeometry,
     Qgis,
     QgsLayoutExporter,
     QgsLayoutItemLabel,
@@ -19,15 +22,380 @@ from qgis.core import (
     QgsRasterBandStats,
     QgsRasterLayer,
     QgsMessageLog,
+    QgsVectorLayer,
     QgsRectangle,
     QgsUnitTypes,
+    QgsWkbTypes,
 )
 
 from .group_import_dialog import GroupImportDialog
 from .project_catalog import load_catalog, update_raster_group
+from .layer_property_utils import get_layer_property, set_layer_property
 
 
 class CatalogToolsMixin:
+    def _safe_float(self, value):
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _format_depth_label(self, depth_from, depth_to, unit="m"):
+        d0 = self._safe_float(depth_from)
+        d1 = self._safe_float(depth_to)
+        unit_txt = (str(unit or "m").strip() or "m")
+        if d0 is None and d1 is None:
+            return ""
+        if d0 is None:
+            return f"{d1:g} {unit_txt}"
+        if d1 is None:
+            return f"{d0:g} {unit_txt}"
+        lo, hi = (d0, d1) if d0 <= d1 else (d1, d0)
+        if abs(hi - lo) <= 1e-12:
+            return f"{lo:g} {unit_txt}"
+        return f"{lo:g}-{hi:g} {unit_txt}"
+
+    def _atlas_safe_token(self, text, default_token="item"):
+        raw = str(text or "").strip()
+        if not raw:
+            return default_token
+        token = re.sub(r"[^A-Za-z0-9_\-]+", "_", raw).strip("_")
+        return token or default_token
+
+    def _get_or_create_atlas_coverage_group(self):
+        plugin_root = self._get_plugin_root_group()
+        target_name = "Atlas Coverage"
+        group = next(
+            (
+                g for g in plugin_root.children()
+                if isinstance(g, QgsLayerTreeGroup) and str(g.name() or "").strip() == target_name
+            ),
+            None,
+        )
+        if group is None:
+            group = plugin_root.addGroup(target_name)
+        return group
+
+    def _find_atlas_coverage_layer(self, group_id):
+        gid = str(group_id or "").strip()
+        if not gid:
+            return None
+        for lyr in QgsProject.instance().mapLayers().values():
+            if not isinstance(lyr, QgsVectorLayer) or not lyr.isValid():
+                continue
+            try:
+                if lyr.geometryType() != QgsWkbTypes.PolygonGeometry:
+                    continue
+            except Exception:
+                continue
+            source_kind = str(get_layer_property(lyr, "source_kind", default="") or "").strip().lower()
+            atlas_gid = str(get_layer_property(lyr, "atlas_group_id", default="") or "").strip()
+            if source_kind == "atlas_coverage" and atlas_gid == gid:
+                return lyr
+        return None
+
+    def _coverage_polygon_for_raster(self, raster_path):
+        info = {
+            "geometry": None,
+            "raster_exists": 0,
+            "raster_valid": 0,
+            "raster_crs": "",
+            "crs_mismatch": 0,
+        }
+        path = str(raster_path or "").strip()
+        if not path or not os.path.exists(path):
+            return info
+        info["raster_exists"] = 1
+        lyr = QgsRasterLayer(path, "__atlas_cov__", "gdal")
+        if not lyr.isValid():
+            return info
+        info["raster_valid"] = 1
+        rect = lyr.extent()
+        if rect is None or rect.isEmpty():
+            return info
+        src = lyr.crs()
+        dst = QgsProject.instance().crs()
+        if src.isValid():
+            info["raster_crs"] = src.authid() or ""
+        if src.isValid() and dst.isValid() and src.authid() != dst.authid():
+            info["crs_mismatch"] = 1
+            try:
+                tr = QgsCoordinateTransform(src, dst, QgsProject.instance())
+                rect = tr.transformBoundingBox(rect)
+            except Exception:
+                return info
+        info["geometry"] = QgsGeometry.fromRect(rect)
+        return info
+
+    def _build_atlas_coverage_rows(self, project_root, group):
+        data = load_catalog(project_root)
+        group_id = str(group.get("id") or "").strip()
+        group_name = str(group.get("name") or "Group").strip() or "Group"
+        ts_by_id = {str(t.get("id") or "").strip(): t for t in data.get("timeslices", []) if isinstance(t, dict)}
+        rows = []
+
+        for tid in group.get("timeslice_ids", []) or []:
+            ts = ts_by_id.get(str(tid or "").strip())
+            if not ts:
+                continue
+            ts_id = str(ts.get("id") or "").strip()
+            ts_name = str(ts.get("normalized_name") or ts.get("name") or ts_id).strip() or ts_id
+            raster_path = str(ts.get("project_path") or "").strip()
+            depth_from = self._safe_float(ts.get("depth_from"))
+            depth_to = self._safe_float(ts.get("depth_to"))
+            depth_label = self._format_depth_label(depth_from, depth_to, ts.get("unit") or "m")
+            cov = self._coverage_polygon_for_raster(raster_path)
+            geom = cov.get("geometry")
+            if depth_from is None and depth_to is None:
+                sort_tuple = (1e12, 1e12, ts_name.lower(), ts_id)
+            else:
+                lo = depth_from if depth_from is not None else depth_to
+                hi = depth_to if depth_to is not None else depth_from
+                if lo is None:
+                    lo = 1e12
+                if hi is None:
+                    hi = lo
+                if hi < lo:
+                    lo, hi = hi, lo
+                sort_tuple = (float(lo), float(hi), ts_name.lower(), ts_id)
+            rows.append(
+                {
+                    "geometry": geom,
+                    "_sort": sort_tuple,
+                    "coverage_id": f"{group_id}::{ts_id}",
+                    "ts_id": ts_id,
+                    "ts_name": ts_name,
+                    "group_id": group_id,
+                    "group_name": group_name,
+                    "depth_from": depth_from,
+                    "depth_to": depth_to,
+                    "depth_label": depth_label,
+                    "raster_path": raster_path,
+                    "missing_depth": 1 if (depth_from is None and depth_to is None) else 0,
+                    "has_geometry": 1 if geom is not None else 0,
+                    "raster_exists": int(cov.get("raster_exists") or 0),
+                    "raster_valid": int(cov.get("raster_valid") or 0),
+                    "raster_crs": str(cov.get("raster_crs") or ""),
+                    "crs_mismatch": int(cov.get("crs_mismatch") or 0),
+                }
+            )
+
+        rows.sort(key=lambda r: r.get("_sort"))
+        for idx, row in enumerate(rows, start=1):
+            row["sort_key"] = idx
+        return rows
+
+    def _ensure_atlas_coverage_layer(self, group, rows):
+        project = QgsProject.instance()
+        project_crs = project.crs().authid() if project.crs().isValid() else "EPSG:4326"
+        layer_name = f"AtlasCoverage_{self._atlas_safe_token(group.get('name') or 'Group', default_token='group')}"
+        existing = self._find_atlas_coverage_layer(group.get("id"))
+
+        required_fields = (
+            ("coverage_id", QVariant.String, 256),
+            ("ts_id", QVariant.String, 256),
+            ("ts_name", QVariant.String, 512),
+            ("group_id", QVariant.String, 256),
+            ("group_name", QVariant.String, 256),
+            ("depth_from", QVariant.Double, 0),
+            ("depth_to", QVariant.Double, 0),
+            ("depth_label", QVariant.String, 64),
+            ("sort_key", QVariant.Int, 0),
+            ("raster_path", QVariant.String, 1024),
+            ("missing_depth", QVariant.Int, 0),
+            ("has_geometry", QVariant.Int, 0),
+            ("raster_exists", QVariant.Int, 0),
+            ("raster_valid", QVariant.Int, 0),
+            ("raster_crs", QVariant.String, 64),
+            ("crs_mismatch", QVariant.Int, 0),
+        )
+
+        layer = existing
+        if layer is None:
+            fields_uri = []
+            for field_name, field_type, length in required_fields:
+                if field_type == QVariant.Double:
+                    fields_uri.append(f"field={field_name}:double")
+                elif field_type == QVariant.Int:
+                    fields_uri.append(f"field={field_name}:integer")
+                else:
+                    if length and int(length) > 0:
+                        fields_uri.append(f"field={field_name}:string({int(length)})")
+                    else:
+                        fields_uri.append(f"field={field_name}:string")
+            uri = f"Polygon?crs={project_crs}&" + "&".join(fields_uri)
+            layer = QgsVectorLayer(uri, layer_name, "memory")
+            if not layer.isValid():
+                return None, 0, 0
+            set_layer_property(layer, "source_kind", "atlas_coverage")
+            set_layer_property(layer, "atlas_group_id", str(group.get("id") or ""))
+            set_layer_property(layer, "atlas_group_name", str(group.get("name") or ""))
+            project.addMapLayer(layer, False)
+            self._get_or_create_atlas_coverage_group().addLayer(layer)
+        else:
+            try:
+                if layer.name() != layer_name:
+                    layer.setName(layer_name)
+            except Exception:
+                pass
+            set_layer_property(layer, "source_kind", "atlas_coverage")
+            set_layer_property(layer, "atlas_group_id", str(group.get("id") or ""))
+            set_layer_property(layer, "atlas_group_name", str(group.get("name") or ""))
+            try:
+                atlas_group = self._get_or_create_atlas_coverage_group()
+                root = QgsProject.instance().layerTreeRoot()
+                node = root.findLayer(layer.id()) if root is not None else None
+                if node is not None and node.parent() is not atlas_group:
+                    parent = node.parent()
+                    clone = node.clone()
+                    atlas_group.addChildNode(clone)
+                    if parent is not None:
+                        parent.removeChildNode(node)
+            except Exception:
+                pass
+            provider = layer.dataProvider()
+            if provider is not None:
+                missing = []
+                existing_names = {f.name() for f in layer.fields()}
+                for field_name, field_type, length in required_fields:
+                    if field_name in existing_names:
+                        continue
+                    fld = QgsField(field_name, field_type)
+                    if field_type == QVariant.String and length and int(length) > 0:
+                        fld.setLength(int(length))
+                    missing.append(fld)
+                if missing:
+                    try:
+                        provider.addAttributes(missing)
+                        layer.updateFields()
+                    except Exception:
+                        pass
+
+        started_here = False
+        try:
+            if not layer.isEditable():
+                started_here = bool(layer.startEditing())
+            ids = [f.id() for f in layer.getFeatures()]
+            if ids:
+                layer.deleteFeatures(ids)
+            feats = []
+            fields = layer.fields()
+            for row in rows:
+                feat = QgsFeature(fields)
+                geom = row.get("geometry")
+                if geom is not None:
+                    feat.setGeometry(geom)
+                feat.setAttribute("coverage_id", row.get("coverage_id"))
+                feat.setAttribute("ts_id", row.get("ts_id"))
+                feat.setAttribute("ts_name", row.get("ts_name"))
+                feat.setAttribute("group_id", row.get("group_id"))
+                feat.setAttribute("group_name", row.get("group_name"))
+                feat.setAttribute("depth_from", row.get("depth_from"))
+                feat.setAttribute("depth_to", row.get("depth_to"))
+                feat.setAttribute("depth_label", row.get("depth_label"))
+                feat.setAttribute("sort_key", row.get("sort_key"))
+                feat.setAttribute("raster_path", row.get("raster_path"))
+                feat.setAttribute("missing_depth", row.get("missing_depth"))
+                feat.setAttribute("has_geometry", row.get("has_geometry"))
+                feat.setAttribute("raster_exists", row.get("raster_exists"))
+                feat.setAttribute("raster_valid", row.get("raster_valid"))
+                feat.setAttribute("raster_crs", row.get("raster_crs"))
+                feat.setAttribute("crs_mismatch", row.get("crs_mismatch"))
+                feats.append(feat)
+            if feats:
+                layer.addFeatures(feats)
+            if started_here:
+                layer.commitChanges()
+            layer.triggerRepaint()
+        except Exception:
+            try:
+                if started_here:
+                    layer.rollBack()
+            except Exception:
+                pass
+
+        with_geom = len([r for r in rows if r.get("geometry") is not None])
+        return layer, len(rows), with_geom
+
+    def build_atlas_coverage_for_active_group(self):
+        project_root, group = self._active_group_record()
+        if not project_root or group is None:
+            QMessageBox.warning(self.dlg, "Atlas Coverage", "Select one active group first.")
+            return None, []
+        rows = self._build_atlas_coverage_rows(project_root, group)
+        layer, total, with_geom = self._ensure_atlas_coverage_layer(group, rows)
+        if layer is None:
+            QMessageBox.warning(self.dlg, "Atlas Coverage", "Unable to create/update coverage layer.")
+            return None, []
+        self.iface.messageBar().pushInfo(
+            "GeoSurvey Studio",
+            f"Atlas coverage refreshed for '{group.get('name')}'. Features: {total}, with geometry: {with_geom}.",
+        )
+        return layer, rows
+
+    def _normalized_data_path(self, src):
+        p = str(src or "").strip()
+        if not p:
+            return ""
+        p = p.split("|", 1)[0].strip()
+        if not p:
+            return ""
+        try:
+            return os.path.normcase(os.path.abspath(p))
+        except Exception:
+            return p
+
+    def _atlas_export_validation_report(self, group_name, rows):
+        rows = list(rows or [])
+        if not rows:
+            QMessageBox.warning(self.dlg, "Atlas Export Validation", "Coverage is empty for selected group.")
+            return False
+        missing_depth = [r for r in rows if int(r.get("missing_depth") or 0) == 1]
+        missing_file = [r for r in rows if int(r.get("raster_exists") or 0) == 0]
+        invalid_raster = [r for r in rows if int(r.get("raster_exists") or 0) == 1 and int(r.get("raster_valid") or 0) == 0]
+        no_geom = [r for r in rows if int(r.get("has_geometry") or 0) == 0]
+        crs_mismatch = [r for r in rows if int(r.get("crs_mismatch") or 0) == 1]
+
+        if not (missing_depth or missing_file or invalid_raster or no_geom or crs_mismatch):
+            return True
+
+        def _preview(items, key="ts_name", limit=5):
+            vals = [str(it.get(key) or it.get("ts_id") or "?") for it in items[:limit]]
+            if len(items) > limit:
+                vals.append(f"... +{len(items) - limit} more")
+            return ", ".join(vals)
+
+        lines = [
+            f"Group: {group_name}",
+            f"Coverage features: {len(rows)}",
+            "",
+            "Validation summary:",
+            f"- Missing depth metadata: {len(missing_depth)}",
+            f"- Missing raster path/file: {len(missing_file)}",
+            f"- Invalid raster layers: {len(invalid_raster)}",
+            f"- No valid geometry for atlas page: {len(no_geom)}",
+            f"- CRS mismatch vs project: {len(crs_mismatch)}",
+        ]
+
+        if missing_file:
+            lines.append(f"\nMissing file examples: {_preview(missing_file)}")
+        if no_geom:
+            lines.append(f"\nNo-geometry examples: {_preview(no_geom)}")
+        if crs_mismatch:
+            lines.append(f"\nCRS mismatch examples: {_preview(crs_mismatch)}")
+
+        lines.append("\nContinue anyway?")
+        answer = QMessageBox.question(
+            self.dlg,
+            "Atlas Export Validation",
+            "\n".join(lines),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        return answer == QMessageBox.Yes
+
     def _plugin_root_group_names(self):
         primary = str(getattr(self, "plugin_layer_root_name", "") or "").strip()
         names = []
@@ -602,7 +970,27 @@ class CatalogToolsMixin:
         if not project_root or group is None:
             QMessageBox.warning(self.dlg, "Export Group Layout", "Select one active group first.")
             return
+        _coverage_layer, coverage_rows = self.build_atlas_coverage_for_active_group()
+        if coverage_rows is None:
+            return
+        mode_label, ok_mode = QInputDialog.getItem(
+            self.dlg,
+            "Export Group Layout",
+            "Action:",
+            [
+                "Quick PDF export (one file per loaded raster)",
+                "Generate/refresh Atlas coverage only",
+            ],
+            0,
+            False,
+        )
+        if not ok_mode:
+            return
+        if mode_label == "Generate/refresh Atlas coverage only":
+            return
         group_name = group.get("name", "Group")
+        if not self._atlas_export_validation_report(group_name, coverage_rows):
+            return
         layers = list(self._iter_group_raster_layers(group_name))
         if not layers:
             QMessageBox.warning(self.dlg, "Export Group Layout", "No loaded layers for the selected group.")
@@ -632,15 +1020,53 @@ class CatalogToolsMixin:
         label_item.attemptMove(QgsLayoutPoint(10, 8, QgsUnitTypes.LayoutMillimeters))
         layout.addLayoutItem(label_item)
 
-        exported = 0
+        by_path = {}
+        by_name = {}
+        for row in coverage_rows:
+            key = self._normalized_data_path(row.get("raster_path"))
+            if key:
+                by_path[key] = row
+            name_key = str(row.get("ts_name") or "").strip().lower()
+            if name_key and name_key not in by_name:
+                by_name[name_key] = row
+        project_token = self._atlas_safe_token(os.path.basename(project_root), "project")
+        group_token = self._atlas_safe_token(group_name, "group")
+
+        targets = []
         for lyr in layers:
+            row = by_path.get(self._normalized_data_path(lyr.source()))
+            if row is None:
+                row = by_name.get(str(lyr.name() or "").strip().lower())
+            sort_key = int(row.get("sort_key")) if isinstance(row, dict) and row.get("sort_key") is not None else 10**9
+            depth_label = str(row.get("depth_label") or "") if isinstance(row, dict) else ""
+            ts_name = str(row.get("ts_name") or lyr.name() or "") if isinstance(row, dict) else str(lyr.name() or "")
+            depth_token = self._atlas_safe_token(depth_label, "nodepth") if depth_label else "nodepth"
+            ts_token = self._atlas_safe_token(ts_name, "timeslice")
+            base_name = f"{project_token}_{group_token}_{depth_token}_{ts_token}.pdf"
+            targets.append((sort_key, str(ts_name).lower(), lyr, row, base_name))
+
+        targets.sort(key=lambda it: (it[0], it[1]))
+        used_names = {}
+        exported = 0
+        for _sort_key, _name_key, lyr, row, base_name in targets:
             try:
                 map_item.setLayers([lyr])
                 map_item.zoomToExtent(lyr.extent())
-                label_item.setText(f"{group_name} - {lyr.name()}")
+                label_ts_name = str(row.get("ts_name") or lyr.name()) if isinstance(row, dict) else str(lyr.name())
+                label_depth = str(row.get("depth_label") or "") if isinstance(row, dict) else ""
+                if label_depth:
+                    label_item.setText(f"{group_name} - {label_ts_name} ({label_depth})")
+                else:
+                    label_item.setText(f"{group_name} - {label_ts_name}")
                 label_item.adjustSizeToText()
-                safe = re.sub(r"[^A-Za-z0-9_\-]+", "_", lyr.name()).strip("_") or "layer"
-                pdf_path = os.path.join(out_dir, f"{group_name}_{safe}.pdf")
+                count = used_names.get(base_name, 0)
+                used_names[base_name] = count + 1
+                if count > 0:
+                    stem, ext = os.path.splitext(base_name)
+                    file_name = f"{stem}_{count:03d}{ext}"
+                else:
+                    file_name = base_name
+                pdf_path = os.path.join(out_dir, file_name)
                 exporter = QgsLayoutExporter(layout)
                 result = exporter.exportToPdf(pdf_path, QgsLayoutExporter.PdfExportSettings())
                 if result == QgsLayoutExporter.Success:
