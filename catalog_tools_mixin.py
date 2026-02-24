@@ -1,7 +1,9 @@
 import os
 import re
+import time
 
 from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 from qgis.core import (
     QgsContrastEnhancement,
@@ -24,6 +26,8 @@ from qgis.core import (
     QgsMessageLog,
     QgsVectorLayer,
     QgsRectangle,
+    QgsFillSymbol,
+    QgsSingleSymbolRenderer,
     QgsUnitTypes,
     QgsWkbTypes,
 )
@@ -64,6 +68,63 @@ class CatalogToolsMixin:
         token = re.sub(r"[^A-Za-z0-9_\-]+", "_", raw).strip("_")
         return token or default_token
 
+    def _coverage_unique_layer_name(self, base_name):
+        base = str(base_name or "").strip() or "AtlasCoverage"
+        names = {str(lyr.name() or "").strip() for lyr in QgsProject.instance().mapLayers().values()}
+        if base not in names:
+            return base
+        idx = 2
+        while True:
+            candidate = f"{base}_{idx:03d}"
+            if candidate not in names:
+                return candidate
+            idx += 1
+
+    def _coverage_layer_epoch(self, layer):
+        try:
+            return float(get_layer_property(layer, "atlas_coverage_epoch", default=0) or 0)
+        except Exception:
+            return 0.0
+
+    def _apply_atlas_coverage_style(self, layer):
+        if layer is None or not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+            return
+        try:
+            symbol = QgsFillSymbol.createSimple(
+                {
+                    "color": "0,0,0,0",
+                    "outline_color": "210,55,45,255",
+                    "outline_style": "dash",
+                    "outline_width": "0.66",
+                }
+            )
+            if symbol is None:
+                return
+            layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+            layer.setOpacity(1.0)
+            layer.triggerRepaint()
+            return
+        except Exception:
+            pass
+        try:
+            renderer = layer.renderer()
+            symbol = renderer.symbol() if renderer is not None else None
+            if symbol is None:
+                return
+            symbol.setColor(QColor(0, 0, 0, 0))
+            for sym_layer in symbol.symbolLayers():
+                try:
+                    sym_layer.setStrokeColor(QColor(210, 55, 45))
+                    sym_layer.setStrokeStyle(Qt.DashLine)
+                    sym_layer.setStrokeWidth(0.66)
+                    if hasattr(sym_layer, "setFillColor"):
+                        sym_layer.setFillColor(QColor(0, 0, 0, 0))
+                except Exception:
+                    continue
+            layer.triggerRepaint()
+        except Exception:
+            return
+
     def _get_or_create_atlas_coverage_group(self):
         plugin_root = self._get_plugin_root_group()
         target_name = "Atlas Coverage"
@@ -78,10 +139,10 @@ class CatalogToolsMixin:
             group = plugin_root.addGroup(target_name)
         return group
 
-    def _find_atlas_coverage_layer(self, group_id):
+    def _find_atlas_coverage_layers(self, group_id=None, group_name=None):
         gid = str(group_id or "").strip()
-        if not gid:
-            return None
+        gname = str(group_name or "").strip().lower()
+        matches = []
         for lyr in QgsProject.instance().mapLayers().values():
             if not isinstance(lyr, QgsVectorLayer) or not lyr.isValid():
                 continue
@@ -92,8 +153,26 @@ class CatalogToolsMixin:
                 continue
             source_kind = str(get_layer_property(lyr, "source_kind", default="") or "").strip().lower()
             atlas_gid = str(get_layer_property(lyr, "atlas_group_id", default="") or "").strip()
-            if source_kind == "atlas_coverage" and atlas_gid == gid:
-                return lyr
+            atlas_gname = str(get_layer_property(lyr, "atlas_group_name", default="") or "").strip().lower()
+            if source_kind != "atlas_coverage":
+                continue
+            if gid and atlas_gid == gid:
+                matches.append(lyr)
+                continue
+            if gname and atlas_gname and atlas_gname == gname:
+                matches.append(lyr)
+                continue
+            if gname and not atlas_gname:
+                token = self._atlas_safe_token(gname, default_token="")
+                if token and str(lyr.name() or "").lower().startswith(f"atlascoverage_{token}"):
+                    matches.append(lyr)
+        matches.sort(key=self._coverage_layer_epoch, reverse=True)
+        return matches
+
+    def _find_atlas_coverage_layer(self, group_id, group_name=None):
+        matches = self._find_atlas_coverage_layers(group_id=group_id, group_name=group_name)
+        if matches:
+            return matches[0]
         return None
 
     def _coverage_polygon_for_raster(self, raster_path):
@@ -187,11 +266,14 @@ class CatalogToolsMixin:
             row["sort_key"] = idx
         return rows
 
-    def _ensure_atlas_coverage_layer(self, group, rows):
+    def _ensure_atlas_coverage_layer(self, group, rows, create_new=False):
         project = QgsProject.instance()
         project_crs = project.crs().authid() if project.crs().isValid() else "EPSG:4326"
-        layer_name = f"AtlasCoverage_{self._atlas_safe_token(group.get('name') or 'Group', default_token='group')}"
-        existing = self._find_atlas_coverage_layer(group.get("id"))
+        base_layer_name = f"AtlasCoverage_{self._atlas_safe_token(group.get('name') or 'Group', default_token='group')}"
+        layer_name = self._coverage_unique_layer_name(base_layer_name) if create_new else base_layer_name
+        existing = None
+        if not create_new:
+            existing = self._find_atlas_coverage_layer(group.get("id"), group.get("name"))
 
         required_fields = (
             ("coverage_id", QVariant.String, 256),
@@ -232,6 +314,7 @@ class CatalogToolsMixin:
             set_layer_property(layer, "source_kind", "atlas_coverage")
             set_layer_property(layer, "atlas_group_id", str(group.get("id") or ""))
             set_layer_property(layer, "atlas_group_name", str(group.get("name") or ""))
+            set_layer_property(layer, "atlas_coverage_epoch", f"{time.time():.6f}")
             project.addMapLayer(layer, False)
             self._get_or_create_atlas_coverage_group().addLayer(layer)
         else:
@@ -243,6 +326,7 @@ class CatalogToolsMixin:
             set_layer_property(layer, "source_kind", "atlas_coverage")
             set_layer_property(layer, "atlas_group_id", str(group.get("id") or ""))
             set_layer_property(layer, "atlas_group_name", str(group.get("name") or ""))
+            set_layer_property(layer, "atlas_coverage_epoch", f"{time.time():.6f}")
             try:
                 atlas_group = self._get_or_create_atlas_coverage_group()
                 root = QgsProject.instance().layerTreeRoot()
@@ -316,16 +400,17 @@ class CatalogToolsMixin:
             except Exception:
                 pass
 
+        self._apply_atlas_coverage_style(layer)
         with_geom = len([r for r in rows if r.get("geometry") is not None])
         return layer, len(rows), with_geom
 
-    def build_atlas_coverage_for_active_group(self):
+    def build_atlas_coverage_for_active_group(self, create_new=False):
         project_root, group = self._active_group_record()
         if not project_root or group is None:
             QMessageBox.warning(self.dlg, "Atlas Coverage", "Select one active group first.")
             return None, []
         rows = self._build_atlas_coverage_rows(project_root, group)
-        layer, total, with_geom = self._ensure_atlas_coverage_layer(group, rows)
+        layer, total, with_geom = self._ensure_atlas_coverage_layer(group, rows, create_new=create_new)
         if layer is None:
             QMessageBox.warning(self.dlg, "Atlas Coverage", "Unable to create/update coverage layer.")
             return None, []
@@ -970,9 +1055,6 @@ class CatalogToolsMixin:
         if not project_root or group is None:
             QMessageBox.warning(self.dlg, "Export Group Layout", "Select one active group first.")
             return
-        _coverage_layer, coverage_rows = self.build_atlas_coverage_for_active_group()
-        if coverage_rows is None:
-            return
         mode_label, ok_mode = QInputDialog.getItem(
             self.dlg,
             "Export Group Layout",
@@ -986,9 +1068,30 @@ class CatalogToolsMixin:
         )
         if not ok_mode:
             return
+        group_name = group.get("name", "Group")
+        create_new_coverage = False
+        existing_coverage = self._find_atlas_coverage_layer(group.get("id"), group_name)
+        if existing_coverage is not None:
+            choice = QMessageBox.question(
+                self.dlg,
+                "Atlas Coverage",
+                (
+                    f"A coverage layer already exists for group '{group_name}'.\n\n"
+                    "Yes: create a NEW coverage layer\n"
+                    "No: refresh/reuse existing coverage layer\n"
+                    "Cancel: abort"
+                ),
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.No,
+            )
+            if choice == QMessageBox.Cancel:
+                return
+            create_new_coverage = (choice == QMessageBox.Yes)
+        _coverage_layer, coverage_rows = self.build_atlas_coverage_for_active_group(create_new=create_new_coverage)
+        if coverage_rows is None:
+            return
         if mode_label == "Generate/refresh Atlas coverage only":
             return
-        group_name = group.get("name", "Group")
         if not self._atlas_export_validation_report(group_name, coverage_rows):
             return
         layers = list(self._iter_group_raster_layers(group_name))
