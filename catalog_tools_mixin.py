@@ -15,6 +15,7 @@ from qgis.core import (
     QgsLayoutExporter,
     QgsLayoutItemLabel,
     QgsLayoutItemMap,
+    QgsLayoutItemPage,
     QgsLayoutItemPicture,
     QgsLayoutItemScaleBar,
     QgsLayoutPoint,
@@ -597,6 +598,60 @@ class CatalogToolsMixin:
                 "extent": canvas_extent,
                 "theme_name": str(theme_name or "").strip(),
             }
+
+    def _atlas_export_page_settings(self):
+        page_label, ok_page = QInputDialog.getItem(
+            self.dlg,
+            "Export Group Layout",
+            "Page size:",
+            ["A4", "A3"],
+            0,
+            False,
+        )
+        if not ok_page:
+            return None
+
+        orientation_label, ok_orient = QInputDialog.getItem(
+            self.dlg,
+            "Export Group Layout",
+            "Orientation:",
+            ["Landscape", "Portrait"],
+            0,
+            False,
+        )
+        if not ok_orient:
+            return None
+
+        dpi_label, ok_dpi = QInputDialog.getItem(
+            self.dlg,
+            "Export Group Layout",
+            "Resolution (DPI):",
+            ["150", "300", "600"],
+            1,
+            False,
+        )
+        if not ok_dpi:
+            return None
+
+        page_mm = {"A4": (210.0, 297.0), "A3": (297.0, 420.0)}
+        base_w, base_h = page_mm.get(str(page_label).upper(), (210.0, 297.0))
+        if str(orientation_label).lower().startswith("land"):
+            width_mm, height_mm = max(base_w, base_h), min(base_w, base_h)
+        else:
+            width_mm, height_mm = min(base_w, base_h), max(base_w, base_h)
+
+        try:
+            dpi_val = int(str(dpi_label).strip())
+        except Exception:
+            dpi_val = 300
+
+        return {
+            "page_size_label": str(page_label).upper(),
+            "orientation_label": str(orientation_label),
+            "width_mm": float(width_mm),
+            "height_mm": float(height_mm),
+            "dpi": int(dpi_val),
+        }
 
     def _atlas_rows_from_coverage_layer(self, layer):
         if layer is None or not isinstance(layer, QgsVectorLayer) or not layer.isValid():
@@ -1267,6 +1322,9 @@ class CatalogToolsMixin:
         context = self._atlas_export_map_context()
         if context is None:
             return
+        page_opts = self._atlas_export_page_settings()
+        if page_opts is None:
+            return
         out_dir = QFileDialog.getExistingDirectory(self.dlg, "Select output folder for PDF export")
         if not out_dir:
             return
@@ -1283,13 +1341,35 @@ class CatalogToolsMixin:
         layout.setName(layout_name)
         layout_manager.addLayout(layout)
 
+        page_width_mm = float(page_opts.get("width_mm") or 297.0)
+        page_height_mm = float(page_opts.get("height_mm") or 210.0)
+        page = layout.pageCollection().page(0)
+        try:
+            orient = (
+                QgsLayoutItemPage.Landscape
+                if str(page_opts.get("orientation_label") or "").lower().startswith("land")
+                else QgsLayoutItemPage.Portrait
+            )
+            page.setPageSize(str(page_opts.get("page_size_label") or "A4"), orient)
+        except Exception:
+            try:
+                page.setPageSize(QgsLayoutSize(page_width_mm, page_height_mm, QgsUnitTypes.LayoutMillimeters))
+            except Exception:
+                pass
+
+        margin = 10.0
+        top_band_y = 8.0
+        map_y = 20.0
+        map_w = max(20.0, page_width_mm - (2.0 * margin))
+        map_h = max(20.0, page_height_mm - map_y - 22.0)
+
         map_item = QgsLayoutItemMap(layout)
-        map_item.attemptMove(QgsLayoutPoint(10, 20, QgsUnitTypes.LayoutMillimeters))
-        map_item.attemptResize(QgsLayoutSize(277, 170, QgsUnitTypes.LayoutMillimeters))
+        map_item.attemptMove(QgsLayoutPoint(margin, map_y, QgsUnitTypes.LayoutMillimeters))
+        map_item.attemptResize(QgsLayoutSize(map_w, map_h, QgsUnitTypes.LayoutMillimeters))
         layout.addLayoutItem(map_item)
 
         title_item = QgsLayoutItemLabel(layout)
-        title_item.attemptMove(QgsLayoutPoint(10, 8, QgsUnitTypes.LayoutMillimeters))
+        title_item.attemptMove(QgsLayoutPoint(margin, top_band_y, QgsUnitTypes.LayoutMillimeters))
         try:
             title_item.setFont(QFont("Arial", 11))
         except Exception:
@@ -1305,12 +1385,16 @@ class CatalogToolsMixin:
         except Exception:
             pass
         scale_item.applyDefaultSize()
-        scale_item.attemptMove(QgsLayoutPoint(10, 192, QgsUnitTypes.LayoutMillimeters))
+        scale_item.attemptMove(
+            QgsLayoutPoint(margin, page_height_mm - 10.0, QgsUnitTypes.LayoutMillimeters)
+        )
         layout.addLayoutItem(scale_item)
 
         north_item = QgsLayoutItemPicture(layout)
         north_item.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
-        north_item.attemptMove(QgsLayoutPoint(275, 8, QgsUnitTypes.LayoutMillimeters))
+        north_item.attemptMove(
+            QgsLayoutPoint(page_width_mm - 22.0, top_band_y, QgsUnitTypes.LayoutMillimeters)
+        )
         north_item.attemptResize(QgsLayoutSize(12, 12, QgsUnitTypes.LayoutMillimeters))
         layout.addLayoutItem(north_item)
 
@@ -1392,7 +1476,12 @@ class CatalogToolsMixin:
                     file_name = base_name
                 pdf_path = os.path.join(out_dir, file_name)
                 exporter = QgsLayoutExporter(layout)
-                result = exporter.exportToPdf(pdf_path, QgsLayoutExporter.PdfExportSettings())
+                pdf_settings = QgsLayoutExporter.PdfExportSettings()
+                try:
+                    pdf_settings.dpi = int(page_opts.get("dpi") or 300)
+                except Exception:
+                    pass
+                result = exporter.exportToPdf(pdf_path, pdf_settings)
                 if result == QgsLayoutExporter.Success:
                     exported += 1
             except Exception:
@@ -1401,6 +1490,10 @@ class CatalogToolsMixin:
         layout_manager.removeLayout(layout)
         self.iface.messageBar().pushInfo(
             "GeoSurvey Studio",
-            f"Quick layout export completed: {exported}/{len(layers)} PDFs.",
+            (
+                f"Quick layout export completed: {exported}/{len(layers)} PDFs. "
+                f"Page: {page_opts.get('page_size_label')} {page_opts.get('orientation_label')}, "
+                f"DPI: {page_opts.get('dpi')}."
+            ),
         )
 
