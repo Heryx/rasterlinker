@@ -269,7 +269,7 @@ class CatalogToolsMixin:
             row["sort_key"] = idx
         return rows
 
-    def _ensure_atlas_coverage_layer(self, group, rows, create_new=False):
+    def _ensure_atlas_coverage_layer(self, group, rows, create_new=False, page_opts=None):
         project = QgsProject.instance()
         project_crs = project.crs().authid() if project.crs().isValid() else "EPSG:4326"
         base_layer_name = f"AtlasCoverage_{self._atlas_safe_token(group.get('name') or 'Group', default_token='group')}"
@@ -360,6 +360,12 @@ class CatalogToolsMixin:
                     except Exception:
                         pass
 
+        frame_geom = self._atlas_build_frame_geometry(rows, page_opts)
+        missing_depth_count = len([r for r in rows if int(r.get("missing_depth") or 0) == 1])
+        crs_mismatch_count = len([r for r in rows if int(r.get("crs_mismatch") or 0) == 1])
+        has_any_raster = 1 if any(int(r.get("raster_exists") or 0) == 1 for r in rows) else 0
+        has_any_valid_raster = 1 if any(int(r.get("raster_valid") or 0) == 1 for r in rows) else 0
+
         started_here = False
         try:
             if not layer.isEditable():
@@ -367,32 +373,27 @@ class CatalogToolsMixin:
             ids = [f.id() for f in layer.getFeatures()]
             if ids:
                 layer.deleteFeatures(ids)
-            feats = []
             fields = layer.fields()
-            for row in rows:
-                feat = QgsFeature(fields)
-                geom = row.get("geometry")
-                if geom is not None:
-                    feat.setGeometry(geom)
-                feat.setAttribute("coverage_id", row.get("coverage_id"))
-                feat.setAttribute("ts_id", row.get("ts_id"))
-                feat.setAttribute("ts_name", row.get("ts_name"))
-                feat.setAttribute("group_id", row.get("group_id"))
-                feat.setAttribute("group_name", row.get("group_name"))
-                feat.setAttribute("depth_from", row.get("depth_from"))
-                feat.setAttribute("depth_to", row.get("depth_to"))
-                feat.setAttribute("depth_label", row.get("depth_label"))
-                feat.setAttribute("sort_key", row.get("sort_key"))
-                feat.setAttribute("raster_path", row.get("raster_path"))
-                feat.setAttribute("missing_depth", row.get("missing_depth"))
-                feat.setAttribute("has_geometry", row.get("has_geometry"))
-                feat.setAttribute("raster_exists", row.get("raster_exists"))
-                feat.setAttribute("raster_valid", row.get("raster_valid"))
-                feat.setAttribute("raster_crs", row.get("raster_crs"))
-                feat.setAttribute("crs_mismatch", row.get("crs_mismatch"))
-                feats.append(feat)
-            if feats:
-                layer.addFeatures(feats)
+            feat = QgsFeature(fields)
+            if frame_geom is not None and not frame_geom.isEmpty():
+                feat.setGeometry(frame_geom)
+            feat.setAttribute("coverage_id", f"{str(group.get('id') or '')}::coverage")
+            feat.setAttribute("ts_id", "")
+            feat.setAttribute("ts_name", f"{str(group.get('name') or 'Group')} coverage")
+            feat.setAttribute("group_id", str(group.get("id") or ""))
+            feat.setAttribute("group_name", str(group.get("name") or ""))
+            feat.setAttribute("depth_from", None)
+            feat.setAttribute("depth_to", None)
+            feat.setAttribute("depth_label", f"{len(rows)} time-slices")
+            feat.setAttribute("sort_key", 1)
+            feat.setAttribute("raster_path", "")
+            feat.setAttribute("missing_depth", int(missing_depth_count))
+            feat.setAttribute("has_geometry", 1 if (frame_geom is not None and not frame_geom.isEmpty()) else 0)
+            feat.setAttribute("raster_exists", int(has_any_raster))
+            feat.setAttribute("raster_valid", int(has_any_valid_raster))
+            feat.setAttribute("raster_crs", QgsProject.instance().crs().authid() if QgsProject.instance().crs().isValid() else "")
+            feat.setAttribute("crs_mismatch", int(crs_mismatch_count))
+            layer.addFeature(feat)
             if started_here:
                 layer.commitChanges()
             layer.triggerRepaint()
@@ -404,16 +405,21 @@ class CatalogToolsMixin:
                 pass
 
         self._apply_atlas_coverage_style(layer)
-        with_geom = len([r for r in rows if r.get("geometry") is not None])
-        return layer, len(rows), with_geom
+        with_geom = 1 if (frame_geom is not None and not frame_geom.isEmpty()) else 0
+        return layer, 1, with_geom
 
-    def build_atlas_coverage_for_active_group(self, create_new=False):
+    def build_atlas_coverage_for_active_group(self, create_new=False, rows=None, page_opts=None):
         project_root, group = self._active_group_record()
         if not project_root or group is None:
             QMessageBox.warning(self.dlg, "Atlas Coverage", "Select one active group first.")
             return None, []
-        rows = self._build_atlas_coverage_rows(project_root, group)
-        layer, total, with_geom = self._ensure_atlas_coverage_layer(group, rows, create_new=create_new)
+        base_rows = rows if rows is not None else self._build_atlas_coverage_rows(project_root, group)
+        layer, total, with_geom = self._ensure_atlas_coverage_layer(
+            group,
+            base_rows,
+            create_new=create_new,
+            page_opts=page_opts,
+        )
         if layer is None:
             QMessageBox.warning(self.dlg, "Atlas Coverage", "Unable to create/update coverage layer.")
             return None, []
@@ -421,7 +427,7 @@ class CatalogToolsMixin:
             "GeoSurvey Studio",
             f"Atlas coverage refreshed for '{group.get('name')}'. Features: {total}, with geometry: {with_geom}.",
         )
-        return layer, rows
+        return layer, base_rows
 
     def _normalized_data_path(self, src):
         p = str(src or "").strip()
@@ -604,7 +610,7 @@ class CatalogToolsMixin:
             self.dlg,
             "Export Group Layout",
             "Page size:",
-            ["A4", "A3"],
+            ["A6", "A5", "A4", "A3", "A2", "A1", "Custom"],
             0,
             False,
         )
@@ -633,8 +639,60 @@ class CatalogToolsMixin:
         if not ok_dpi:
             return None
 
-        page_mm = {"A4": (210.0, 297.0), "A3": (297.0, 420.0)}
-        base_w, base_h = page_mm.get(str(page_label).upper(), (210.0, 297.0))
+        page_label_norm = str(page_label or "").strip().upper()
+        page_mm = {
+            "A6": (105.0, 148.0),
+            "A5": (148.0, 210.0),
+            "A4": (210.0, 297.0),
+            "A3": (297.0, 420.0),
+            "A2": (420.0, 594.0),
+            "A1": (594.0, 841.0),
+        }
+        if page_label_norm == "CUSTOM":
+            unit_label, ok_unit = QInputDialog.getItem(
+                self.dlg,
+                "Export Group Layout",
+                "Custom page unit:",
+                ["cm", "inch"],
+                0,
+                False,
+            )
+            if not ok_unit:
+                return None
+            width_val, ok_w = QInputDialog.getDouble(
+                self.dlg,
+                "Export Group Layout",
+                f"Custom page width ({unit_label}):",
+                21.0 if str(unit_label) == "cm" else 8.27,
+                0.1,
+                5000.0,
+                2,
+            )
+            if not ok_w:
+                return None
+            height_val, ok_h = QInputDialog.getDouble(
+                self.dlg,
+                "Export Group Layout",
+                f"Custom page height ({unit_label}):",
+                29.7 if str(unit_label) == "cm" else 11.69,
+                0.1,
+                5000.0,
+                2,
+            )
+            if not ok_h:
+                return None
+            if str(unit_label).lower() == "inch":
+                base_w = float(width_val) * 25.4
+                base_h = float(height_val) * 25.4
+                custom_tag = f"{float(width_val):g}in_x_{float(height_val):g}in"
+            else:
+                base_w = float(width_val) * 10.0
+                base_h = float(height_val) * 10.0
+                custom_tag = f"{float(width_val):g}cm_x_{float(height_val):g}cm"
+        else:
+            base_w, base_h = page_mm.get(page_label_norm, (210.0, 297.0))
+            custom_tag = ""
+
         if str(orientation_label).lower().startswith("land"):
             width_mm, height_mm = max(base_w, base_h), min(base_w, base_h)
         else:
@@ -645,12 +703,38 @@ class CatalogToolsMixin:
         except Exception:
             dpi_val = 300
 
+        default_scale = 1000.0
+        try:
+            canvas = self.iface.mapCanvas() if self.iface is not None else None
+            if canvas is not None:
+                default_scale = float(canvas.scale())
+        except Exception:
+            default_scale = 1000.0
+        if default_scale <= 0:
+            default_scale = 1000.0
+        scale_den, ok_scale = QInputDialog.getDouble(
+            self.dlg,
+            "Export Group Layout",
+            "Scale denominator (1 : n):",
+            float(default_scale),
+            1.0,
+            1e9,
+            2,
+        )
+        if not ok_scale:
+            return None
+
+        page_token = page_label_norm if page_label_norm != "CUSTOM" else f"CUSTOM_{custom_tag}"
+        orientation_token = "landscape" if str(orientation_label).lower().startswith("land") else "portrait"
         return {
-            "page_size_label": str(page_label).upper(),
+            "page_size_label": page_label_norm,
             "orientation_label": str(orientation_label),
+            "page_token": page_token,
+            "orientation_token": orientation_token,
             "width_mm": float(width_mm),
             "height_mm": float(height_mm),
             "dpi": int(dpi_val),
+            "scale_denominator": float(scale_den),
         }
 
     def _atlas_rows_from_coverage_layer(self, layer):
@@ -693,6 +777,88 @@ class CatalogToolsMixin:
             )
         rows.sort(key=lambda r: (int(r.get("sort_key") or 10**9), str(r.get("ts_name") or "").lower()))
         return rows
+
+    def _atlas_rows_union_extent(self, rows):
+        rect = None
+        for row in rows or []:
+            geom = row.get("geometry") if isinstance(row, dict) else None
+            try:
+                if geom is None or geom.isEmpty():
+                    continue
+                bbox = geom.boundingBox()
+                if bbox is None or bbox.isEmpty():
+                    continue
+                if rect is None:
+                    rect = QgsRectangle(bbox)
+                else:
+                    rect.combineExtentWith(bbox)
+            except Exception:
+                continue
+        return rect
+
+    def _atlas_coverage_extent(self, layer):
+        rect = None
+        if layer is None or not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+            return None
+        for feat in layer.getFeatures():
+            try:
+                geom = feat.geometry()
+                if geom is None or geom.isEmpty():
+                    continue
+                bbox = geom.boundingBox()
+                if bbox is None or bbox.isEmpty():
+                    continue
+                if rect is None:
+                    rect = QgsRectangle(bbox)
+                else:
+                    rect.combineExtentWith(bbox)
+            except Exception:
+                continue
+        return rect
+
+    def _atlas_build_frame_geometry(self, rows, page_opts):
+        union_extent = self._atlas_rows_union_extent(rows)
+        if union_extent is None or union_extent.isEmpty():
+            try:
+                canvas = self.iface.mapCanvas() if self.iface is not None else None
+                if canvas is not None:
+                    union_extent = QgsRectangle(canvas.extent())
+            except Exception:
+                union_extent = None
+        if union_extent is None or union_extent.isEmpty():
+            return None
+
+        scale_den = float(page_opts.get("scale_denominator") or 0.0) if isinstance(page_opts, dict) else 0.0
+        width_mm = float(page_opts.get("width_mm") or 0.0) if isinstance(page_opts, dict) else 0.0
+        height_mm = float(page_opts.get("height_mm") or 0.0) if isinstance(page_opts, dict) else 0.0
+        if scale_den <= 0 or width_mm <= 0 or height_mm <= 0:
+            return QgsGeometry.fromRect(union_extent)
+
+        meters_to_map = 1.0
+        try:
+            crs = QgsProject.instance().crs()
+            if crs.isValid():
+                meters_to_map = float(
+                    QgsUnitTypes.fromUnitToUnitFactor(QgsUnitTypes.DistanceMeters, crs.mapUnits())
+                )
+        except Exception:
+            meters_to_map = 1.0
+        if meters_to_map <= 0:
+            meters_to_map = 1.0
+
+        frame_w = (width_mm / 1000.0) * scale_den * meters_to_map
+        frame_h = (height_mm / 1000.0) * scale_den * meters_to_map
+        if frame_w <= 0 or frame_h <= 0:
+            return QgsGeometry.fromRect(union_extent)
+
+        center = union_extent.center()
+        rect = QgsRectangle(
+            center.x() - (frame_w / 2.0),
+            center.y() - (frame_h / 2.0),
+            center.x() + (frame_w / 2.0),
+            center.y() + (frame_h / 2.0),
+        )
+        return QgsGeometry.fromRect(rect)
 
     def _plugin_root_group_names(self):
         primary = str(getattr(self, "plugin_layer_root_name", "") or "").strip()
@@ -1282,11 +1448,20 @@ class CatalogToolsMixin:
         if not ok_mode:
             return
         group_name = group.get("name", "Group")
+        page_opts = self._atlas_export_page_settings()
+        if page_opts is None:
+            return
+        ts_rows = self._build_atlas_coverage_rows(project_root, group)
         existing_coverage = self._find_atlas_coverage_layer(group.get("id"), group_name)
         coverage_layer = None
         coverage_rows = None
         if existing_coverage is None:
-            coverage_layer, coverage_rows = self.build_atlas_coverage_for_active_group(create_new=False)
+            coverage_layer, _ = self.build_atlas_coverage_for_active_group(
+                create_new=False,
+                rows=ts_rows,
+                page_opts=page_opts,
+            )
+            coverage_rows = ts_rows
         else:
             cov_mode, ok_cov = QInputDialog.getItem(
                 self.dlg,
@@ -1304,11 +1479,21 @@ class CatalogToolsMixin:
                 return
             if cov_mode.startswith("Use existing"):
                 coverage_layer = existing_coverage
-                coverage_rows = self._atlas_rows_from_coverage_layer(existing_coverage)
+                coverage_rows = ts_rows
             elif cov_mode.startswith("Refresh existing"):
-                coverage_layer, coverage_rows = self.build_atlas_coverage_for_active_group(create_new=False)
+                coverage_layer, _ = self.build_atlas_coverage_for_active_group(
+                    create_new=False,
+                    rows=ts_rows,
+                    page_opts=page_opts,
+                )
+                coverage_rows = ts_rows
             else:
-                coverage_layer, coverage_rows = self.build_atlas_coverage_for_active_group(create_new=True)
+                coverage_layer, _ = self.build_atlas_coverage_for_active_group(
+                    create_new=True,
+                    rows=ts_rows,
+                    page_opts=page_opts,
+                )
+                coverage_rows = ts_rows
         if coverage_rows is None:
             return
         if mode_label == "Generate/refresh Atlas coverage only":
@@ -1321,9 +1506,6 @@ class CatalogToolsMixin:
             return
         context = self._atlas_export_map_context()
         if context is None:
-            return
-        page_opts = self._atlas_export_page_settings()
-        if page_opts is None:
             return
         out_dir = QFileDialog.getExistingDirectory(self.dlg, "Select output folder for PDF export")
         if not out_dir:
@@ -1429,6 +1611,11 @@ class CatalogToolsMixin:
         context_mode = str(context.get("mode") or "raster_only").strip().lower()
         context_extent = context.get("extent")
         context_layers = self._atlas_layers_from_ids(context.get("layer_ids") or [])
+        coverage_extent = self._atlas_coverage_extent(coverage_layer)
+        format_token = self._atlas_safe_token(
+            f"{page_opts.get('page_token')}_{page_opts.get('orientation_token')}",
+            "A4_landscape",
+        )
         for _sort_key, _name_key, lyr, row, base_name in targets:
             try:
                 row_geom = row.get("geometry") if isinstance(row, dict) else None
@@ -1450,7 +1637,9 @@ class CatalogToolsMixin:
                         map_layers = [lyr]
                 map_item.setLayers(map_layers)
                 if context_mode == "raster_only":
-                    if row_extent is not None:
+                    if coverage_extent is not None and not coverage_extent.isEmpty():
+                        map_item.setExtent(coverage_extent)
+                    elif row_extent is not None:
                         map_item.setExtent(row_extent)
                     else:
                         map_item.zoomToExtent(lyr.extent())
@@ -1469,11 +1658,12 @@ class CatalogToolsMixin:
                 title_item.adjustSizeToText()
                 count = used_names.get(base_name, 0)
                 used_names[base_name] = count + 1
+                stem, ext = os.path.splitext(base_name)
+                stem = f"{stem}_{format_token}"
                 if count > 0:
-                    stem, ext = os.path.splitext(base_name)
                     file_name = f"{stem}_{count:03d}{ext}"
                 else:
-                    file_name = base_name
+                    file_name = f"{stem}{ext}"
                 pdf_path = os.path.join(out_dir, file_name)
                 exporter = QgsLayoutExporter(layout)
                 pdf_settings = QgsLayoutExporter.PdfExportSettings()
