@@ -3,7 +3,7 @@ import re
 import time
 
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtGui import QColor, QFont
 from qgis.PyQt.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 from qgis.core import (
     QgsContrastEnhancement,
@@ -15,6 +15,8 @@ from qgis.core import (
     QgsLayoutExporter,
     QgsLayoutItemLabel,
     QgsLayoutItemMap,
+    QgsLayoutItemPicture,
+    QgsLayoutItemScaleBar,
     QgsLayoutPoint,
     QgsLayoutSize,
     QgsLayerTreeGroup,
@@ -522,77 +524,120 @@ class CatalogToolsMixin:
         return result
 
     def _atlas_export_map_context(self):
-        mode_label, ok_mode = QInputDialog.getItem(
-            self.dlg,
-            "Export Group Layout",
-            "Map content:",
-            [
-                "Raster only (time-slice layer only)",
-                "Current canvas view (visible layers + current extent)",
-                "Map theme (visible layers from selected theme + current extent)",
-            ],
-            0,
-            False,
-        )
-        if not ok_mode:
-            return None
-
-        canvas = self.iface.mapCanvas() if self.iface is not None else None
-        canvas_extent = QgsRectangle(canvas.extent()) if canvas is not None else None
-        if mode_label.startswith("Raster only"):
-            return {
-                "mode": "raster_only",
-                "layer_ids": [],
-                "extent": None,
-                "theme_name": "",
-            }
-
-        if mode_label.startswith("Current canvas view"):
-            ids = []
-            try:
-                ids = [str(lyr.id() or "").strip() for lyr in (canvas.layers() or []) if lyr is not None]
-                ids = [i for i in ids if i]
-            except Exception:
-                ids = []
-            return {
-                "mode": "canvas_view",
-                "layer_ids": ids,
-                "extent": canvas_extent,
-                "theme_name": "",
-            }
-
-        project = QgsProject.instance()
-        coll = project.mapThemeCollection() if project is not None else None
-        names = []
-        try:
-            names = list(coll.mapThemes()) if coll is not None else []
-        except Exception:
-            names = []
-        names = [str(n).strip() for n in names if str(n).strip()]
-        if not names:
-            QMessageBox.warning(
+        options = [
+            "Raster only (time-slice layer only)",
+            "Current canvas view (visible layers + current extent)",
+            "Map theme (visible layers from selected theme + current extent)",
+        ]
+        while True:
+            mode_label, ok_mode = QInputDialog.getItem(
                 self.dlg,
                 "Export Group Layout",
-                "No map themes found in current project. Create a map theme or choose another map content mode.",
+                "Map content:",
+                options,
+                0,
+                False,
             )
-            return None
-        theme_name, ok_theme = QInputDialog.getItem(
-            self.dlg,
-            "Export Group Layout",
-            "Map theme:",
-            names,
-            0,
-            False,
-        )
-        if not ok_theme:
-            return None
-        ids = self._atlas_theme_visible_layer_ids(theme_name)
-        return {
-            "mode": "map_theme",
-            "layer_ids": ids,
-            "extent": canvas_extent,
-            "theme_name": str(theme_name or "").strip(),
-        }
+            if not ok_mode:
+                return None
+
+            canvas = self.iface.mapCanvas() if self.iface is not None else None
+            canvas_extent = QgsRectangle(canvas.extent()) if canvas is not None else None
+            if mode_label.startswith("Raster only"):
+                return {
+                    "mode": "raster_only",
+                    "layer_ids": [],
+                    "extent": None,
+                    "theme_name": "",
+                }
+
+            if mode_label.startswith("Current canvas view"):
+                ids = []
+                try:
+                    ids = [str(lyr.id() or "").strip() for lyr in (canvas.layers() or []) if lyr is not None]
+                    ids = [i for i in ids if i]
+                except Exception:
+                    ids = []
+                return {
+                    "mode": "canvas_view",
+                    "layer_ids": ids,
+                    "extent": canvas_extent,
+                    "theme_name": "",
+                }
+
+            project = QgsProject.instance()
+            coll = project.mapThemeCollection() if project is not None else None
+            names = []
+            try:
+                names = list(coll.mapThemes()) if coll is not None else []
+            except Exception:
+                names = []
+            names = [str(n).strip() for n in names if str(n).strip()]
+            if not names:
+                QMessageBox.warning(
+                    self.dlg,
+                    "Export Group Layout",
+                    "No map themes found in current project. Create a map theme or choose another map content mode.",
+                )
+                continue
+            theme_name, ok_theme = QInputDialog.getItem(
+                self.dlg,
+                "Export Group Layout",
+                "Map theme:",
+                names,
+                0,
+                False,
+            )
+            if not ok_theme:
+                continue
+            ids = self._atlas_theme_visible_layer_ids(theme_name)
+            return {
+                "mode": "map_theme",
+                "layer_ids": ids,
+                "extent": canvas_extent,
+                "theme_name": str(theme_name or "").strip(),
+            }
+
+    def _atlas_rows_from_coverage_layer(self, layer):
+        if layer is None or not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+            return []
+        field_names = {f.name() for f in layer.fields()}
+
+        def _attr(feat, name, default=None):
+            if name not in field_names:
+                return default
+            try:
+                return feat[name]
+            except Exception:
+                return default
+
+        rows = []
+        for feat in layer.getFeatures():
+            geom = feat.geometry()
+            has_geom = 1 if geom is not None and not geom.isEmpty() else 0
+            rows.append(
+                {
+                    "geometry": QgsGeometry(geom) if has_geom else None,
+                    "coverage_id": _attr(feat, "coverage_id", ""),
+                    "ts_id": _attr(feat, "ts_id", ""),
+                    "ts_name": _attr(feat, "ts_name", ""),
+                    "group_id": _attr(feat, "group_id", ""),
+                    "group_name": _attr(feat, "group_name", ""),
+                    "depth_from": _attr(feat, "depth_from", None),
+                    "depth_to": _attr(feat, "depth_to", None),
+                    "depth_label": _attr(feat, "depth_label", ""),
+                    "sort_key": _attr(feat, "sort_key", 10**9),
+                    "raster_path": _attr(feat, "raster_path", ""),
+                    "missing_depth": int(_attr(feat, "missing_depth", 0) or 0),
+                    "has_geometry": has_geom,
+                    "raster_exists": int(_attr(feat, "raster_exists", 0) or 0),
+                    "raster_valid": int(_attr(feat, "raster_valid", 0) or 0),
+                    "raster_crs": str(_attr(feat, "raster_crs", "") or ""),
+                    "crs_mismatch": int(_attr(feat, "crs_mismatch", 0) or 0),
+                }
+            )
+        rows.sort(key=lambda r: (int(r.get("sort_key") or 10**9), str(r.get("ts_name") or "").lower()))
+        return rows
 
     def _plugin_root_group_names(self):
         primary = str(getattr(self, "plugin_layer_root_name", "") or "").strip()
@@ -1182,25 +1227,33 @@ class CatalogToolsMixin:
         if not ok_mode:
             return
         group_name = group.get("name", "Group")
-        create_new_coverage = False
         existing_coverage = self._find_atlas_coverage_layer(group.get("id"), group_name)
-        if existing_coverage is not None:
-            choice = QMessageBox.question(
+        coverage_layer = None
+        coverage_rows = None
+        if existing_coverage is None:
+            coverage_layer, coverage_rows = self.build_atlas_coverage_for_active_group(create_new=False)
+        else:
+            cov_mode, ok_cov = QInputDialog.getItem(
                 self.dlg,
                 "Atlas Coverage",
-                (
-                    f"A coverage layer already exists for group '{group_name}'.\n\n"
-                    "Yes: create a NEW coverage layer\n"
-                    "No: refresh/reuse existing coverage layer\n"
-                    "Cancel: abort"
-                ),
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                QMessageBox.No,
+                "Coverage source:",
+                [
+                    "Use existing coverage geometry (keep manual edits)",
+                    "Refresh existing coverage from raster extents",
+                    "Create NEW coverage layer",
+                ],
+                0,
+                False,
             )
-            if choice == QMessageBox.Cancel:
+            if not ok_cov:
                 return
-            create_new_coverage = (choice == QMessageBox.Yes)
-        _coverage_layer, coverage_rows = self.build_atlas_coverage_for_active_group(create_new=create_new_coverage)
+            if cov_mode.startswith("Use existing"):
+                coverage_layer = existing_coverage
+                coverage_rows = self._atlas_rows_from_coverage_layer(existing_coverage)
+            elif cov_mode.startswith("Refresh existing"):
+                coverage_layer, coverage_rows = self.build_atlas_coverage_for_active_group(create_new=False)
+            else:
+                coverage_layer, coverage_rows = self.build_atlas_coverage_for_active_group(create_new=True)
         if coverage_rows is None:
             return
         if mode_label == "Generate/refresh Atlas coverage only":
@@ -1235,9 +1288,31 @@ class CatalogToolsMixin:
         map_item.attemptResize(QgsLayoutSize(277, 170, QgsUnitTypes.LayoutMillimeters))
         layout.addLayoutItem(map_item)
 
-        label_item = QgsLayoutItemLabel(layout)
-        label_item.attemptMove(QgsLayoutPoint(10, 8, QgsUnitTypes.LayoutMillimeters))
-        layout.addLayoutItem(label_item)
+        title_item = QgsLayoutItemLabel(layout)
+        title_item.attemptMove(QgsLayoutPoint(10, 8, QgsUnitTypes.LayoutMillimeters))
+        try:
+            title_item.setFont(QFont("Arial", 11))
+        except Exception:
+            pass
+        layout.addLayoutItem(title_item)
+
+        scale_item = QgsLayoutItemScaleBar(layout)
+        scale_item.setLinkedMap(map_item)
+        scale_item.setStyle("Single Box")
+        try:
+            scale_item.setUnits(QgsUnitTypes.DistanceMeters)
+            scale_item.setUnitLabel("m")
+        except Exception:
+            pass
+        scale_item.applyDefaultSize()
+        scale_item.attemptMove(QgsLayoutPoint(10, 192, QgsUnitTypes.LayoutMillimeters))
+        layout.addLayoutItem(scale_item)
+
+        north_item = QgsLayoutItemPicture(layout)
+        north_item.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+        north_item.attemptMove(QgsLayoutPoint(275, 8, QgsUnitTypes.LayoutMillimeters))
+        north_item.attemptResize(QgsLayoutSize(12, 12, QgsUnitTypes.LayoutMillimeters))
+        layout.addLayoutItem(north_item)
 
         by_path = {}
         by_name = {}
@@ -1272,6 +1347,15 @@ class CatalogToolsMixin:
         context_layers = self._atlas_layers_from_ids(context.get("layer_ids") or [])
         for _sort_key, _name_key, lyr, row, base_name in targets:
             try:
+                row_geom = row.get("geometry") if isinstance(row, dict) else None
+                row_extent = None
+                try:
+                    if row_geom is not None and not row_geom.isEmpty():
+                        row_extent = row_geom.boundingBox()
+                        if row_extent is not None and row_extent.isEmpty():
+                            row_extent = None
+                except Exception:
+                    row_extent = None
                 if context_mode == "raster_only":
                     map_layers = [lyr]
                 else:
@@ -1282,18 +1366,23 @@ class CatalogToolsMixin:
                         map_layers = [lyr]
                 map_item.setLayers(map_layers)
                 if context_mode == "raster_only":
-                    map_item.zoomToExtent(lyr.extent())
+                    if row_extent is not None:
+                        map_item.setExtent(row_extent)
+                    else:
+                        map_item.zoomToExtent(lyr.extent())
                 elif context_extent is not None:
                     map_item.setExtent(context_extent)
+                elif row_extent is not None:
+                    map_item.setExtent(row_extent)
                 else:
                     map_item.zoomToExtent(lyr.extent())
                 label_ts_name = str(row.get("ts_name") or lyr.name()) if isinstance(row, dict) else str(lyr.name())
                 label_depth = str(row.get("depth_label") or "") if isinstance(row, dict) else ""
                 if label_depth:
-                    label_item.setText(f"{group_name} - {label_ts_name} ({label_depth})")
+                    title_item.setText(f"{group_name} - {label_ts_name} ({label_depth})")
                 else:
-                    label_item.setText(f"{group_name} - {label_ts_name}")
-                label_item.adjustSizeToText()
+                    title_item.setText(f"{group_name} - {label_ts_name}")
+                title_item.adjustSizeToText()
                 count = used_names.get(base_name, 0)
                 used_names[base_name] = count + 1
                 if count > 0:
