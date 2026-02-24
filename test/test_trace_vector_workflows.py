@@ -61,6 +61,9 @@ class _ActionStub:
     def setChecked(self, checked):
         self.checked = bool(checked)
 
+    def isChecked(self):
+        return bool(self.checked)
+
 
 if HAS_QGIS:
     class _DrawHarness(TraceCaptureMixin):
@@ -248,6 +251,29 @@ class TraceVectorWorkflowTest(unittest.TestCase):
         self.assertEqual(by_vertex[2].get("depth_status"), "no_raster_hit")
         self.assertEqual(by_vertex[2].get("depth_lbl"), "")
         self.assertIsNone(by_vertex[2].get("depth_val"))
+
+    def test_discard_outside_raster_default_is_off(self):
+        harness = _DrawHarness(self.iface)
+        harness.trace_discard_outside_raster = False
+        self.assertFalse(harness._trace_discard_outside_raster_enabled())
+
+    def test_discard_outside_raster_string_parsing(self):
+        harness = _DrawHarness(self.iface)
+        harness.trace_discard_outside_raster = "1"
+        self.assertTrue(harness._trace_discard_outside_raster_enabled())
+        harness.trace_discard_outside_raster = "0"
+        self.assertFalse(harness._trace_discard_outside_raster_enabled())
+
+    def test_discard_outside_raster_toggle_updates_action(self):
+        harness = _DrawHarness(self.iface)
+        action = _ActionStub()
+        harness.trace_info_discard_outside_raster_action = action
+        harness._set_trace_discard_outside_raster_enabled(True, persist=False)
+        self.assertTrue(harness.trace_discard_outside_raster)
+        self.assertTrue(action.isChecked())
+        harness._set_trace_discard_outside_raster_enabled(False, persist=False)
+        self.assertFalse(harness.trace_discard_outside_raster)
+        self.assertFalse(action.isChecked())
 
 
 if __name__ == "__main__":
