@@ -94,6 +94,13 @@ On feature add:
 
 No popup mandatory for these fields.
 
+### FR-3b Raster-hit Policy for Outside Drawing
+
+- Default behavior: keep traces even when all vertices are outside raster pixels.
+- In this case metadata remains explicit (`missing_z` / no-raster-hit), without fake depth attribution.
+- Optional strict mode (`Discard traces outside raster`) can be enabled from Draw Panel query/options.
+- Strict mode should be treated as session-level workflow choice, not a forced global default.
+
 ### FR-4 Interpretation Fields
 
 - `notes`, `interpretation`, `comment` editable from panel/form only.
@@ -214,6 +221,9 @@ Must be non-blocking and auto-hide when drawing stops.
 5. Build 3D without point layer: works from line metadata.
 6. Generate point layer manually: labels/relation created correctly.
 7. Switch depth mode: point labels update or hide accordingly.
+8. Draw fully outside raster:
+   - default mode keeps trace with missing-z metadata;
+   - strict discard mode removes trace and shows clear info message.
 
 ### 10.2 Automated Tests (minimum)
 
@@ -240,4 +250,3 @@ Suggested incremental rollout:
 4. Final naming of explicit point tools:
    - `Generate Vertex Points`
    - `Refresh Vertex Points`
-

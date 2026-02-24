@@ -2,6 +2,14 @@
 
 This file tracks implementation changes between formal releases.
 
+## 2026-02-24 (drawing flow refinements)
+
+- Draw capture policy updated: default now keeps traces drawn outside raster coverage (stored with missing-z/no-raster-hit metadata).
+- Added session-level query toggle `Discard traces outside raster` in 2D/3D Draw Panel.
+- Added focused trace policy debug logs for raster-hit decisions during feature postprocess.
+- Simplified Draw Panel tools: core actions stay visible, advanced tools moved into compact `Edit Tools` and `Build/Export` menus.
+- Added automated tests for discard-outside-raster policy defaults and toggle behavior (`test/test_trace_vector_workflows.py`).
+
 ## 2026-02-22 (planning/docs)
 
 - Add full drawing workflow proposal document: `docs/DRAWING_WORKFLOW_SPEC.md`.
