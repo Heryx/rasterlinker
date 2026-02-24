@@ -144,6 +144,7 @@ class TraceInfoStateMixin:
             False,
             type=bool,
         )
+        discard_outside = False
         wheel_mod = str(settings.value(self._trace_info_settings_key("canvas_wheel_modifier"), "alt") or "alt").strip().lower()
         if wheel_mod not in ("alt", "shift", "ctrl"):
             wheel_mod = "alt"
@@ -202,6 +203,13 @@ class TraceInfoStateMixin:
                 self.trace_prompt_interpretation_popup = bool(interpretation_prompt)
         else:
             self.trace_prompt_interpretation_popup = bool(interpretation_prompt)
+        if hasattr(self, "_set_trace_discard_outside_raster_enabled"):
+            try:
+                self._set_trace_discard_outside_raster_enabled(bool(discard_outside), persist=False)
+            except Exception:
+                self.trace_discard_outside_raster = bool(discard_outside)
+        else:
+            self.trace_discard_outside_raster = bool(discard_outside)
         if hasattr(self, "_set_trace_canvas_wheel_modifier"):
             try:
                 self._set_trace_canvas_wheel_modifier(wheel_mod, persist=False)

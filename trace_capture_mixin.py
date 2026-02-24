@@ -820,6 +820,41 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
             except Exception:
                 pass
 
+    def _trace_discard_outside_raster_enabled(self):
+        raw_local = getattr(self, "trace_discard_outside_raster", False)
+        if isinstance(raw_local, bool):
+            return raw_local
+        txt_local = str(raw_local).strip().lower()
+        enabled = txt_local in ("1", "true", "yes", "on")
+        self.trace_discard_outside_raster = bool(enabled)
+        return bool(enabled)
+
+    def _set_trace_discard_outside_raster_enabled(self, enabled, persist=True):
+        state = bool(enabled)
+        self.trace_discard_outside_raster = state
+        act = getattr(self, "trace_info_discard_outside_raster_action", None)
+        if act is not None and act.isChecked() != state:
+            blocked = act.blockSignals(True)
+            act.setChecked(state)
+            act.blockSignals(blocked)
+        if persist:
+            if hasattr(self, "_save_trace_info_ui_state"):
+                try:
+                    self._save_trace_info_ui_state()
+                    return
+                except Exception:
+                    pass
+            settings = getattr(self, "settings", None)
+            if settings is not None:
+                try:
+                    if hasattr(self, "_trace_info_settings_key"):
+                        key = self._trace_info_settings_key("discard_outside_raster")
+                    else:
+                        key = "GeoSurveyStudio/trace_info/discard_outside_raster"
+                    settings.setValue(key, "1" if state else "0")
+                except Exception:
+                    pass
+
     def _on_trace_canvas_wheel(self, delta):
         if not bool(getattr(self, "trace_canvas_click_capture_enabled", False)):
             return False
@@ -2225,9 +2260,17 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                 layer_id=layer_id,
                 fid=fid,
             )
-            # If the trace does not intersect any valid raster pixel, discard it.
-            # This avoids creating "orphan" traces drawn fully outside time-slice imagery.
-            if not str(metadata.get("ts_id") or "").strip():
+            has_raster_hit = bool(str(metadata.get("ts_id") or "").strip())
+            discard_outside = self._trace_discard_outside_raster_enabled()
+            self._trace_debug_log(
+                "Trace raster-hit policy "
+                f"[fid={fid}] has_hit={has_raster_hit} discard_outside={discard_outside} "
+                f"ts='{metadata.get('ts_name')}' z_mode='{metadata.get('z_mode')}'"
+            )
+
+            # Optional strict mode: discard traces fully outside valid raster pixels.
+            # Default behavior keeps them with missing-z metadata.
+            if (not has_raster_hit) and discard_outside:
                 try:
                     layer.deleteFeature(fid)
                 except Exception:
@@ -2235,7 +2278,7 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                 try:
                     if hasattr(self, "_notify_info"):
                         self._notify_info(
-                            "Trace discarded: no raster pixel hit detected.",
+                            "Trace discarded: no raster pixel hit detected (Discard outside raster is ON).",
                             duration=5,
                         )
                 except Exception:
@@ -2247,6 +2290,11 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                 self.refresh_trace_info_table()
                 success = True
                 return
+            if not has_raster_hit:
+                self._trace_debug_log(
+                    f"Trace kept without raster-hit metadata (layer_id={layer_id}, fid={fid})",
+                    Qgis.Warning,
+                )
 
             trace_id = f"tr_{fid}_{utc_now_iso()}".replace(":", "").replace("+", "_")
 

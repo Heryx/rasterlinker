@@ -773,6 +773,23 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         interpretation_prompt_act.triggered.connect(
             lambda checked=False: self._set_trace_interpretation_prompt_enabled(bool(checked), persist=True)
         )
+        discard_outside_act = query_menu.addAction("Discard traces outside raster")
+        discard_outside_act.setCheckable(True)
+        discard_outside_act.setChecked(bool(getattr(self, "trace_discard_outside_raster", False)))
+        discard_outside_act.toggled.connect(
+            lambda checked=False: (
+                self._set_trace_discard_outside_raster_enabled(bool(checked), persist=True)
+                if hasattr(self, "_set_trace_discard_outside_raster_enabled")
+                else None
+            )
+        )
+        discard_outside_act.triggered.connect(
+            lambda checked=False: (
+                self._set_trace_discard_outside_raster_enabled(bool(checked), persist=True)
+                if hasattr(self, "_set_trace_discard_outside_raster_enabled")
+                else None
+            )
+        )
 
         query_menu.addSeparator()
         clear_text_act = query_menu.addAction("Clear text filter")
@@ -815,6 +832,12 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             for key, act in preview_actions.items():
                 act.setChecked(key == current_preview)
             interpretation_prompt_act.setChecked(bool(getattr(self, "trace_prompt_interpretation_popup", False)))
+            discard_outside = (
+                bool(self._trace_discard_outside_raster_enabled())
+                if hasattr(self, "_trace_discard_outside_raster_enabled")
+                else bool(getattr(self, "trace_discard_outside_raster", False))
+            )
+            discard_outside_act.setChecked(discard_outside)
 
         query_menu.aboutToShow.connect(_sync_query_menu_checks)
 
@@ -1021,6 +1044,7 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         self.trace_info_query_btn = query_btn
         self.trace_info_query_panel = query_panel
         self.trace_info_interpretation_prompt_action = interpretation_prompt_act
+        self.trace_info_discard_outside_raster_action = discard_outside_act
         self.trace_info_help_btn = help_btn
         self.trace_info_help_panel = help_panel
         self._set_trace_info_view_mode("table", persist=False)
