@@ -6,7 +6,7 @@ import os
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
-from PyQt5.QtWidgets import QWidget, QHBoxLayout, QToolButton, QMessageBox, QFrame
+from PyQt5.QtWidgets import QWidget, QHBoxLayout, QToolButton, QMessageBox, QFrame, QMenu
 from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes
 from .layer_property_utils import get_layer_property
 
@@ -443,26 +443,55 @@ class TraceToolsMixin:
             sep.setMidLineWidth(0)
             tools_layout.addWidget(sep, 0)
 
-        # Group 1: basic edit workflow (close to QGIS attribute/digitizing flow)
+        def _add_menu_button(title, action_names, icon_from=None):
+            menu = QMenu(tools_widget)
+            has_items = False
+            for action_name in action_names:
+                act = self.trace_toolbar_actions.get(action_name)
+                if act is None:
+                    continue
+                menu.addAction(act)
+                has_items = True
+            if not has_items:
+                return
+            btn = QToolButton(tools_widget)
+            btn.setText(title)
+            btn.setPopupMode(QToolButton.InstantPopup)
+            btn.setMenu(menu)
+            btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            btn.setMinimumHeight(26)
+            btn.setToolTip(title)
+            if icon_from:
+                icon_action = self.trace_toolbar_actions.get(icon_from)
+                if icon_action is not None and icon_action.icon() is not None:
+                    btn.setIcon(icon_action.icon())
+            tools_layout.addWidget(btn, 0)
+
+        # Core draw workflow (always visible).
         for action_name in ("New Line Layer", "Draw 2D Line", "Save Edits"):
             _add_button(action_name)
         _add_separator()
 
-        # Group 2: geometry editing tools
-        for action_name in ("Vertex Tool", "Split Feature", "Copy", "Paste", "Delete", "Clean Orphans"):
-            _add_button(action_name)
-        _add_separator()
+        # Advanced edit tools (collapsed in menu).
+        _add_menu_button(
+            "Edit",
+            ("Vertex Tool", "Split Feature", "Copy", "Paste", "Delete", "Clean Orphans"),
+            icon_from="Vertex Tool",
+        )
 
-        # Group 3: model/export/check utilities
-        for action_name in (
+        # Build/export/check utilities (collapsed in menu).
+        _add_menu_button(
+            "More",
+            (
             "Generate Vertices",
             "Build 3D",
             "Build 3D Batch",
             "Orthometric 3D",
             "Export Layer",
             "Workflow Check",
-        ):
-            _add_button(action_name)
+            ),
+            icon_from="Build 3D",
+        )
 
         tools_layout.addStretch(1)
         return tools_widget
