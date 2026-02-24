@@ -1,9 +1,10 @@
 import os
 import re
 import time
+import tempfile
 
-from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtGui import QColor, QFont
+from qgis.PyQt.QtCore import Qt, QVariant, QSizeF
+from qgis.PyQt.QtGui import QColor, QFont, QImage, QPainter, QPdfWriter
 from qgis.PyQt.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 from qgis.core import (
     QgsContrastEnhancement,
@@ -272,7 +273,17 @@ class CatalogToolsMixin:
     def _ensure_atlas_coverage_layer(self, group, rows, create_new=False, page_opts=None):
         project = QgsProject.instance()
         project_crs = project.crs().authid() if project.crs().isValid() else "EPSG:4326"
-        base_layer_name = f"AtlasCoverage_{self._atlas_safe_token(group.get('name') or 'Group', default_token='group')}"
+        page_tag = ""
+        if isinstance(page_opts, dict):
+            p = self._atlas_safe_token(page_opts.get("page_token"), default_token="")
+            o = self._atlas_safe_token(page_opts.get("orientation_token"), default_token="")
+            d = self._atlas_safe_token(f"{int(page_opts.get('dpi') or 300)}dpi", default_token="")
+            bits = [x for x in (p, o, d) if x]
+            if bits:
+                page_tag = "_" + "_".join(bits)
+        base_layer_name = (
+            f"AtlasCoverage_{self._atlas_safe_token(group.get('name') or 'Group', default_token='group')}{page_tag}"
+        )
         layer_name = self._coverage_unique_layer_name(base_layer_name) if create_new else base_layer_name
         existing = None
         if not create_new:
@@ -531,6 +542,38 @@ class CatalogToolsMixin:
         return result
 
     def _atlas_export_map_context(self):
+        map_content_combo = getattr(self, "export_map_content_combo", None)
+        theme_combo = getattr(self, "export_theme_combo", None)
+        if map_content_combo is not None:
+            try:
+                if hasattr(self, "_refresh_export_theme_combo"):
+                    self._refresh_export_theme_combo()
+            except Exception:
+                pass
+            mode_text = str(map_content_combo.currentText() or "").strip().lower()
+            canvas = self.iface.mapCanvas() if self.iface is not None else None
+            canvas_extent = QgsRectangle(canvas.extent()) if canvas is not None else None
+            if mode_text.startswith("raster only"):
+                return {"mode": "raster_only", "layer_ids": [], "extent": None, "theme_name": ""}
+            if mode_text.startswith("current canvas"):
+                ids = []
+                try:
+                    ids = [str(lyr.id() or "").strip() for lyr in (canvas.layers() or []) if lyr is not None]
+                    ids = [i for i in ids if i]
+                except Exception:
+                    ids = []
+                return {"mode": "canvas_view", "layer_ids": ids, "extent": canvas_extent, "theme_name": ""}
+            theme_name = str(theme_combo.currentText() or "").strip() if theme_combo is not None else ""
+            if not theme_name or theme_name.startswith("<"):
+                QMessageBox.warning(
+                    self.dlg,
+                    "Export Group Layout",
+                    "No map theme selected. Choose Raster only / Current canvas view, or select a valid map theme.",
+                )
+                return None
+            ids = self._atlas_theme_visible_layer_ids(theme_name)
+            return {"mode": "map_theme", "layer_ids": ids, "extent": canvas_extent, "theme_name": theme_name}
+
         options = [
             "Raster only (time-slice layer only)",
             "Current canvas view (visible layers + current extent)",
@@ -606,6 +649,66 @@ class CatalogToolsMixin:
             }
 
     def _atlas_export_page_settings(self):
+        page_combo = getattr(self, "export_page_size_combo", None)
+        orient_combo = getattr(self, "export_orientation_combo", None)
+        dpi_combo = getattr(self, "export_dpi_combo", None)
+        scale_spin = getattr(self, "export_scale_spin", None)
+        custom_unit_combo = getattr(self, "export_custom_unit_combo", None)
+        custom_w_spin = getattr(self, "export_custom_w_spin", None)
+        custom_h_spin = getattr(self, "export_custom_h_spin", None)
+        if page_combo is not None and orient_combo is not None and dpi_combo is not None and scale_spin is not None:
+            page_label_norm = str(page_combo.currentText() or "").strip().upper()
+            orientation_label = str(orient_combo.currentText() or "Landscape").strip()
+            dpi_label = str(dpi_combo.currentText() or "300").strip()
+            unit_label = str(custom_unit_combo.currentText() or "cm").strip() if custom_unit_combo is not None else "cm"
+            width_val = float(custom_w_spin.value()) if custom_w_spin is not None else 21.0
+            height_val = float(custom_h_spin.value()) if custom_h_spin is not None else 29.7
+            scale_den = float(scale_spin.value())
+            if scale_den <= 0:
+                scale_den = 1000.0
+            page_mm = {
+                "A6": (105.0, 148.0),
+                "A5": (148.0, 210.0),
+                "A4": (210.0, 297.0),
+                "A3": (297.0, 420.0),
+                "A2": (420.0, 594.0),
+                "A1": (594.0, 841.0),
+            }
+            if page_label_norm == "CUSTOM":
+                if str(unit_label).lower() == "inch":
+                    base_w = float(width_val) * 25.4
+                    base_h = float(height_val) * 25.4
+                    custom_tag = f"{float(width_val):g}in_x_{float(height_val):g}in"
+                else:
+                    base_w = float(width_val) * 10.0
+                    base_h = float(height_val) * 10.0
+                    custom_tag = f"{float(width_val):g}cm_x_{float(height_val):g}cm"
+            else:
+                base_w, base_h = page_mm.get(page_label_norm, (210.0, 297.0))
+                custom_tag = ""
+            if str(orientation_label).lower().startswith("land"):
+                width_mm, height_mm = max(base_w, base_h), min(base_w, base_h)
+            else:
+                width_mm, height_mm = min(base_w, base_h), max(base_w, base_h)
+            try:
+                dpi_val = int(dpi_label)
+            except Exception:
+                dpi_val = 300
+            page_token = page_label_norm if page_label_norm != "CUSTOM" else f"CUSTOM_{custom_tag}"
+            orientation_token = "landscape" if str(orientation_label).lower().startswith("land") else "portrait"
+            out = {
+                "page_size_label": page_label_norm,
+                "orientation_label": str(orientation_label),
+                "page_token": page_token,
+                "orientation_token": orientation_token,
+                "width_mm": float(width_mm),
+                "height_mm": float(height_mm),
+                "dpi": int(dpi_val),
+                "scale_denominator": float(scale_den),
+            }
+            out.update(self._atlas_layout_metrics(out))
+            return out
+
         page_label, ok_page = QInputDialog.getItem(
             self.dlg,
             "Export Group Layout",
@@ -726,7 +829,7 @@ class CatalogToolsMixin:
 
         page_token = page_label_norm if page_label_norm != "CUSTOM" else f"CUSTOM_{custom_tag}"
         orientation_token = "landscape" if str(orientation_label).lower().startswith("land") else "portrait"
-        return {
+        out = {
             "page_size_label": page_label_norm,
             "orientation_label": str(orientation_label),
             "page_token": page_token,
@@ -735,6 +838,33 @@ class CatalogToolsMixin:
             "height_mm": float(height_mm),
             "dpi": int(dpi_val),
             "scale_denominator": float(scale_den),
+        }
+        out.update(self._atlas_layout_metrics(out))
+        return out
+
+    def _atlas_layout_metrics(self, page_opts):
+        page_w = float(page_opts.get("width_mm") or 297.0)
+        page_h = float(page_opts.get("height_mm") or 210.0)
+        margin = max(5.0, min(12.0, page_w * 0.03))
+        top_band = max(10.0, min(14.0, page_h * 0.06))
+        map_y = margin + top_band + 2.0
+        bottom_reserved = max(12.0, min(18.0, page_h * 0.08))
+        map_w = max(20.0, page_w - (2.0 * margin))
+        map_h = max(20.0, page_h - map_y - bottom_reserved)
+        north_x = page_w - margin - 12.0
+        north_y = margin
+        scale_y = page_h - margin + 1.0
+        return {
+            "margin_mm": float(margin),
+            "top_band_mm": float(top_band),
+            "map_x_mm": float(margin),
+            "map_y_mm": float(map_y),
+            "map_w_mm": float(map_w),
+            "map_h_mm": float(map_h),
+            "north_x_mm": float(north_x),
+            "north_y_mm": float(north_y),
+            "scale_x_mm": float(margin),
+            "scale_y_mm": float(scale_y),
         }
 
     def _atlas_rows_from_coverage_layer(self, layer):
@@ -829,9 +959,9 @@ class CatalogToolsMixin:
             return None
 
         scale_den = float(page_opts.get("scale_denominator") or 0.0) if isinstance(page_opts, dict) else 0.0
-        width_mm = float(page_opts.get("width_mm") or 0.0) if isinstance(page_opts, dict) else 0.0
-        height_mm = float(page_opts.get("height_mm") or 0.0) if isinstance(page_opts, dict) else 0.0
-        if scale_den <= 0 or width_mm <= 0 or height_mm <= 0:
+        frame_w_mm = float(page_opts.get("map_w_mm") or 0.0) if isinstance(page_opts, dict) else 0.0
+        frame_h_mm = float(page_opts.get("map_h_mm") or 0.0) if isinstance(page_opts, dict) else 0.0
+        if scale_den <= 0 or frame_w_mm <= 0 or frame_h_mm <= 0:
             return QgsGeometry.fromRect(union_extent)
 
         meters_to_map = 1.0
@@ -846,8 +976,8 @@ class CatalogToolsMixin:
         if meters_to_map <= 0:
             meters_to_map = 1.0
 
-        frame_w = (width_mm / 1000.0) * scale_den * meters_to_map
-        frame_h = (height_mm / 1000.0) * scale_den * meters_to_map
+        frame_w = (frame_w_mm / 1000.0) * scale_den * meters_to_map
+        frame_h = (frame_h_mm / 1000.0) * scale_den * meters_to_map
         if frame_w <= 0 or frame_h <= 0:
             return QgsGeometry.fromRect(union_extent)
 
@@ -1429,23 +1559,79 @@ class CatalogToolsMixin:
                 continue
         self.iface.messageBar().pushInfo("GeoSurvey Studio", f"Group style loaded: {applied}/{len(layers)} layers.")
 
+    def _atlas_export_coverage_mode(self):
+        combo = getattr(self, "export_coverage_mode_combo", None)
+        if combo is None:
+            return None
+        txt = str(combo.currentText() or "").strip().lower()
+        if txt.startswith("use existing"):
+            return "use_existing"
+        if txt.startswith("refresh"):
+            return "refresh_existing"
+        if txt.startswith("create new"):
+            return "create_new"
+        return None
+
+    def _atlas_export_output_mode(self):
+        combo = getattr(self, "export_mode_combo", None)
+        if combo is None:
+            return "batch_single_pdf"
+        txt = str(combo.currentText() or "").strip().lower()
+        if txt.startswith("single visible"):
+            return "single_visible"
+        return "batch_single_pdf"
+
+    def _visible_raster_layer_ids_for_group(self, group_name):
+        ids = []
+        try:
+            group = self._get_or_create_plugin_qgis_group(str(group_name or "").strip())
+            for child in group.children():
+                if not isinstance(child, QgsLayerTreeLayer):
+                    continue
+                lyr = child.layer()
+                if not isinstance(lyr, QgsRasterLayer):
+                    continue
+                if child.isVisible():
+                    lid = str(lyr.id() or "").strip()
+                    if lid:
+                        ids.append(lid)
+        except Exception:
+            return []
+        return ids
+
+    def generate_atlas_coverage_from_export_tab(self):
+        project_root, group = self._active_group_record()
+        if not project_root or group is None:
+            QMessageBox.warning(self.dlg, "Atlas Coverage", "Select one active group first.")
+            return
+        page_opts = self._atlas_export_page_settings()
+        if page_opts is None:
+            return
+        ts_rows = self._build_atlas_coverage_rows(project_root, group)
+        existing = self._find_atlas_coverage_layer(group.get("id"), group.get("name"))
+        mode = self._atlas_export_coverage_mode() or "refresh_existing"
+        create_new = False
+        if mode == "use_existing":
+            if existing is None:
+                mode = "refresh_existing"
+            else:
+                self.iface.messageBar().pushInfo(
+                    "GeoSurvey Studio",
+                    f"Using existing Atlas coverage: {existing.name()}",
+                )
+                return
+        if mode == "create_new":
+            create_new = True
+        self.build_atlas_coverage_for_active_group(
+            create_new=create_new,
+            rows=ts_rows,
+            page_opts=page_opts,
+        )
+
     def export_group_layout_quick(self):
         project_root, group = self._active_group_record()
         if not project_root or group is None:
             QMessageBox.warning(self.dlg, "Export Group Layout", "Select one active group first.")
-            return
-        mode_label, ok_mode = QInputDialog.getItem(
-            self.dlg,
-            "Export Group Layout",
-            "Action:",
-            [
-                "Quick PDF export (one file per loaded raster)",
-                "Generate/refresh Atlas coverage only",
-            ],
-            0,
-            False,
-        )
-        if not ok_mode:
             return
         group_name = group.get("name", "Group")
         page_opts = self._atlas_export_page_settings()
@@ -1455,15 +1641,9 @@ class CatalogToolsMixin:
         existing_coverage = self._find_atlas_coverage_layer(group.get("id"), group_name)
         coverage_layer = None
         coverage_rows = None
-        if existing_coverage is None:
-            coverage_layer, _ = self.build_atlas_coverage_for_active_group(
-                create_new=False,
-                rows=ts_rows,
-                page_opts=page_opts,
-            )
-            coverage_rows = ts_rows
-        else:
-            cov_mode, ok_cov = QInputDialog.getItem(
+        cov_mode = self._atlas_export_coverage_mode()
+        if cov_mode is None and existing_coverage is not None:
+            cov_label, ok_cov = QInputDialog.getItem(
                 self.dlg,
                 "Atlas Coverage",
                 "Coverage source:",
@@ -1477,26 +1657,32 @@ class CatalogToolsMixin:
             )
             if not ok_cov:
                 return
-            if cov_mode.startswith("Use existing"):
+            cov_mode = "use_existing" if cov_label.startswith("Use existing") else (
+                "refresh_existing" if cov_label.startswith("Refresh") else "create_new"
+            )
+        if cov_mode is None:
+            cov_mode = "refresh_existing"
+        if cov_mode == "use_existing":
+            if existing_coverage is None:
+                cov_mode = "refresh_existing"
+            else:
                 coverage_layer = existing_coverage
                 coverage_rows = ts_rows
-            elif cov_mode.startswith("Refresh existing"):
-                coverage_layer, _ = self.build_atlas_coverage_for_active_group(
-                    create_new=False,
-                    rows=ts_rows,
-                    page_opts=page_opts,
-                )
-                coverage_rows = ts_rows
-            else:
-                coverage_layer, _ = self.build_atlas_coverage_for_active_group(
-                    create_new=True,
-                    rows=ts_rows,
-                    page_opts=page_opts,
-                )
-                coverage_rows = ts_rows
+        if cov_mode == "refresh_existing":
+            coverage_layer, _ = self.build_atlas_coverage_for_active_group(
+                create_new=False,
+                rows=ts_rows,
+                page_opts=page_opts,
+            )
+            coverage_rows = ts_rows
+        elif cov_mode == "create_new":
+            coverage_layer, _ = self.build_atlas_coverage_for_active_group(
+                create_new=True,
+                rows=ts_rows,
+                page_opts=page_opts,
+            )
+            coverage_rows = ts_rows
         if coverage_rows is None:
-            return
-        if mode_label == "Generate/refresh Atlas coverage only":
             return
         if not self._atlas_export_validation_report(group_name, coverage_rows):
             return
@@ -1506,9 +1692,6 @@ class CatalogToolsMixin:
             return
         context = self._atlas_export_map_context()
         if context is None:
-            return
-        out_dir = QFileDialog.getExistingDirectory(self.dlg, "Select output folder for PDF export")
-        if not out_dir:
             return
 
         project = QgsProject.instance()
@@ -1525,6 +1708,7 @@ class CatalogToolsMixin:
 
         page_width_mm = float(page_opts.get("width_mm") or 297.0)
         page_height_mm = float(page_opts.get("height_mm") or 210.0)
+        metrics = self._atlas_layout_metrics(page_opts)
         page = layout.pageCollection().page(0)
         try:
             orient = (
@@ -1539,14 +1723,15 @@ class CatalogToolsMixin:
             except Exception:
                 pass
 
-        margin = 10.0
-        top_band_y = 8.0
-        map_y = 20.0
-        map_w = max(20.0, page_width_mm - (2.0 * margin))
-        map_h = max(20.0, page_height_mm - map_y - 22.0)
+        margin = float(metrics.get("margin_mm") or 10.0)
+        top_band_y = float(metrics.get("margin_mm") or 8.0)
+        map_x = float(metrics.get("map_x_mm") or margin)
+        map_y = float(metrics.get("map_y_mm") or 20.0)
+        map_w = float(metrics.get("map_w_mm") or max(20.0, page_width_mm - (2.0 * margin)))
+        map_h = float(metrics.get("map_h_mm") or max(20.0, page_height_mm - map_y - 22.0))
 
         map_item = QgsLayoutItemMap(layout)
-        map_item.attemptMove(QgsLayoutPoint(margin, map_y, QgsUnitTypes.LayoutMillimeters))
+        map_item.attemptMove(QgsLayoutPoint(map_x, map_y, QgsUnitTypes.LayoutMillimeters))
         map_item.attemptResize(QgsLayoutSize(map_w, map_h, QgsUnitTypes.LayoutMillimeters))
         layout.addLayoutItem(map_item)
 
@@ -1568,14 +1753,14 @@ class CatalogToolsMixin:
             pass
         scale_item.applyDefaultSize()
         scale_item.attemptMove(
-            QgsLayoutPoint(margin, page_height_mm - 10.0, QgsUnitTypes.LayoutMillimeters)
+            QgsLayoutPoint(float(metrics.get("scale_x_mm") or margin), float(metrics.get("scale_y_mm") or (page_height_mm - 10.0)), QgsUnitTypes.LayoutMillimeters)
         )
         layout.addLayoutItem(scale_item)
 
         north_item = QgsLayoutItemPicture(layout)
         north_item.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
         north_item.attemptMove(
-            QgsLayoutPoint(page_width_mm - 22.0, top_band_y, QgsUnitTypes.LayoutMillimeters)
+            QgsLayoutPoint(float(metrics.get("north_x_mm") or (page_width_mm - 22.0)), float(metrics.get("north_y_mm") or top_band_y), QgsUnitTypes.LayoutMillimeters)
         )
         north_item.attemptResize(QgsLayoutSize(12, 12, QgsUnitTypes.LayoutMillimeters))
         layout.addLayoutItem(north_item)
@@ -1606,7 +1791,6 @@ class CatalogToolsMixin:
             targets.append((sort_key, str(ts_name).lower(), lyr, row, base_name))
 
         targets.sort(key=lambda it: (it[0], it[1]))
-        used_names = {}
         exported = 0
         context_mode = str(context.get("mode") or "raster_only").strip().lower()
         context_extent = context.get("extent")
@@ -1616,72 +1800,137 @@ class CatalogToolsMixin:
             f"{page_opts.get('page_token')}_{page_opts.get('orientation_token')}",
             "A4_landscape",
         )
-        for _sort_key, _name_key, lyr, row, base_name in targets:
+
+        output_mode = self._atlas_export_output_mode()
+        if output_mode == "single_visible":
+            visible_ids = set(self._visible_raster_layer_ids_for_group(group_name))
+            if visible_ids:
+                filtered = [t for t in targets if str(t[2].id()) in visible_ids]
+            else:
+                filtered = []
+            targets = filtered[:1] if filtered else (targets[:1] if targets else [])
+        if not targets:
+            layout_manager.removeLayout(layout)
+            QMessageBox.warning(self.dlg, "Export Group Layout", "No export target layers found.")
+            return
+
+        def _apply_target(lyr, row):
+            row_geom = row.get("geometry") if isinstance(row, dict) else None
+            row_extent = None
             try:
-                row_geom = row.get("geometry") if isinstance(row, dict) else None
+                if row_geom is not None and not row_geom.isEmpty():
+                    row_extent = row_geom.boundingBox()
+                    if row_extent is not None and row_extent.isEmpty():
+                        row_extent = None
+            except Exception:
                 row_extent = None
-                try:
-                    if row_geom is not None and not row_geom.isEmpty():
-                        row_extent = row_geom.boundingBox()
-                        if row_extent is not None and row_extent.isEmpty():
-                            row_extent = None
-                except Exception:
-                    row_extent = None
-                if context_mode == "raster_only":
+            if context_mode == "raster_only":
+                map_layers = [lyr]
+            else:
+                map_layers = list(context_layers)
+                if all(str(x.id()) != str(lyr.id()) for x in map_layers):
+                    map_layers.insert(0, lyr)
+                if not map_layers:
                     map_layers = [lyr]
-                else:
-                    map_layers = list(context_layers)
-                    if all(str(x.id()) != str(lyr.id()) for x in map_layers):
-                        map_layers.insert(0, lyr)
-                    if not map_layers:
-                        map_layers = [lyr]
-                map_item.setLayers(map_layers)
-                if context_mode == "raster_only":
-                    if coverage_extent is not None and not coverage_extent.isEmpty():
-                        map_item.setExtent(coverage_extent)
-                    elif row_extent is not None:
-                        map_item.setExtent(row_extent)
-                    else:
-                        map_item.zoomToExtent(lyr.extent())
-                elif context_extent is not None:
-                    map_item.setExtent(context_extent)
+            map_item.setLayers(map_layers)
+            if context_mode == "raster_only":
+                if coverage_extent is not None and not coverage_extent.isEmpty():
+                    map_item.setExtent(coverage_extent)
                 elif row_extent is not None:
                     map_item.setExtent(row_extent)
                 else:
                     map_item.zoomToExtent(lyr.extent())
-                label_ts_name = str(row.get("ts_name") or lyr.name()) if isinstance(row, dict) else str(lyr.name())
-                label_depth = str(row.get("depth_label") or "") if isinstance(row, dict) else ""
-                if label_depth:
-                    title_item.setText(f"{group_name} - {label_ts_name} ({label_depth})")
-                else:
-                    title_item.setText(f"{group_name} - {label_ts_name}")
-                title_item.adjustSizeToText()
-                count = used_names.get(base_name, 0)
-                used_names[base_name] = count + 1
-                stem, ext = os.path.splitext(base_name)
-                stem = f"{stem}_{format_token}"
-                if count > 0:
-                    file_name = f"{stem}_{count:03d}{ext}"
-                else:
-                    file_name = f"{stem}{ext}"
-                pdf_path = os.path.join(out_dir, file_name)
-                exporter = QgsLayoutExporter(layout)
-                pdf_settings = QgsLayoutExporter.PdfExportSettings()
+            elif context_extent is not None:
+                map_item.setExtent(context_extent)
+            elif row_extent is not None:
+                map_item.setExtent(row_extent)
+            else:
+                map_item.zoomToExtent(lyr.extent())
+            label_ts_name = str(row.get("ts_name") or lyr.name()) if isinstance(row, dict) else str(lyr.name())
+            label_depth = str(row.get("depth_label") or "") if isinstance(row, dict) else ""
+            if label_depth:
+                title_item.setText(f"{group_name} - {label_ts_name} ({label_depth})")
+            else:
+                title_item.setText(f"{group_name} - {label_ts_name}")
+            title_item.adjustSizeToText()
+
+        project_token = self._atlas_safe_token(os.path.basename(project_root), "project")
+        group_token = self._atlas_safe_token(group_name, "group")
+        if output_mode == "batch_single_pdf":
+            default_name = f"{project_token}_{group_token}_{format_token}_batch.pdf"
+            pdf_path, _ = QFileDialog.getSaveFileName(
+                self.dlg,
+                "Export Batch PDF",
+                os.path.join(project_root, default_name),
+                "PDF files (*.pdf)",
+            )
+            if not pdf_path:
+                layout_manager.removeLayout(layout)
+                return
+            try:
+                writer = QPdfWriter(pdf_path)
+                writer.setPageSizeMM(QSizeF(page_width_mm, page_height_mm))
+                writer.setResolution(int(page_opts.get("dpi") or 300))
+                painter = QPainter(writer)
+                tmp_dir = tempfile.mkdtemp(prefix="gss_pdf_")
+                first_page = True
+                for _sort_key, _name_key, lyr, row, _base_name in targets:
+                    _apply_target(lyr, row)
+                    img_path = os.path.join(tmp_dir, f"page_{exported+1:04d}.png")
+                    img_settings = QgsLayoutExporter.ImageExportSettings()
+                    img_settings.dpi = int(page_opts.get("dpi") or 300)
+                    img_res = QgsLayoutExporter(layout).exportToImage(img_path, img_settings)
+                    if img_res != QgsLayoutExporter.Success:
+                        continue
+                    img = QImage(img_path)
+                    if img.isNull():
+                        continue
+                    if not first_page:
+                        writer.newPage()
+                    first_page = False
+                    painter.drawImage(painter.viewport(), img)
+                    exported += 1
+                painter.end()
                 try:
-                    pdf_settings.dpi = int(page_opts.get("dpi") or 300)
+                    for fn in os.listdir(tmp_dir):
+                        try:
+                            os.remove(os.path.join(tmp_dir, fn))
+                        except Exception:
+                            pass
+                    os.rmdir(tmp_dir)
                 except Exception:
                     pass
+            except Exception:
+                pass
+        else:
+            _sort_key, _name_key, lyr, row, _base_name = targets[0]
+            ts_token = self._atlas_safe_token(str(row.get("ts_name") or lyr.name() or "timeslice"), "timeslice")
+            default_name = f"{project_token}_{group_token}_{format_token}_{ts_token}.pdf"
+            pdf_path, _ = QFileDialog.getSaveFileName(
+                self.dlg,
+                "Export Single Visible PDF",
+                os.path.join(project_root, default_name),
+                "PDF files (*.pdf)",
+            )
+            if not pdf_path:
+                layout_manager.removeLayout(layout)
+                return
+            try:
+                _apply_target(lyr, row)
+                exporter = QgsLayoutExporter(layout)
+                pdf_settings = QgsLayoutExporter.PdfExportSettings()
+                pdf_settings.dpi = int(page_opts.get("dpi") or 300)
                 result = exporter.exportToPdf(pdf_path, pdf_settings)
                 if result == QgsLayoutExporter.Success:
-                    exported += 1
+                    exported = 1
             except Exception:
-                continue
+                pass
 
         layout_manager.removeLayout(layout)
         self.iface.messageBar().pushInfo(
             "GeoSurvey Studio",
             (
-                f"Quick layout export completed: {exported}/{len(layers)} PDFs. "
+                f"Quick layout export completed: {exported}/{len(targets)} page(s). "
                 f"Page: {page_opts.get('page_size_label')} {page_opts.get('orientation_label')}, "
                 f"DPI: {page_opts.get('dpi')}."
             ),

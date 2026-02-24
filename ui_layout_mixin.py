@@ -1,7 +1,17 @@
 from qgis.PyQt.QtCore import Qt, QSize
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import QgsApplication, QgsLayerTreeLayer, QgsRasterLayer
-from PyQt5.QtWidgets import QLabel, QSizePolicy, QWidget, QTabWidget, QGridLayout, QVBoxLayout
+from PyQt5.QtWidgets import (
+    QLabel,
+    QSizePolicy,
+    QWidget,
+    QTabWidget,
+    QGridLayout,
+    QVBoxLayout,
+    QComboBox,
+    QDoubleSpinBox,
+    QPushButton,
+)
 
 from .grid_options_ui import build_grid_options_controls
 
@@ -68,21 +78,114 @@ class UiLayoutMixin:
         image_layout.addWidget(self.enhance_batch_button, 0, 1, 1, 1)
         image_layout.addWidget(self.save_style_button, 1, 0, 1, 1)
         image_layout.addWidget(self.load_style_button, 1, 1, 1, 1)
-        image_layout.addWidget(self.export_layout_button, 2, 0, 1, 2)
         image_layout.setColumnStretch(0, 1)
         image_layout.setColumnStretch(1, 1)
         image_layout.setRowStretch(0, 0)
         image_layout.setRowStretch(1, 0)
-        image_layout.setRowStretch(2, 0)
-        image_layout.setRowStretch(3, 0)
+        image_layout.setRowStretch(2, 1)
+
+        export_tab = QWidget(tabs)
+        export_layout = QGridLayout(export_tab)
+        export_layout.setContentsMargins(6, 6, 6, 6)
+        export_layout.setHorizontalSpacing(8)
+        export_layout.setVerticalSpacing(6)
+
+        export_layout.addWidget(QLabel("Output", export_tab), 0, 0, 1, 1)
+        self.export_mode_combo = QComboBox(export_tab)
+        self.export_mode_combo.addItems(
+            [
+                "Batch (single PDF)",
+                "Single visible image",
+            ]
+        )
+        export_layout.addWidget(self.export_mode_combo, 0, 1, 1, 1)
+
+        export_layout.addWidget(QLabel("Coverage", export_tab), 1, 0, 1, 1)
+        self.export_coverage_mode_combo = QComboBox(export_tab)
+        self.export_coverage_mode_combo.addItems(
+            [
+                "Use existing (keep edits)",
+                "Refresh from rasters",
+                "Create new coverage",
+            ]
+        )
+        export_layout.addWidget(self.export_coverage_mode_combo, 1, 1, 1, 1)
+
+        export_layout.addWidget(QLabel("Map content", export_tab), 2, 0, 1, 1)
+        self.export_map_content_combo = QComboBox(export_tab)
+        self.export_map_content_combo.addItems(
+            [
+                "Raster only",
+                "Current canvas view",
+                "Map theme",
+            ]
+        )
+        export_layout.addWidget(self.export_map_content_combo, 2, 1, 1, 1)
+
+        export_layout.addWidget(QLabel("Theme", export_tab), 3, 0, 1, 1)
+        self.export_theme_combo = QComboBox(export_tab)
+        self.export_theme_combo.setEditable(False)
+        export_layout.addWidget(self.export_theme_combo, 3, 1, 1, 1)
+
+        export_layout.addWidget(QLabel("Page", export_tab), 4, 0, 1, 1)
+        self.export_page_size_combo = QComboBox(export_tab)
+        self.export_page_size_combo.addItems(["A6", "A5", "A4", "A3", "A2", "A1", "Custom"])
+        self.export_page_size_combo.setCurrentText("A4")
+        export_layout.addWidget(self.export_page_size_combo, 4, 1, 1, 1)
+
+        export_layout.addWidget(QLabel("Orientation", export_tab), 5, 0, 1, 1)
+        self.export_orientation_combo = QComboBox(export_tab)
+        self.export_orientation_combo.addItems(["Landscape", "Portrait"])
+        export_layout.addWidget(self.export_orientation_combo, 5, 1, 1, 1)
+
+        export_layout.addWidget(QLabel("DPI", export_tab), 6, 0, 1, 1)
+        self.export_dpi_combo = QComboBox(export_tab)
+        self.export_dpi_combo.addItems(["150", "300", "600"])
+        self.export_dpi_combo.setCurrentText("300")
+        export_layout.addWidget(self.export_dpi_combo, 6, 1, 1, 1)
+
+        export_layout.addWidget(QLabel("Scale 1:n", export_tab), 7, 0, 1, 1)
+        self.export_scale_spin = QDoubleSpinBox(export_tab)
+        self.export_scale_spin.setDecimals(2)
+        self.export_scale_spin.setRange(1.0, 1e9)
+        self.export_scale_spin.setSingleStep(100.0)
+        self.export_scale_spin.setValue(1000.0)
+        export_layout.addWidget(self.export_scale_spin, 7, 1, 1, 1)
+
+        export_layout.addWidget(QLabel("Custom unit", export_tab), 8, 0, 1, 1)
+        self.export_custom_unit_combo = QComboBox(export_tab)
+        self.export_custom_unit_combo.addItems(["cm", "inch"])
+        export_layout.addWidget(self.export_custom_unit_combo, 8, 1, 1, 1)
+
+        export_layout.addWidget(QLabel("Custom W", export_tab), 9, 0, 1, 1)
+        self.export_custom_w_spin = QDoubleSpinBox(export_tab)
+        self.export_custom_w_spin.setDecimals(2)
+        self.export_custom_w_spin.setRange(0.1, 5000.0)
+        self.export_custom_w_spin.setValue(21.0)
+        export_layout.addWidget(self.export_custom_w_spin, 9, 1, 1, 1)
+
+        export_layout.addWidget(QLabel("Custom H", export_tab), 10, 0, 1, 1)
+        self.export_custom_h_spin = QDoubleSpinBox(export_tab)
+        self.export_custom_h_spin.setDecimals(2)
+        self.export_custom_h_spin.setRange(0.1, 5000.0)
+        self.export_custom_h_spin.setValue(29.7)
+        export_layout.addWidget(self.export_custom_h_spin, 10, 1, 1, 1)
+
+        self.generate_coverage_button = QPushButton("Generate Coverage", export_tab)
+        export_layout.addWidget(self.generate_coverage_button, 11, 0, 1, 1)
+        export_layout.addWidget(self.export_layout_button, 11, 1, 1, 1)
+        export_layout.setColumnStretch(0, 0)
+        export_layout.setColumnStretch(1, 1)
+        export_layout.setRowStretch(12, 1)
 
         tabs.addTab(group_tab, "Groups")
         tabs.addTab(image_tab, "Images")
+        tabs.addTab(export_tab, "Export")
         tabs.tabBar().setExpanding(False)
         tabs.tabBar().setElideMode(Qt.ElideRight)
         tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        tabs.setMinimumHeight(145)
-        tabs.setMaximumHeight(220)
+        tabs.setMinimumHeight(220)
+        tabs.setMaximumHeight(420)
 
         if self.group_tools_label is not None:
             self.group_tools_label.hide()
@@ -93,6 +196,59 @@ class UiLayoutMixin:
 
         self.dlg.gridLayout.addWidget(tabs, 0, 0, 1, 2)
         self.tools_tabs = tabs
+        if self.export_page_size_combo is not None:
+            self.export_page_size_combo.currentTextChanged.connect(self._on_export_page_size_changed)
+            self._on_export_page_size_changed(self.export_page_size_combo.currentText())
+
+        if self.export_map_content_combo is not None:
+            self.export_map_content_combo.currentTextChanged.connect(self._on_export_map_content_changed)
+            self._on_export_map_content_changed(self.export_map_content_combo.currentText())
+
+        if self.generate_coverage_button is not None:
+            self.generate_coverage_button.clicked.connect(self.generate_atlas_coverage_from_export_tab)
+
+        self._refresh_export_theme_combo()
+        try:
+            if self.export_scale_spin is not None and self.iface is not None and self.iface.mapCanvas() is not None:
+                sc = float(self.iface.mapCanvas().scale())
+                if sc > 0:
+                    self.export_scale_spin.setValue(sc)
+        except Exception:
+            pass
+
+    def _on_export_page_size_changed(self, value):
+        is_custom = str(value or "").strip().lower() == "custom"
+        for w in (self.export_custom_unit_combo, self.export_custom_w_spin, self.export_custom_h_spin):
+            if w is not None:
+                w.setEnabled(is_custom)
+
+    def _on_export_map_content_changed(self, value):
+        is_theme = str(value or "").strip().lower().startswith("map theme")
+        if self.export_theme_combo is not None:
+            self.export_theme_combo.setEnabled(is_theme)
+
+    def _refresh_export_theme_combo(self):
+        combo = getattr(self, "export_theme_combo", None)
+        if combo is None:
+            return
+        current = combo.currentText().strip()
+        combo.blockSignals(True)
+        combo.clear()
+        names = []
+        try:
+            from qgis.core import QgsProject
+            coll = QgsProject.instance().mapThemeCollection()
+            names = list(coll.mapThemes()) if coll is not None else []
+        except Exception:
+            names = []
+        names = [str(n).strip() for n in names if str(n).strip()]
+        if not names:
+            combo.addItem("<no theme>")
+        else:
+            combo.addItems(names)
+            if current and current in names:
+                combo.setCurrentText(current)
+        combo.blockSignals(False)
 
     def _build_bottom_controls_layout(self):
         if self.dlg is None or self.bottom_controls_widget is not None:
@@ -248,6 +404,7 @@ class UiLayoutMixin:
             getattr(self, "save_style_button", None),
             getattr(self, "load_style_button", None),
             getattr(self, "export_layout_button", None),
+            getattr(self, "generate_coverage_button", None),
             self.dlg.zoomSelectedGroupsButton,
             self.dlg.createGroupButton,
             self.dlg.selectGridPointsButton,
@@ -271,6 +428,7 @@ class UiLayoutMixin:
             getattr(self, "save_style_button", None),
             getattr(self, "load_style_button", None),
             getattr(self, "export_layout_button", None),
+            getattr(self, "generate_coverage_button", None),
         ]:
             if btn is not None:
                 btn.setMinimumHeight(28)
@@ -479,6 +637,7 @@ class UiLayoutMixin:
         self._set_button_icon(getattr(self, "save_style_button", None), "mActionFileSave.svg", "mActionSaveAs.svg")
         self._set_button_icon(getattr(self, "load_style_button", None), "mActionFileOpen.svg", "mActionAddRasterLayer.svg")
         self._set_button_icon(getattr(self, "export_layout_button", None), "mActionSaveAsPDF.svg", "mActionSaveAs.svg")
+        self._set_button_icon(getattr(self, "generate_coverage_button", None), "mActionAddGeometryCollection.svg", "mActionPolygonize.svg")
         self._set_button_icon(getattr(self, "help_button", None), "mActionHelpContents.svg", "mActionOptions.svg")
         self._set_button_icon(getattr(self, "export_button", None), "mActionSaveAs.svg", "mActionFileSave.svg")
 
