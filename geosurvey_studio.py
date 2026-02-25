@@ -81,6 +81,7 @@ class GeoSurveyStudioPlugin(
         self.group_tools_label = None
         self.image_tools_label = None
         self.tools_tabs = None
+        self.tools_panel_widget = None
         self.load_groups_button = None
         self.generate_coverage_button = None
         self.export_mode_combo = None
@@ -98,6 +99,7 @@ class GeoSurveyStudioPlugin(
         self.dialog_main_layout = None
         self.left_nav_widget = None
         self._is_narrow_layout = None
+        self._is_short_layout = None
         self.coord_x0_label = None
         self.coord_x1_label = None
         self.coord_y0_label = None

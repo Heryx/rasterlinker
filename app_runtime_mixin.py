@@ -1,12 +1,39 @@
+import os
+
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QAbstractItemView, QDockWidget
 from PyQt5.QtWidgets import QPushButton, QSizePolicy, QCheckBox
+from qgis.core import QgsMessageLog, Qgis
 
 from .geosurvey_studio_dialog import GeoSurveyStudioDialog
 from .project_manager_dialog import ProjectManagerDialog
 
 
 class AppRuntimeMixin:
+    def _layout_debug_enabled(self):
+        """Enable layout debug logs when GEOSURVEY_LAYOUT_DEBUG=1."""
+        return str(os.environ.get("GEOSURVEY_LAYOUT_DEBUG", "")).strip().lower() in ("1", "true", "yes", "on")
+
+    def _layout_debug_log(self, stage):
+        if not self._layout_debug_enabled() or self.dlg is None:
+            return
+        try:
+            rw = self.dlg.rasterListWidget
+            gw = self.dlg.groupListWidget
+            dw = self.dlg.widget
+            tabs = getattr(self, "tools_tabs", None)
+            bw = getattr(self, "bottom_controls_widget", None)
+            msg = (
+                f"[{stage}] dlg={self.dlg.size().width()}x{self.dlg.size().height()} | "
+                f"raster={rw.height()} group={gw.height()} drawopt={dw.height()} "
+                f"tabs={(tabs.height() if tabs is not None else -1)} "
+                f"bottom={(bw.height() if bw is not None else -1)} "
+                f"narrow={self._is_narrow_layout} short={getattr(self, '_is_short_layout', None)}"
+            )
+            QgsMessageLog.logMessage(msg, "GeoSurvey Studio", Qgis.Warning)
+        except Exception:
+            pass
+
     def _sync_depth_mode_on_plugin_start(self):
         """Apply persisted depth mode to derived vertex layers on startup.
 
@@ -77,10 +104,6 @@ class AppRuntimeMixin:
             self.dlg.selectGridPointsButton.setToolTip(
                 "Set grid orientation with 3 clicks: P0 (origin), X1 (X direction), Y1 (Y direction)."
             )
-            if hasattr(self.dlg, "Ok"):
-                self.dlg.Ok.hide()
-            if hasattr(self.dlg, "openButton"):
-                self.dlg.openButton.hide()
             self.dlg.lineEditDistanceX.setEnabled(True)
             self.dlg.lineEditDistanceY.setEnabled(True)
             self.dlg.lineEditAreaNames.setEnabled(True)
@@ -98,14 +121,9 @@ class AppRuntimeMixin:
 
             # Collega i segnali ai metodi
             self.dlg.createGroupButton.clicked.connect(self.create_group)
-            #self.dlg.moveRasterButton.clicked.connect(self.move_rasters)
             #self.dlg.groupListWidget.itemClicked.connect(self.on_group_selected)
             self.dlg.groupListWidget.itemSelectionChanged.connect(self.on_group_selection_changed)
-            if hasattr(self.dlg, "openButton"):
-                self.dlg.openButton.clicked.connect(self.load_raster)
             self.dlg.selectGridPointsButton.clicked.connect(self.activate_grid_selection_tool)
-            if hasattr(self.dlg, "moveRasterButton"):
-                self.dlg.moveRasterButton.clicked.connect(self.move_rasters)
 
             self.dlg.createGridButton.clicked.connect(self.create_grid_from_polygon_layer)
 
@@ -254,68 +272,71 @@ class AppRuntimeMixin:
     def _on_dialog_resized(self, size):
         width = size.width() if hasattr(size, "width") else (self.dlg.width() if self.dlg is not None else 0)
         self._apply_responsive_main_layout(width)
+        self._layout_debug_log("resize")
 
     def _apply_responsive_main_layout(self, width):
         if self.dlg is None or not hasattr(self.dlg, "gridLayout_3"):
             return
-        is_narrow = width < 760
-        if self._is_narrow_layout is is_narrow:
+        # Guard: resize events can fire before runtime UI composition is complete.
+        # If we apply responsive rules too early, we freeze a broken layout state.
+        if (
+            getattr(self, "tools_panel_widget", None) is None
+            or getattr(self, "bottom_controls_widget", None) is None
+            or getattr(self, "left_nav_widget", None) is None
+        ):
+            self._layout_debug_log("responsive-skipped-not-ready")
+            return
+        height = int(self.dlg.height())
+        # Keep wide layout active on medium dock widths; narrow only when really constrained.
+        is_narrow = width < 640
+        is_short = height < 860
+        if self._is_narrow_layout is is_narrow and self._is_short_layout is is_short:
             return
 
         gl3 = self.dlg.gridLayout_3
         if is_narrow:
             # Stack sections to avoid clipping on narrow/half-screen layouts.
-            gl3.addLayout(self.dlg.verticalLayout_3, 0, 0, 1, 1)
-            gl3.addWidget(self.dlg.widget, 1, 0, 1, 1)
-            gl3.addLayout(self.dlg.gridLayout, 2, 0, 1, 1)
+            # Keep tool tabs at the very top even in narrow mode.
+            if getattr(self, "tools_panel_widget", None) is not None:
+                gl3.addWidget(self.tools_panel_widget, 0, 0, 1, 1, Qt.AlignTop)
+            gl3.addLayout(self.dlg.verticalLayout_3, 1, 0, 1, 1, Qt.AlignTop)
+            if getattr(self, "bottom_controls_widget", None) is not None:
+                gl3.addWidget(self.bottom_controls_widget, 2, 0, 1, 1, Qt.AlignTop)
             if hasattr(self.dlg, "line"):
                 self.dlg.line.hide()
             gl3.setColumnStretch(0, 1)
             gl3.setColumnStretch(1, 0)
             gl3.setColumnStretch(2, 0)
             gl3.setColumnStretch(3, 0)
-            gl3.setRowStretch(0, 1)
-            gl3.setRowStretch(1, 0)
-            gl3.setRowStretch(2, 0)
-            gl3.setRowStretch(3, 0)
-            if hasattr(self.dlg, "rasterListWidget"):
-                self.dlg.rasterListWidget.setMinimumWidth(160)
-            if hasattr(self.dlg, "groupListWidget"):
-                self.dlg.groupListWidget.setMinimumWidth(160)
-            self.dlg.dial2.setMinimumSize(130, 130)
-            self.dlg.dial2.setMaximumSize(170, 170)
-            self.dlg.Dial.setMinimumHeight(34)
-            self.dlg.Dial.setMaximumHeight(38)
-            if hasattr(self.dlg, "widget"):
-                self.dlg.widget.setMinimumHeight(0)
-        else:
-            # Restore wide two-column layout.
-            gl3.addLayout(self.dlg.verticalLayout_3, 0, 0, 2, 1)
-            gl3.addWidget(self.dlg.widget, 0, 2, 1, 2)
-            gl3.addLayout(self.dlg.gridLayout, 1, 2, 1, 2)
-            if hasattr(self.dlg, "line"):
-                self.dlg.line.show()
-                gl3.addWidget(self.dlg.line, 0, 1, 2, 1)
-            gl3.setColumnStretch(0, 8)
-            gl3.setColumnStretch(1, 0)
-            gl3.setColumnStretch(2, 6)
-            gl3.setColumnStretch(3, 0)
+            # Keep main blocks compact; use row 3 as elastic filler.
             gl3.setRowStretch(0, 0)
             gl3.setRowStretch(1, 0)
             gl3.setRowStretch(2, 0)
             gl3.setRowStretch(3, 1)
-            if hasattr(self.dlg, "rasterListWidget"):
-                self.dlg.rasterListWidget.setMinimumWidth(220)
-            if hasattr(self.dlg, "groupListWidget"):
-                self.dlg.groupListWidget.setMinimumWidth(220)
-            self.dlg.dial2.setMinimumSize(160, 160)
-            self.dlg.dial2.setMaximumSize(220, 220)
-            self.dlg.Dial.setMinimumHeight(42)
-            self.dlg.Dial.setMaximumHeight(46)
-            if hasattr(self.dlg, "widget"):
-                self.dlg.widget.setMinimumHeight(220)
-
+            # Heights/sizes are managed in ui_layout_mixin (single source of truth).
+        else:
+            # Restore wide two-column layout.
+            gl3.addLayout(self.dlg.verticalLayout_3, 0, 0, 1, 1, Qt.AlignTop)
+            if getattr(self, "tools_panel_widget", None) is not None:
+                gl3.addWidget(self.tools_panel_widget, 0, 2, 1, 2, Qt.AlignTop)
+            if getattr(self, "bottom_controls_widget", None) is not None:
+                gl3.addWidget(self.bottom_controls_widget, 2, 0, 1, 4, Qt.AlignTop)
+            if hasattr(self.dlg, "line"):
+                self.dlg.line.show()
+                gl3.addWidget(self.dlg.line, 0, 1, 1, 1)
+            gl3.setColumnStretch(0, 8)
+            gl3.setColumnStretch(1, 0)
+            gl3.setColumnStretch(2, 6)
+            gl3.setColumnStretch(3, 0)
+            # Keep main blocks compact; use row 3 as elastic filler.
+            gl3.setRowStretch(0, 0)
+            gl3.setRowStretch(1, 0)
+            gl3.setRowStretch(2, 0)
+            gl3.setRowStretch(3, 1)
+            # Heights/sizes are managed in ui_layout_mixin (single source of truth).
         self._is_narrow_layout = is_narrow
+        self._is_short_layout = is_short
+        self._layout_debug_log("responsive-applied")
 
     def _ensure_dock_in_right_area(self):
         if self.dock_widget is None:
