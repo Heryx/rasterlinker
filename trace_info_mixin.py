@@ -67,9 +67,10 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             seen.add(lid)
             candidates.append(layer)
 
-        # 1) Priority: layers under plugin trace group.
+        # 1) Priority: layers under existing plugin trace group.
+        # IMPORTANT: do not auto-create groups during startup sync.
         try:
-            grp = self._get_or_create_trace_group() if hasattr(self, "_get_or_create_trace_group") else None
+            grp = self._find_trace_group() if hasattr(self, "_find_trace_group") else None
             if grp is not None and hasattr(grp, "findLayers"):
                 for child in grp.findLayers():
                     layer = child.layer() if child is not None else None

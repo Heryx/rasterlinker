@@ -310,6 +310,22 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
                     pass
         return group
 
+    def _find_trace_group(self):
+        """Return existing 'Line Traces' group if present, without creating anything."""
+        try:
+            plugin_root = self._find_plugin_root_group() if hasattr(self, "_find_plugin_root_group") else None
+            if plugin_root is None:
+                return None
+            return next(
+                (
+                    g for g in plugin_root.children()
+                    if isinstance(g, QgsLayerTreeGroup) and str(g.name() or "").strip() == "Line Traces"
+                ),
+                None,
+            )
+        except Exception:
+            return None
+
     def _add_layer_to_trace_group_top(self, layer):
         if layer is None:
             return
