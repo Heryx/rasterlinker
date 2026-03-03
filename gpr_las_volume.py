@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
-import laspy
-import numpy as np
+try:
+    import laspy
+    import numpy as np
+    _HAS_LASPY = True
+except ImportError:
+    laspy = None
+    np = None
+    _HAS_LASPY = False
 from qgis.core import QgsLayerTreeLayer, QgsPointCloudLayer, QgsProject
 
 
 def get_z_range_chunked(las_path: str, chunk_size: int = 200_000) -> tuple[float, float]:
     """Return (z_min, z_max) by streaming LAS chunks without full in-memory load."""
+    if not _HAS_LASPY:
+        raise ImportError("laspy non installato")
+
     z_min = np.inf
     z_max = -np.inf
 
@@ -60,4 +69,3 @@ def set_z_slice(layer: QgsPointCloudLayer, z_low: float, z_high: float) -> bool:
         pass
 
     return False
-

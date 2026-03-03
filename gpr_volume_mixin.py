@@ -9,14 +9,19 @@ from qgis.core import QgsProject, QgsRasterLayer, QgsLayerTreeLayer
 
 class GprVolumeMixin:
     def import_las_as_slices(self):
-        from .gpr_utils import check_pdal
-        from .gpr_las_volume import get_z_range_chunked
-        from .gpr_slice_generator import generate_slices_pdal
+        from .gpr_utils import check_pdal, check_laspy
 
         result = check_pdal()
         if not result.get("ok"):
             QMessageBox.critical(self.dlg, "PDAL non trovato", str(result.get("error") or "Errore PDAL"))
             return
+        result_laspy = check_laspy()
+        if not result_laspy.get("ok"):
+            QMessageBox.critical(self.dlg, "laspy non trovato", str(result_laspy.get("error") or "Errore laspy"))
+            return
+
+        from .gpr_las_volume import get_z_range_chunked
+        from .gpr_slice_generator import generate_slices_pdal
 
         file_paths, _ = QFileDialog.getOpenFileNames(
             self.dlg,
