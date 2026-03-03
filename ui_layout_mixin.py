@@ -1,7 +1,6 @@
 from qgis.PyQt.QtCore import Qt, QSize
 from qgis.PyQt.QtGui import QIcon
-from qgis.core import QgsApplication, QgsLayerTreeLayer, QgsRasterLayer
-from PyQt5.QtWidgets import (
+from qgis.PyQt.QtWidgets import (
     QLabel,
     QSizePolicy,
     QWidget,
@@ -12,6 +11,7 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QPushButton,
 )
+from qgis.core import QgsApplication, QgsLayerTreeLayer, QgsRasterLayer
 
 from .grid_options_ui import build_grid_options_controls
 
@@ -120,6 +120,7 @@ class UiLayoutMixin:
         tabs.setDocumentMode(False)
         tabs.setUsesScrollButtons(False)
 
+        # ── TAB: Groups ────────────────────────────────────────────────────
         group_tab = QWidget(tabs)
         group_layout = QGridLayout(group_tab)
         group_layout.setContentsMargins(6, 6, 6, 6)
@@ -130,7 +131,8 @@ class UiLayoutMixin:
         group_layout.addWidget(self.dlg.zoomSelectedGroupsButton, 0, 1, 1, 1)
         group_layout.addWidget(self.import_groups_button, 1, 0, 1, 1)
         group_layout.addWidget(self.dlg.createGroupButton, 1, 1, 1, 1)
-        self.import_las_slice_button = QPushButton("🗂 Import LAS → Slice", group_tab)
+        # FIX: rimosso emoji non portabile; icona aggiunta in _apply_button_icons()
+        self.import_las_slice_button = QPushButton("Import LAS → Slice", group_tab)
         self.import_las_slice_button.setObjectName("importLasSliceButton")
         self.import_las_slice_button.setToolTip(
             "Importa COPC/LAS GPR, genera slice GeoTIFF via PDAL.\n"
@@ -149,7 +151,10 @@ class UiLayoutMixin:
         group_layout.setRowStretch(1, 0)
         group_layout.setRowStretch(2, 0)
         group_layout.setRowStretch(3, 0)
+        # elastic filler row
+        group_layout.setRowStretch(4, 1)
 
+        # ── TAB: Images ────────────────────────────────────────────────────
         image_tab = QWidget(tabs)
         image_layout = QGridLayout(image_tab)
         image_layout.setContentsMargins(6, 6, 6, 6)
@@ -163,8 +168,9 @@ class UiLayoutMixin:
         image_layout.setColumnStretch(1, 1)
         image_layout.setRowStretch(0, 0)
         image_layout.setRowStretch(1, 0)
-        image_layout.setRowStretch(2, 0)
+        image_layout.setRowStretch(2, 1)
 
+        # ── TAB: Export ────────────────────────────────────────────────────
         export_tab = QWidget(tabs)
         export_layout = QGridLayout(export_tab)
         export_layout.setContentsMargins(6, 6, 6, 6)
@@ -257,7 +263,8 @@ class UiLayoutMixin:
         export_layout.addWidget(self.export_layout_button, 11, 1, 1, 1)
         export_layout.setColumnStretch(0, 0)
         export_layout.setColumnStretch(1, 1)
-        export_layout.setRowStretch(12, 0)
+        # FIX: riga elastica alla fine per evitare stretch anomalo delle righe contenuto
+        export_layout.setRowStretch(12, 1)
 
         tabs.addTab(group_tab, "Groups")
         tabs.addTab(image_tab, "Images")
@@ -265,8 +272,9 @@ class UiLayoutMixin:
         tabs.tabBar().setExpanding(False)
         tabs.tabBar().setElideMode(Qt.ElideRight)
         tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        tabs.setMinimumHeight(120)
-        tabs.setMaximumHeight(210)
+        # FIX: altezze aumentate per contenere 4 righe nel tab Groups + tab bar (HiDPI)
+        tabs.setMinimumHeight(148)
+        tabs.setMaximumHeight(252)
 
         if self.group_tools_label is not None:
             self.group_tools_label.hide()
@@ -470,9 +478,12 @@ class UiLayoutMixin:
             self.left_nav_widget = nav_widget
 
         if hasattr(self.dlg, "verticalLayout_3"):
-            self.dlg.verticalLayout_3.removeWidget(self.dlg.widget)
-            self.dlg.verticalLayout_3.removeWidget(self.left_nav_widget)
-            self.dlg.verticalLayout_3.insertWidget(4, self.left_nav_widget)
+            vl = self.dlg.verticalLayout_3
+            vl.removeWidget(self.dlg.widget)
+            vl.removeWidget(self.left_nav_widget)
+            # FIX: inserimento per riferimento invece di indice hardcoded 4
+            # Il nav widget va dopo l'ultimo widget gia' presente (groupListWidget)
+            vl.addWidget(self.left_nav_widget)
 
         if hasattr(self.dlg, "gridLayout_3") and getattr(self, "tools_panel_widget", None) is not None:
             self.dlg.gridLayout_3.addWidget(self.tools_panel_widget, 0, 2, 1, 2, Qt.AlignTop)
@@ -492,29 +503,34 @@ class UiLayoutMixin:
         )
         label_style = "color: #202020; font-size: 9pt;"
 
-        self.dlg.dial2.setMinimumSize(88, 88)
-        self.dlg.dial2.setMaximumSize(110, 110)
+        # FIX: dial ridotto leggermente per dare spazio alle liste
+        self.dlg.dial2.setMinimumSize(82, 82)
+        self.dlg.dial2.setMaximumSize(100, 100)
         self.dlg.dial2.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.dlg.dial2.setNotchTarget(2.0)
         self.dlg.Dial.setMinimumHeight(18)
         self.dlg.Dial.setMaximumHeight(22)
+
+        # FIX: altezze liste aumentate per usabilita' con molte slice GPR
         if hasattr(self.dlg, "rasterListWidget"):
             self.dlg.rasterListWidget.setMinimumWidth(220)
             self.dlg.rasterListWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            self.dlg.rasterListWidget.setMinimumHeight(56)
-            self.dlg.rasterListWidget.setMaximumHeight(78)
+            self.dlg.rasterListWidget.setMinimumHeight(60)
+            self.dlg.rasterListWidget.setMaximumHeight(108)
             self.dlg.rasterListWidget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             self.dlg.rasterListWidget.setStyleSheet("font-size: 9pt;")
         if hasattr(self.dlg, "groupListWidget"):
             self.dlg.groupListWidget.setMinimumWidth(220)
             self.dlg.groupListWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             self.dlg.groupListWidget.setMinimumHeight(52)
-            self.dlg.groupListWidget.setMaximumHeight(72)
+            self.dlg.groupListWidget.setMaximumHeight(92)
             self.dlg.groupListWidget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             self.dlg.groupListWidget.setStyleSheet("font-size: 9pt;")
 
+        # FIX: import_las_slice_button aggiunto al loop di stile (era assente)
         for btn in [
             getattr(self, "load_groups_button", None),
+            getattr(self, "import_las_slice_button", None),
             getattr(self, "import_groups_button", None),
             getattr(self, "enhance_minmax_button", None),
             getattr(self, "enhance_batch_button", None),
@@ -547,6 +563,7 @@ class UiLayoutMixin:
             self.dlg.zoomSelectedGroupsButton,
             getattr(self, "import_groups_button", None),
             self.dlg.createGroupButton,
+            getattr(self, "import_las_slice_button", None),
             getattr(self, "enhance_minmax_button", None),
             getattr(self, "enhance_batch_button", None),
             getattr(self, "save_style_button", None),
@@ -584,7 +601,7 @@ class UiLayoutMixin:
 
         if self.tools_tabs is not None:
             self.tools_tabs.setStyleSheet(
-                "QTabBar::tab { font-size: 9pt; padding: 0px 4px; min-width: 48px; }"
+                "QTabBar::tab { font-size: 9pt; padding: 2px 6px; min-width: 52px; }"
             )
 
         for checkbox in (
@@ -658,9 +675,10 @@ class UiLayoutMixin:
             self.dlg.widget.setMinimumHeight(170)
             self.dlg.widget.setMaximumHeight(250)
             self.dlg.widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        # FIX: minHeight 116 >= dial(82) + spacing(6) + slider(22) + spacing(6) = 116
         if self.left_nav_widget is not None:
-            self.left_nav_widget.setMinimumHeight(104)
-            self.left_nav_widget.setMaximumHeight(124)
+            self.left_nav_widget.setMinimumHeight(116)
+            self.left_nav_widget.setMaximumHeight(136)
             self.left_nav_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         if hasattr(self.dlg, "line"):
             self.dlg.line.setFixedWidth(2)
@@ -774,6 +792,12 @@ class UiLayoutMixin:
         self._set_button_icon(getattr(self, "generate_coverage_button", None), "mActionAddGeometryCollection.svg", "mActionPolygonize.svg")
         self._set_button_icon(getattr(self, "help_button", None), "mActionHelpContents.svg", "mActionOptions.svg")
         self._set_button_icon(getattr(self, "export_button", None), "mActionSaveAs.svg", "mActionFileSave.svg")
+        # FIX: icona QGIS per il bottone Import LAS → Slice (era solo emoji)
+        self._set_button_icon(
+            getattr(self, "import_las_slice_button", None),
+            "mActionAddPointCloudLayer.svg",
+            "mActionFileOpen.svg",
+        )
 
     def _build_grid_options_controls(self):
         if self.dlg is None or not hasattr(self.dlg, "horizontalLayout_2"):
