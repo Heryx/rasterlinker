@@ -47,6 +47,7 @@ class GprVolumeMixin:
         total_valid_loaded = 0
         processed_files = 0
         failed_files = 0
+        last_z_min = None
 
         root = QgsProject.instance().layerTreeRoot()
 
@@ -118,10 +119,16 @@ class GprVolumeMixin:
                 for idx, child in enumerate(layer_nodes):
                     child.setItemVisibilityChecked(idx == 0)
                 processed_files += 1
+                last_z_min = z_min
             else:
                 failed_files += 1
 
         n = int(total_valid_loaded)
+        self._gpr_z_min = float(last_z_min) if last_z_min is not None else 0.0
+        self._gpr_z_step = float(z_step)
+        self._gpr_n_slices = n
+        self._gpr_pc_layer = None
+
         for control_name in ("Dial", "dial2"):
             control = getattr(self.dlg, control_name, None)
             if control is None:
