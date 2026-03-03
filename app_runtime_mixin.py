@@ -1,8 +1,13 @@
 import os
 
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QAbstractItemView, QDockWidget
-from PyQt5.QtWidgets import QPushButton, QSizePolicy, QCheckBox
+from qgis.PyQt.QtWidgets import (
+    QAbstractItemView,
+    QDockWidget,
+    QPushButton,
+    QSizePolicy,
+    QCheckBox,
+)
 from qgis.core import QgsMessageLog, Qgis
 
 from .geosurvey_studio_dialog import GeoSurveyStudioDialog
