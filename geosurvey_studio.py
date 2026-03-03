@@ -91,6 +91,11 @@ class GeoSurveyStudioPlugin(
         self._init_trace_info()
         self._init_trace_capture()
         self._init_update_checker()
+        # Stato volume GPR (inizializzazione sicura pre-dialogo)
+        self._gpr_pc_layer = None
+        self._gpr_z_min = 0.0
+        self._gpr_z_step = 0.05
+        self._gpr_n_slices = 0
 
     # Translation helper
     def tr(self, message):
