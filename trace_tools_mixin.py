@@ -14,6 +14,12 @@ from .project_catalog import load_catalog
 
 
 class TraceToolsMixin:
+    def _init_trace_tools(self):
+        """Initialise trace toolbar state. Called by the plugin constructor."""
+        self.trace_toolbar = None
+        self.trace_info_action = None
+        self.trace_toolbar_actions = {}
+
     def _layer_is_in_trace_group(self, layer):
         if layer is None:
             return False

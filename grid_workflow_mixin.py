@@ -30,6 +30,38 @@ from .layer_property_utils import get_layer_property, set_layer_property
 
 
 class GridWorkflowMixin:
+    def _init_grid_state(self):
+        """Initialise grid workflow state. Called by the plugin constructor."""
+        self.grid_use_snap = True
+        self.grid_snap_mode = "all"
+        self.grid_snap_tolerance = 12.0
+        self.grid_snap_units = "pixels"
+        self.grid_force_orthogonal = False
+        self.grid_relative_orthogonal = False
+        self.keep_source_polygon = True
+        self.grid_dimension_mode = "ask"
+        self.grid_internal_enabled = True
+        self.snap_checkbox = None
+        self.snap_mode_combo = None
+        self.snap_tolerance_spin = None
+        self.snap_units_combo = None
+        self.ortho_checkbox = None
+        self.ortho_base_checkbox = None
+        self.keep_area_checkbox = None
+        self.dimension_mode_combo = None
+        self.help_button = None
+        self.export_button = None
+        self.base_angle_label = None
+        self.length_label = None
+        self.orientation_status_label = None
+        self.orientation_helper_dialog = None
+        self.orientation_helper_status_label = None
+        self.orientation_helper_edits = {}
+        self._orientation_helper_syncing = False
+        self.internal_grid_checkbox = None
+        self.last_area_layer = None
+        self.last_grid_layer = None
+
     def _orientation_main_fields_map(self):
         dlg = getattr(self, "dlg", None)
         if dlg is None:
@@ -245,7 +277,6 @@ class GridWorkflowMixin:
         except Exception as e:
             QMessageBox.critical(self.dlg, "Error", f"Error while activating drawing tool: {e}")
 
-    
     def create_grid_from_drawn_polygon(self, polygon_layer):
         """
         Create a grid based on the polygon drawn by the user.
@@ -334,7 +365,6 @@ class GridWorkflowMixin:
 
         area_name = raw_value
         return area_name, f"{area_name}_cell"
-
 
     def _notify_info(self, message, duration=6):
         self.iface.messageBar().pushMessage("GeoSurvey Studio", message, level=Qgis.Info, duration=duration)
@@ -685,7 +715,7 @@ class GridWorkflowMixin:
             QMessageBox.No,
         )
         return answer == QMessageBox.Yes
-### Create Grid with picked points
+
     def activate_grid_selection_tool(self):
         """
         Activate tool to orient the grid from 3 canvas picks.
