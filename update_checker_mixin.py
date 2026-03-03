@@ -13,6 +13,11 @@ class UpdateCheckerMixin:
     _VERSION_RE = re.compile(r"(\d+(?:\.\d+){0,5})")
     _GITHUB_REPO_RE = re.compile(r"github\.com[:/]+([^/]+)/([^/#?]+)", re.IGNORECASE)
 
+    def _init_update_checker(self):
+        """Initialise update-checker state. Called by the plugin constructor."""
+        self.check_updates_action = None
+        self._update_checked_this_session = False
+
     def _update_settings_key(self, key):
         if hasattr(self, "_settings_key"):
             return self._settings_key(f"updates/{key}")

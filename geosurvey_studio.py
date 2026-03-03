@@ -34,7 +34,12 @@ class GeoSurveyStudioPlugin(
     """QGIS Plugin Implementation."""
 
     def __init__(self, iface):
-        """Constructor."""
+        """Constructor.
+
+        Core plugin identity and QGIS wiring are set here.
+        Domain-specific state is delegated to each mixin via _init_*() calls,
+        so that every mixin owns and documents its own attributes.
+        """
         self.iface = iface
         self.plugin_dir = os.path.dirname(__file__)
         self.actions = []
@@ -48,122 +53,17 @@ class GeoSurveyStudioPlugin(
         self.settings_group = "GeoSurveyStudio"
         self.settings_key_active_project = "GeoSurveyStudio/active_project_root"
         self.settings_key_default_import_crs = "GeoSurveyStudio/default_import_crs_authid"
-        self.grid_use_snap = True
-        self.grid_snap_mode = "all"
-        self.grid_snap_tolerance = 12.0
-        self.grid_snap_units = "pixels"
-        self.grid_force_orthogonal = False
-        self.grid_relative_orthogonal = False
-        self.keep_source_polygon = True
-        self.grid_dimension_mode = "ask"
-        self.grid_internal_enabled = True
-        self.snap_checkbox = None
-        self.snap_mode_combo = None
-        self.snap_tolerance_spin = None
-        self.snap_units_combo = None
-        self.ortho_checkbox = None
-        self.ortho_base_checkbox = None
-        self.keep_area_checkbox = None
-        self.dimension_mode_combo = None
-        self.help_button = None
-        self.export_button = None
-        self.base_angle_label = None
-        self.length_label = None
-        self.orientation_status_label = None
-        self.orientation_helper_dialog = None
-        self.orientation_helper_status_label = None
-        self.orientation_helper_edits = {}
-        self._orientation_helper_syncing = False
-        self.internal_grid_checkbox = None
-        self.name_raster_panel = None
-        self.name_raster_title = None
-        self.name_raster_lines = []
-        self.group_tools_label = None
-        self.image_tools_label = None
-        self.tools_tabs = None
-        self.tools_panel_widget = None
-        self.load_groups_button = None
-        self.generate_coverage_button = None
-        self.export_mode_combo = None
-        self.export_map_content_combo = None
-        self.export_theme_combo = None
-        self.export_coverage_mode_combo = None
-        self.export_page_size_combo = None
-        self.export_orientation_combo = None
-        self.export_dpi_combo = None
-        self.export_scale_spin = None
-        self.export_custom_unit_combo = None
-        self.export_custom_w_spin = None
-        self.export_custom_h_spin = None
-        self.bottom_controls_widget = None
-        self.dialog_main_layout = None
-        self.left_nav_widget = None
-        self._is_narrow_layout = None
-        self._is_short_layout = None
-        self.coord_x0_label = None
-        self.coord_x1_label = None
-        self.coord_y0_label = None
-        self.coord_y1_label = None
-        self.cell_x_label = None
-        self.cell_y_label = None
-        self.last_area_layer = None
-        self.last_grid_layer = None
-        self.pending_vector_storage_mode = None
-        self.project_manager_dialog = None
         self.plugin_layer_root_name = "GeoSurvey Studio"
-        self.trace_toolbar = None
-        self.trace_info_action = None
-        self.trace_toolbar_actions = {}
-        self.trace_line_layer_id = None
-        self.trace_connected_layer_ids = set()
-        self.trace_capture_context = None
-        self.trace_info_dock = None
-        self.trace_info_table = None
-        self.trace_info_model = None
-        self.trace_info_filter_edit = None
-        self.trace_info_filter_field_combo = None
-        self.trace_info_mode_combo = None
-        self.trace_info_sort_field_combo = None
-        self.trace_info_sort_order_combo = None
-        self.trace_info_depth_pick_combo = None
-        self.trace_info_depth_pick_btn = None
-        self.trace_depth_pick_mode = "off"
-        self.trace_info_stack = None
-        self.trace_info_form_list = None
-        self.trace_info_form_fields = {}
-        self.trace_info_vertex_table = None
-        self.trace_info_source_layer_id = None
-        self.trace_info_form_preview_combo = None
-        self.trace_info_form_preview_key = "timeslice"
-        self.trace_info_view_table_btn = None
-        self.trace_info_view_form_btn = None
-        self.trace_info_query_btn = None
-        self.trace_info_query_panel = None
-        self.trace_info_interpretation_prompt_action = None
-        self.trace_info_help_btn = None
-        self.trace_info_help_panel = None
-        self.trace_info_selection_guard = False
-        self.trace_info_is_docked = False
-        self.trace_info_saved_selected_fid = None
-        self.trace_info_saved_selected_trace_id = ""
-        self.trace_z_grid_cache = {}
-        self.trace_missing_z_prompt_shown = False
-        self.trace_allow_missing_z_for_session = False
-        self.trace_prompt_interpretation_popup = False
-        self.trace_interpretation_prompted_keys = set()
-        self.trace_interpretation_prompted_trace_ids = set()
-        self.trace_draw_session_state = "idle"
-        self.trace_postprocess_inflight = set()
-        self.trace_postprocess_done = set()
-        self.trace_postprocess_done_trace_ids = set()
-        self.trace_canvas_click_filter = None
-        self.trace_canvas_click_capture_enabled = False
-        self.trace_pending_vertex_clicks = []
-        self.trace_canvas_wheel_modifier = "alt"
-        self.trace_discard_outside_raster = False
-        self.trace_info_discard_outside_raster_action = None
-        self.check_updates_action = None
-        self._update_checked_this_session = False
+        self.project_manager_dialog = None
+        self.pending_vector_storage_mode = None
+
+        # Mixin state initialisation – each mixin owns and resets its own attributes.
+        self._init_grid_state()
+        self._init_ui_layout()
+        self._init_trace_tools()
+        self._init_trace_info()
+        self._init_trace_capture()
+        self._init_update_checker()
 
     # Translation helper
     def tr(self, message):
@@ -323,4 +223,3 @@ class GeoSurveyStudioPlugin(
             self.orientation_helper_edits = {}
             self._orientation_helper_syncing = False
         self.trace_z_grid_cache = {}
-
