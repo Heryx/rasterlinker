@@ -3,6 +3,7 @@ from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
     QLabel,
     QSizePolicy,
+    QScrollArea,
     QWidget,
     QTabWidget,
     QGridLayout,
@@ -120,7 +121,7 @@ class UiLayoutMixin:
         tabs.setDocumentMode(False)
         tabs.setUsesScrollButtons(False)
 
-        # ── TAB: Groups ────────────────────────────────────────────────────
+        # ── TAB: Groups ────────────────────────────────────────────────
         group_tab = QWidget(tabs)
         group_layout = QGridLayout(group_tab)
         group_layout.setContentsMargins(6, 6, 6, 6)
@@ -131,7 +132,6 @@ class UiLayoutMixin:
         group_layout.addWidget(self.dlg.zoomSelectedGroupsButton, 0, 1, 1, 1)
         group_layout.addWidget(self.import_groups_button, 1, 0, 1, 1)
         group_layout.addWidget(self.dlg.createGroupButton, 1, 1, 1, 1)
-        # FIX: rimosso emoji non portabile; icona aggiunta in _apply_button_icons()
         self.import_las_slice_button = QPushButton("Import LAS → Slice", group_tab)
         self.import_las_slice_button.setObjectName("importLasSliceButton")
         self.import_las_slice_button.setToolTip(
@@ -147,14 +147,9 @@ class UiLayoutMixin:
             group_layout.addWidget(self.dlg.groupNameEdit, 3, 0, 1, 2)
         group_layout.setColumnStretch(0, 1)
         group_layout.setColumnStretch(1, 1)
-        group_layout.setRowStretch(0, 0)
-        group_layout.setRowStretch(1, 0)
-        group_layout.setRowStretch(2, 0)
-        group_layout.setRowStretch(3, 0)
-        # elastic filler row
         group_layout.setRowStretch(4, 1)
 
-        # ── TAB: Images ────────────────────────────────────────────────────
+        # ── TAB: Images ────────────────────────────────────────────────
         image_tab = QWidget(tabs)
         image_layout = QGridLayout(image_tab)
         image_layout.setContentsMargins(6, 6, 6, 6)
@@ -166,104 +161,105 @@ class UiLayoutMixin:
         image_layout.addWidget(self.load_style_button, 1, 1, 1, 1)
         image_layout.setColumnStretch(0, 1)
         image_layout.setColumnStretch(1, 1)
-        image_layout.setRowStretch(0, 0)
-        image_layout.setRowStretch(1, 0)
         image_layout.setRowStretch(2, 1)
 
-        # ── TAB: Export ────────────────────────────────────────────────────
+        # ── TAB: Export (con QScrollArea per evitare taglio contenuto) ───
         export_tab = QWidget(tabs)
-        export_layout = QGridLayout(export_tab)
+        export_tab_outer = QVBoxLayout(export_tab)
+        export_tab_outer.setContentsMargins(0, 0, 0, 0)
+        export_tab_outer.setSpacing(0)
+
+        export_scroll = QScrollArea(export_tab)
+        export_scroll.setObjectName("exportScrollArea")
+        export_scroll.setWidgetResizable(True)
+        export_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        export_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        export_scroll.setFrameShape(QScrollArea.NoFrame)
+        export_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        export_tab_outer.addWidget(export_scroll)
+
+        export_inner = QWidget()
+        export_inner.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        export_scroll.setWidget(export_inner)
+
+        export_layout = QGridLayout(export_inner)
         export_layout.setContentsMargins(6, 6, 6, 6)
         export_layout.setHorizontalSpacing(8)
         export_layout.setVerticalSpacing(6)
 
-        export_layout.addWidget(QLabel("Output", export_tab), 0, 0, 1, 1)
-        self.export_mode_combo = QComboBox(export_tab)
-        self.export_mode_combo.addItems(
-            [
-                "Batch (single PDF)",
-                "Single visible image",
-            ]
-        )
+        export_layout.addWidget(QLabel("Output", export_inner), 0, 0, 1, 1)
+        self.export_mode_combo = QComboBox(export_inner)
+        self.export_mode_combo.addItems(["Batch (single PDF)", "Single visible image"])
         export_layout.addWidget(self.export_mode_combo, 0, 1, 1, 1)
 
-        export_layout.addWidget(QLabel("Coverage", export_tab), 1, 0, 1, 1)
-        self.export_coverage_mode_combo = QComboBox(export_tab)
+        export_layout.addWidget(QLabel("Coverage", export_inner), 1, 0, 1, 1)
+        self.export_coverage_mode_combo = QComboBox(export_inner)
         self.export_coverage_mode_combo.addItems(
-            [
-                "Use existing (keep edits)",
-                "Refresh from rasters",
-                "Create new coverage",
-            ]
+            ["Use existing (keep edits)", "Refresh from rasters", "Create new coverage"]
         )
         export_layout.addWidget(self.export_coverage_mode_combo, 1, 1, 1, 1)
 
-        export_layout.addWidget(QLabel("Map content", export_tab), 2, 0, 1, 1)
-        self.export_map_content_combo = QComboBox(export_tab)
+        export_layout.addWidget(QLabel("Map content", export_inner), 2, 0, 1, 1)
+        self.export_map_content_combo = QComboBox(export_inner)
         self.export_map_content_combo.addItems(
-            [
-                "Raster only",
-                "Current canvas view",
-                "Map theme",
-            ]
+            ["Raster only", "Current canvas view", "Map theme"]
         )
         export_layout.addWidget(self.export_map_content_combo, 2, 1, 1, 1)
 
-        export_layout.addWidget(QLabel("Theme", export_tab), 3, 0, 1, 1)
-        self.export_theme_combo = QComboBox(export_tab)
+        export_layout.addWidget(QLabel("Theme", export_inner), 3, 0, 1, 1)
+        self.export_theme_combo = QComboBox(export_inner)
         self.export_theme_combo.setEditable(False)
         export_layout.addWidget(self.export_theme_combo, 3, 1, 1, 1)
 
-        export_layout.addWidget(QLabel("Page", export_tab), 4, 0, 1, 1)
-        self.export_page_size_combo = QComboBox(export_tab)
+        export_layout.addWidget(QLabel("Page", export_inner), 4, 0, 1, 1)
+        self.export_page_size_combo = QComboBox(export_inner)
         self.export_page_size_combo.addItems(["A6", "A5", "A4", "A3", "A2", "A1", "Custom"])
         self.export_page_size_combo.setCurrentText("A4")
         export_layout.addWidget(self.export_page_size_combo, 4, 1, 1, 1)
 
-        export_layout.addWidget(QLabel("Orientation", export_tab), 5, 0, 1, 1)
-        self.export_orientation_combo = QComboBox(export_tab)
+        export_layout.addWidget(QLabel("Orientation", export_inner), 5, 0, 1, 1)
+        self.export_orientation_combo = QComboBox(export_inner)
         self.export_orientation_combo.addItems(["Landscape", "Portrait"])
         export_layout.addWidget(self.export_orientation_combo, 5, 1, 1, 1)
 
-        export_layout.addWidget(QLabel("DPI", export_tab), 6, 0, 1, 1)
-        self.export_dpi_combo = QComboBox(export_tab)
+        export_layout.addWidget(QLabel("DPI", export_inner), 6, 0, 1, 1)
+        self.export_dpi_combo = QComboBox(export_inner)
         self.export_dpi_combo.addItems(["150", "300", "600"])
         self.export_dpi_combo.setCurrentText("300")
         export_layout.addWidget(self.export_dpi_combo, 6, 1, 1, 1)
 
-        export_layout.addWidget(QLabel("Scale 1:n", export_tab), 7, 0, 1, 1)
-        self.export_scale_spin = QDoubleSpinBox(export_tab)
+        export_layout.addWidget(QLabel("Scale 1:n", export_inner), 7, 0, 1, 1)
+        self.export_scale_spin = QDoubleSpinBox(export_inner)
         self.export_scale_spin.setDecimals(2)
         self.export_scale_spin.setRange(1.0, 1e9)
         self.export_scale_spin.setSingleStep(100.0)
         self.export_scale_spin.setValue(1000.0)
         export_layout.addWidget(self.export_scale_spin, 7, 1, 1, 1)
 
-        export_layout.addWidget(QLabel("Custom unit", export_tab), 8, 0, 1, 1)
-        self.export_custom_unit_combo = QComboBox(export_tab)
+        export_layout.addWidget(QLabel("Custom unit", export_inner), 8, 0, 1, 1)
+        self.export_custom_unit_combo = QComboBox(export_inner)
         self.export_custom_unit_combo.addItems(["cm", "inch"])
         export_layout.addWidget(self.export_custom_unit_combo, 8, 1, 1, 1)
 
-        export_layout.addWidget(QLabel("Custom W", export_tab), 9, 0, 1, 1)
-        self.export_custom_w_spin = QDoubleSpinBox(export_tab)
+        export_layout.addWidget(QLabel("Custom W", export_inner), 9, 0, 1, 1)
+        self.export_custom_w_spin = QDoubleSpinBox(export_inner)
         self.export_custom_w_spin.setDecimals(2)
         self.export_custom_w_spin.setRange(0.1, 5000.0)
         self.export_custom_w_spin.setValue(21.0)
         export_layout.addWidget(self.export_custom_w_spin, 9, 1, 1, 1)
 
-        export_layout.addWidget(QLabel("Custom H", export_tab), 10, 0, 1, 1)
-        self.export_custom_h_spin = QDoubleSpinBox(export_tab)
+        export_layout.addWidget(QLabel("Custom H", export_inner), 10, 0, 1, 1)
+        self.export_custom_h_spin = QDoubleSpinBox(export_inner)
         self.export_custom_h_spin.setDecimals(2)
         self.export_custom_h_spin.setRange(0.1, 5000.0)
         self.export_custom_h_spin.setValue(29.7)
         export_layout.addWidget(self.export_custom_h_spin, 10, 1, 1, 1)
 
-        self.generate_coverage_button = QPushButton("Generate Coverage", export_tab)
+        self.generate_coverage_button = QPushButton("Generate Coverage", export_inner)
         export_layout.addWidget(self.generate_coverage_button, 11, 0, 1, 1)
         export_layout.addWidget(self.export_layout_button, 11, 1, 1, 1)
         export_layout.setColumnStretch(0, 0)
         export_layout.setColumnStretch(1, 1)
-        # FIX: riga elastica alla fine per evitare stretch anomalo delle righe contenuto
         export_layout.setRowStretch(12, 1)
 
         tabs.addTab(group_tab, "Groups")
@@ -271,10 +267,10 @@ class UiLayoutMixin:
         tabs.addTab(export_tab, "Export")
         tabs.tabBar().setExpanding(False)
         tabs.tabBar().setElideMode(Qt.ElideRight)
-        tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        # FIX: altezze aumentate per contenere 4 righe nel tab Groups + tab bar (HiDPI)
+        # Expanding verticalmente: si adatta all'altezza disponibile del dock
+        tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         tabs.setMinimumHeight(148)
-        tabs.setMaximumHeight(252)
+        # Nessun maxHeight rigido: il tab si espande liberamente
 
         if self.group_tools_label is not None:
             self.group_tools_label.hide()
@@ -287,19 +283,19 @@ class UiLayoutMixin:
         tools_layout = QVBoxLayout(tools_panel)
         tools_layout.setContentsMargins(12, 0, 0, 0)
         tools_layout.setSpacing(6)
-        tools_layout.addWidget(tabs, 0, Qt.AlignTop)
+        tools_layout.addWidget(tabs, 1)  # stretch=1: il tab occupa tutto lo spazio verticale disponibile
         self.tools_panel_layout = tools_layout
-        tools_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        # Expanding in verticale: il pannello destro si allarga con il dock
+        tools_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.tools_panel_widget = tools_panel
         self.tools_tabs = tabs
+
         if self.export_page_size_combo is not None:
             self.export_page_size_combo.currentTextChanged.connect(self._on_export_page_size_changed)
             self._on_export_page_size_changed(self.export_page_size_combo.currentText())
-
         if self.export_map_content_combo is not None:
             self.export_map_content_combo.currentTextChanged.connect(self._on_export_map_content_changed)
             self._on_export_map_content_changed(self.export_map_content_combo.currentText())
-
         if self.generate_coverage_button is not None:
             self.generate_coverage_button.clicked.connect(self.generate_atlas_coverage_from_export_tab)
 
@@ -455,7 +451,6 @@ class UiLayoutMixin:
         right_spacer = QWidget(panel)
         right_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         panel_layout.addWidget(right_spacer, 0, 2, 1, 1)
-
         panel_layout.setColumnStretch(0, 0)
         panel_layout.setColumnStretch(1, 0)
         panel_layout.setColumnStretch(2, 1)
@@ -481,29 +476,24 @@ class UiLayoutMixin:
             vl = self.dlg.verticalLayout_3
             vl.removeWidget(self.dlg.widget)
             vl.removeWidget(self.left_nav_widget)
-            # FIX: inserimento per riferimento invece di indice hardcoded 4
-            # Il nav widget va dopo l'ultimo widget gia' presente (groupListWidget)
             vl.addWidget(self.left_nav_widget)
 
         if hasattr(self.dlg, "gridLayout_3") and getattr(self, "tools_panel_widget", None) is not None:
-            self.dlg.gridLayout_3.addWidget(self.tools_panel_widget, 0, 2, 1, 2, Qt.AlignTop)
+            # Nessun Qt.AlignTop: il pannello destro deve espandersi verticalmente
+            self.dlg.gridLayout_3.addWidget(self.tools_panel_widget, 0, 2, 1, 2)
         if getattr(self, "tools_panel_layout", None) is not None and hasattr(self.dlg, "widget"):
             self.dlg.widget.setParent(self.tools_panel_widget)
             self.dlg.widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-            self.dlg.widget.setMinimumWidth(250)
+            self.dlg.widget.setMinimumWidth(170)
             self.dlg.widget.setMinimumHeight(170)
             self.dlg.widget.setMaximumHeight(250)
             self.tools_panel_layout.removeWidget(self.dlg.widget)
             self.tools_panel_layout.addWidget(self.dlg.widget, 0, Qt.AlignTop)
 
     def _tune_visual_layout(self):
-        button_style = (
-            "font-size: 9pt; "
-            "padding: 4px 8px;"
-        )
+        button_style = "font-size: 9pt; padding: 4px 8px;"
         label_style = "color: #202020; font-size: 9pt;"
 
-        # FIX: dial ridotto leggermente per dare spazio alle liste
         self.dlg.dial2.setMinimumSize(82, 82)
         self.dlg.dial2.setMaximumSize(100, 100)
         self.dlg.dial2.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
@@ -511,23 +501,21 @@ class UiLayoutMixin:
         self.dlg.Dial.setMinimumHeight(18)
         self.dlg.Dial.setMaximumHeight(22)
 
-        # FIX: altezze liste aumentate per usabilita' con molte slice GPR
         if hasattr(self.dlg, "rasterListWidget"):
-            self.dlg.rasterListWidget.setMinimumWidth(220)
+            self.dlg.rasterListWidget.setMinimumWidth(140)
             self.dlg.rasterListWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             self.dlg.rasterListWidget.setMinimumHeight(60)
             self.dlg.rasterListWidget.setMaximumHeight(108)
             self.dlg.rasterListWidget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             self.dlg.rasterListWidget.setStyleSheet("font-size: 9pt;")
         if hasattr(self.dlg, "groupListWidget"):
-            self.dlg.groupListWidget.setMinimumWidth(220)
+            self.dlg.groupListWidget.setMinimumWidth(140)
             self.dlg.groupListWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             self.dlg.groupListWidget.setMinimumHeight(52)
             self.dlg.groupListWidget.setMaximumHeight(92)
             self.dlg.groupListWidget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             self.dlg.groupListWidget.setStyleSheet("font-size: 9pt;")
 
-        # FIX: import_las_slice_button aggiunto al loop di stile (era assente)
         for btn in [
             getattr(self, "load_groups_button", None),
             getattr(self, "import_las_slice_button", None),
@@ -542,8 +530,8 @@ class UiLayoutMixin:
             self.dlg.createGroupButton,
         ]:
             if btn is not None:
-                btn.setMinimumHeight(30)
-                btn.setMinimumWidth(108)
+                btn.setMinimumHeight(28)
+                btn.setMinimumWidth(96)
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 btn.setStyleSheet(button_style)
                 btn.setIconSize(QSize(16, 16))
@@ -558,75 +546,53 @@ class UiLayoutMixin:
                 btn.setStyleSheet(button_style)
                 btn.setIconSize(QSize(16, 16))
 
-        for btn in [
-            getattr(self, "load_groups_button", None),
-            getattr(self, "import_las_slice_button", None),
-            self.dlg.zoomSelectedGroupsButton,
-            getattr(self, "import_groups_button", None),
-            self.dlg.createGroupButton,
-            getattr(self, "import_las_slice_button", None),
-            getattr(self, "enhance_minmax_button", None),
-            getattr(self, "enhance_batch_button", None),
-            getattr(self, "save_style_button", None),
-            getattr(self, "load_style_button", None),
-            getattr(self, "export_layout_button", None),
-            getattr(self, "generate_coverage_button", None),
-        ]:
-            if btn is not None:
-                btn.setMinimumHeight(28)
-                btn.setMinimumWidth(96)
-
         if hasattr(self.dlg, "lineEditAreaNames"):
             self.dlg.lineEditAreaNames.setStyleSheet("font-size: 9pt; padding: 2px 4px;")
             self.dlg.lineEditAreaNames.setMinimumHeight(24)
         if self.internal_grid_checkbox is not None:
             self.internal_grid_checkbox.setStyleSheet(label_style)
 
-        for edit_name in ("lineEditX0Y0", "lineEditX1Y0", "lineEditY0", "lineEditX0Y1", "lineEditDistanceX", "lineEditDistanceY", "groupNameEdit"):
+        for edit_name in ("lineEditX0Y0", "lineEditX1Y0", "lineEditY0", "lineEditX0Y1",
+                          "lineEditDistanceX", "lineEditDistanceY", "groupNameEdit"):
             edit = getattr(self.dlg, edit_name, None)
             if edit is not None:
                 edit.setMinimumHeight(24)
                 edit.setStyleSheet("font-size: 9pt; padding: 2px 4px;")
 
         for label in (
-            self.coord_x0_label,
-            self.coord_x1_label,
-            self.coord_y0_label,
-            self.coord_y1_label,
-            self.cell_x_label,
-            self.cell_y_label,
+            self.coord_x0_label, self.coord_x1_label,
+            self.coord_y0_label, self.coord_y1_label,
+            self.cell_x_label, self.cell_y_label,
         ):
             if label is not None:
                 label.setStyleSheet(label_style)
-        self._on_internal_grid_toggled(self.internal_grid_checkbox.isChecked() if self.internal_grid_checkbox is not None else True)
+
+        self._on_internal_grid_toggled(
+            self.internal_grid_checkbox.isChecked() if self.internal_grid_checkbox is not None else True
+        )
 
         if self.tools_tabs is not None:
             self.tools_tabs.setStyleSheet(
                 "QTabBar::tab { font-size: 9pt; padding: 2px 6px; min-width: 52px; }"
             )
 
-        for checkbox in (
-            self.snap_checkbox,
-            self.ortho_checkbox,
-            self.ortho_base_checkbox,
-            self.keep_area_checkbox,
-        ):
+        for checkbox in (self.snap_checkbox, self.ortho_checkbox,
+                         self.ortho_base_checkbox, self.keep_area_checkbox):
             if checkbox is not None:
                 checkbox.setStyleSheet("color: #202020; font-size: 9pt;")
-        for input_widget in (
-            self.snap_mode_combo,
-            self.snap_tolerance_spin,
-            self.snap_units_combo,
-            self.dimension_mode_combo,
-        ):
+
+        for input_widget in (self.snap_mode_combo, self.snap_tolerance_spin,
+                             self.snap_units_combo, self.dimension_mode_combo):
             if input_widget is not None:
                 input_widget.setMinimumHeight(22)
                 input_widget.setStyleSheet("font-size: 9pt;")
+
         for aux_btn in (self.help_button, self.export_button):
             if aux_btn is not None:
                 aux_btn.setMinimumHeight(26)
                 aux_btn.setMinimumWidth(86)
                 aux_btn.setStyleSheet(button_style)
+
         for export_widget in (
             getattr(self, "export_mode_combo", None),
             getattr(self, "export_coverage_mode_combo", None),
@@ -651,19 +617,21 @@ class UiLayoutMixin:
             self.dlg.gridLayout.setColumnStretch(1, 1)
             self.dlg.gridLayout.setContentsMargins(0, 0, 0, 0)
             self.dlg.gridLayout.setRowStretch(0, 0)
+
         if hasattr(self.dlg, "gridLayout_3"):
             self.dlg.gridLayout_3.setHorizontalSpacing(10)
             self.dlg.gridLayout_3.setVerticalSpacing(8)
-            self.dlg.gridLayout_3.setColumnStretch(0, 8)
+            self.dlg.gridLayout_3.setColumnStretch(0, 4)
             self.dlg.gridLayout_3.setColumnStretch(1, 0)
-            self.dlg.gridLayout_3.setColumnStretch(2, 6)
+            self.dlg.gridLayout_3.setColumnStretch(2, 3)
             self.dlg.gridLayout_3.setColumnStretch(3, 0)
             if getattr(self, "tools_panel_widget", None) is not None:
-                self.dlg.gridLayout_3.addWidget(self.tools_panel_widget, 0, 2, 1, 2, Qt.AlignTop)
-            self.dlg.gridLayout_3.setRowStretch(0, 0)
+                self.dlg.gridLayout_3.addWidget(self.tools_panel_widget, 0, 2, 1, 2)
+            self.dlg.gridLayout_3.setRowStretch(0, 1)  # riga 0 si espande
             self.dlg.gridLayout_3.setRowStretch(1, 0)
             self.dlg.gridLayout_3.setRowStretch(2, 0)
-            self.dlg.gridLayout_3.setRowStretch(3, 1)
+            self.dlg.gridLayout_3.setRowStretch(3, 0)
+
         if hasattr(self.dlg, "verticalLayout_3"):
             self.dlg.verticalLayout_3.setContentsMargins(0, 0, 6, 0)
             self.dlg.verticalLayout_3.setSpacing(2)
@@ -672,18 +640,21 @@ class UiLayoutMixin:
                     self.dlg.verticalLayout_3.setStretch(idx, 0)
                 except Exception:
                     pass
+
         if hasattr(self.dlg, "widget"):
             self.dlg.widget.setMinimumHeight(170)
             self.dlg.widget.setMaximumHeight(250)
             self.dlg.widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        # FIX: minHeight 116 >= dial(82) + spacing(6) + slider(22) + spacing(6) = 116
+
         if self.left_nav_widget is not None:
             self.left_nav_widget.setMinimumHeight(116)
             self.left_nav_widget.setMaximumHeight(136)
             self.left_nav_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
         if hasattr(self.dlg, "line"):
             self.dlg.line.setFixedWidth(2)
             self.dlg.line.setStyleSheet("color: #9a9a9a;")
+
         if self.bottom_controls_widget is None:
             self._build_bottom_controls_layout()
 
@@ -780,11 +751,7 @@ class UiLayoutMixin:
         self._set_button_icon(getattr(self.dlg, "zoomSelectedGroupsButton", None), "mActionZoomToSelected.svg", "mActionZoomFullExtent.svg")
         self._set_button_icon(getattr(self, "import_groups_button", None), "mActionOptions.svg", "mActionPropertiesWidget.svg")
         self._set_button_icon(getattr(self.dlg, "createGridButton", None), "mActionCapturePolygon.svg", "mActionNewVectorLayer.svg")
-        self._set_button_icon(
-            getattr(self.dlg, "selectGridPointsButton", None),
-            "mActionCaptureLine.svg",
-            "mActionMoveVertex.svg",
-        )
+        self._set_button_icon(getattr(self.dlg, "selectGridPointsButton", None), "mActionCaptureLine.svg", "mActionMoveVertex.svg")
         self._set_button_icon(getattr(self, "enhance_minmax_button", None), "mActionRasterHistogram.svg", "mActionOptions.svg")
         self._set_button_icon(getattr(self, "enhance_batch_button", None), "mActionRasterHistogram.svg", "mActionFilter2.svg")
         self._set_button_icon(getattr(self, "save_style_button", None), "mActionFileSave.svg", "mActionSaveAs.svg")
@@ -793,7 +760,6 @@ class UiLayoutMixin:
         self._set_button_icon(getattr(self, "generate_coverage_button", None), "mActionAddGeometryCollection.svg", "mActionPolygonize.svg")
         self._set_button_icon(getattr(self, "help_button", None), "mActionHelpContents.svg", "mActionOptions.svg")
         self._set_button_icon(getattr(self, "export_button", None), "mActionSaveAs.svg", "mActionFileSave.svg")
-        # FIX: icona QGIS per il bottone Import LAS → Slice (era solo emoji)
         self._set_button_icon(
             getattr(self, "import_las_slice_button", None),
             "mActionAddPointCloudLayer.svg",
