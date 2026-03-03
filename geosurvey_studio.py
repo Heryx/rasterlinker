@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """GeoSurvey Studio plugin entrypoint and GUI lifecycle."""
 
+import os.path
+
 from qgis.PyQt.QtCore import QSettings, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
@@ -16,8 +18,6 @@ from .grid_workflow_mixin import GridWorkflowMixin
 from .ui_layout_mixin import UiLayoutMixin
 from .app_runtime_mixin import AppRuntimeMixin
 from .update_checker_mixin import UpdateCheckerMixin
-
-import os.path
 
 try:
     from .resources import *  # noqa: F401,F403
