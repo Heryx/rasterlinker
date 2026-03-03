@@ -43,6 +43,28 @@ from .trace_storage_mixin import TraceStorageMixin
 
 
 class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin):
+    def _init_trace_capture(self):
+        """Initialise trace capture state. Called by the plugin constructor."""
+        self.trace_line_layer_id = None
+        self.trace_connected_layer_ids = set()
+        self.trace_capture_context = None
+        self.trace_vertex_context_capture = {}
+        self.trace_z_grid_cache = {}
+        self.trace_missing_z_prompt_shown = False
+        self.trace_allow_missing_z_for_session = False
+        self.trace_prompt_interpretation_popup = False
+        self.trace_interpretation_prompted_keys = set()
+        self.trace_interpretation_prompted_trace_ids = set()
+        self.trace_draw_session_state = "idle"
+        self.trace_postprocess_inflight = set()
+        self.trace_postprocess_done = set()
+        self.trace_postprocess_done_trace_ids = set()
+        self.trace_canvas_click_filter = None
+        self.trace_canvas_click_capture_enabled = False
+        self.trace_pending_vertex_clicks = []
+        self.trace_canvas_wheel_modifier = "alt"
+        self.trace_discard_outside_raster = False
+
     def _trace_debug_enabled(self):
         try:
             raw_local = getattr(self, "trace_debug_logging", None)
