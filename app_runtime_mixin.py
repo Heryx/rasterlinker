@@ -10,6 +10,78 @@ from .project_manager_dialog import ProjectManagerDialog
 
 
 class AppRuntimeMixin:
+    def _apply_section_size_profile(self, is_narrow, is_short):
+        """Apply a consistent size profile for all major sections.
+
+        This is the single source of truth for section heights, preventing
+        conflicting constraints between mixins.
+        """
+        if self.dlg is None:
+            return
+        export_active = False
+        try:
+            tabs = getattr(self, "tools_tabs", None)
+            if tabs is not None and tabs.currentIndex() >= 0:
+                export_active = "export" in tabs.tabText(tabs.currentIndex()).strip().lower()
+        except Exception:
+            export_active = False
+
+        if is_narrow:
+            raster_h = 74
+            group_h = 68
+            dial_size = 102
+            left_nav_min, left_nav_max = 112, 132
+            tabs_min, tabs_max = 158, 218
+            drawopt_min, drawopt_max = 182, 236
+            bottom_min, bottom_max = 112, 132
+        elif is_short:
+            raster_h = 78
+            group_h = 72
+            dial_size = 104
+            left_nav_min, left_nav_max = 116, 136
+            tabs_min, tabs_max = 160, 222
+            drawopt_min, drawopt_max = 184, 240
+            bottom_min, bottom_max = 116, 136
+        else:
+            raster_h = 86
+            group_h = 80
+            dial_size = 112
+            left_nav_min, left_nav_max = 124, 146
+            tabs_min, tabs_max = 164, 226
+            drawopt_min, drawopt_max = 188, 246
+            bottom_min, bottom_max = 120, 142
+
+        # Export tab needs much more vertical space than Groups/Images.
+        if export_active:
+            tabs_min += 120
+            tabs_max += 180
+
+        try:
+            if hasattr(self.dlg, "rasterListWidget"):
+                self.dlg.rasterListWidget.setMinimumHeight(raster_h)
+                self.dlg.rasterListWidget.setMaximumHeight(raster_h)
+            if hasattr(self.dlg, "groupListWidget"):
+                self.dlg.groupListWidget.setMinimumHeight(group_h)
+                self.dlg.groupListWidget.setMaximumHeight(group_h)
+            if hasattr(self.dlg, "dial2"):
+                self.dlg.dial2.setFixedSize(dial_size, dial_size)
+            if hasattr(self.dlg, "Dial"):
+                self.dlg.Dial.setFixedHeight(20)
+            if getattr(self, "left_nav_widget", None) is not None:
+                self.left_nav_widget.setMinimumHeight(left_nav_min)
+                self.left_nav_widget.setMaximumHeight(left_nav_max)
+            if getattr(self, "tools_tabs", None) is not None:
+                self.tools_tabs.setMinimumHeight(tabs_min)
+                self.tools_tabs.setMaximumHeight(tabs_max)
+            if hasattr(self.dlg, "widget"):
+                self.dlg.widget.setMinimumHeight(drawopt_min)
+                self.dlg.widget.setMaximumHeight(drawopt_max)
+            if getattr(self, "bottom_controls_widget", None) is not None:
+                self.bottom_controls_widget.setMinimumHeight(bottom_min)
+                self.bottom_controls_widget.setMaximumHeight(bottom_max)
+        except Exception:
+            pass
+
     def _layout_debug_enabled(self):
         """Enable layout debug logs when GEOSURVEY_LAYOUT_DEBUG=1."""
         return str(os.environ.get("GEOSURVEY_LAYOUT_DEBUG", "")).strip().lower() in ("1", "true", "yes", "on")
@@ -313,7 +385,7 @@ class AppRuntimeMixin:
             gl3.setRowStretch(1, 0)
             gl3.setRowStretch(2, 0)
             gl3.setRowStretch(3, 1)
-            # Heights/sizes are managed in ui_layout_mixin (single source of truth).
+            self._apply_section_size_profile(is_narrow=is_narrow, is_short=is_short)
         else:
             # Restore wide two-column layout.
             gl3.addLayout(self.dlg.verticalLayout_3, 0, 0, 1, 1, Qt.AlignTop)
@@ -333,7 +405,7 @@ class AppRuntimeMixin:
             gl3.setRowStretch(1, 0)
             gl3.setRowStretch(2, 0)
             gl3.setRowStretch(3, 1)
-            # Heights/sizes are managed in ui_layout_mixin (single source of truth).
+            self._apply_section_size_profile(is_narrow=is_narrow, is_short=is_short)
         self._is_narrow_layout = is_narrow
         self._is_short_layout = is_short
         self._layout_debug_log("responsive-applied")

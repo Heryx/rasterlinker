@@ -79,9 +79,9 @@ class UiLayoutMixin:
 
         group_tab = QWidget(tabs)
         group_layout = QGridLayout(group_tab)
-        group_layout.setContentsMargins(6, 6, 6, 6)
+        group_layout.setContentsMargins(8, 8, 8, 8)
         group_layout.setHorizontalSpacing(8)
-        group_layout.setVerticalSpacing(6)
+        group_layout.setVerticalSpacing(8)
         if self.load_groups_button is not None:
             group_layout.addWidget(self.load_groups_button, 0, 0, 1, 1)
         group_layout.addWidget(self.dlg.zoomSelectedGroupsButton, 0, 1, 1, 1)
@@ -98,9 +98,9 @@ class UiLayoutMixin:
 
         image_tab = QWidget(tabs)
         image_layout = QGridLayout(image_tab)
-        image_layout.setContentsMargins(6, 6, 6, 6)
+        image_layout.setContentsMargins(8, 8, 8, 8)
         image_layout.setHorizontalSpacing(8)
-        image_layout.setVerticalSpacing(6)
+        image_layout.setVerticalSpacing(8)
         image_layout.addWidget(self.enhance_minmax_button, 0, 0, 1, 1)
         image_layout.addWidget(self.enhance_batch_button, 0, 1, 1, 1)
         image_layout.addWidget(self.save_style_button, 1, 0, 1, 1)
@@ -113,9 +113,9 @@ class UiLayoutMixin:
 
         export_tab = QWidget(tabs)
         export_layout = QGridLayout(export_tab)
-        export_layout.setContentsMargins(6, 6, 6, 6)
+        export_layout.setContentsMargins(8, 8, 8, 8)
         export_layout.setHorizontalSpacing(8)
-        export_layout.setVerticalSpacing(6)
+        export_layout.setVerticalSpacing(7)
 
         export_layout.addWidget(QLabel("Output", export_tab), 0, 0, 1, 1)
         self.export_mode_combo = QComboBox(export_tab)
@@ -210,9 +210,9 @@ class UiLayoutMixin:
         tabs.addTab(export_tab, "Export")
         tabs.tabBar().setExpanding(False)
         tabs.tabBar().setElideMode(Qt.ElideRight)
-        tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tabs.setMinimumHeight(120)
-        tabs.setMaximumHeight(210)
+        tabs.setMaximumHeight(520)
 
         if self.group_tools_label is not None:
             self.group_tools_label.hide()
@@ -230,6 +230,7 @@ class UiLayoutMixin:
         tools_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.tools_panel_widget = tools_panel
         self.tools_tabs = tabs
+        self.tools_tabs.currentChanged.connect(lambda _i: self._apply_responsive_main_layout(self.dlg.width()))
         if self.export_page_size_combo is not None:
             self.export_page_size_combo.currentTextChanged.connect(self._on_export_page_size_changed)
             self._on_export_page_size_changed(self.export_page_size_combo.currentText())
@@ -293,8 +294,8 @@ class UiLayoutMixin:
         panel = QWidget(self.dlg)
         panel.setObjectName("gridDefinitionPanel")
         panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        panel.setMinimumHeight(128)
-        panel.setMaximumHeight(176)
+        panel.setMinimumHeight(116)
+        panel.setMaximumHeight(148)
         panel_layout = QGridLayout(panel)
         panel_layout.setContentsMargins(4, 4, 4, 4)
         panel_layout.setHorizontalSpacing(8)
@@ -460,21 +461,16 @@ class UiLayoutMixin:
         self.dlg.dial2.setNotchTarget(2.0)
         self.dlg.Dial.setMinimumHeight(18)
         self.dlg.Dial.setMaximumHeight(22)
-        # Left lists sizing (Raster/Group). If these look different than expected,
-        # check app_runtime_mixin._apply_responsive_main_layout too: it can override
-        # these values on startup/resize.
+        # Left list widths are fixed here; heights are managed only in
+        # app_runtime_mixin._apply_responsive_main_layout (single source of truth).
         if hasattr(self.dlg, "rasterListWidget"):
             self.dlg.rasterListWidget.setMinimumWidth(220)
             self.dlg.rasterListWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            self.dlg.rasterListWidget.setMinimumHeight(56)
-            self.dlg.rasterListWidget.setMaximumHeight(78)
             self.dlg.rasterListWidget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             self.dlg.rasterListWidget.setStyleSheet("font-size: 9pt;")
         if hasattr(self.dlg, "groupListWidget"):
             self.dlg.groupListWidget.setMinimumWidth(220)
             self.dlg.groupListWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            self.dlg.groupListWidget.setMinimumHeight(52)
-            self.dlg.groupListWidget.setMaximumHeight(72)
             self.dlg.groupListWidget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             self.dlg.groupListWidget.setStyleSheet("font-size: 9pt;")
 
@@ -492,7 +488,7 @@ class UiLayoutMixin:
             self.dlg.createGroupButton,
         ]:
             if btn is not None:
-                btn.setMinimumHeight(30)
+                btn.setFixedHeight(34)
                 btn.setMinimumWidth(108)
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 btn.setStyleSheet(button_style)
@@ -519,12 +515,20 @@ class UiLayoutMixin:
             getattr(self, "enhance_batch_button", None),
             getattr(self, "save_style_button", None),
             getattr(self, "load_style_button", None),
-            getattr(self, "export_layout_button", None),
-            getattr(self, "generate_coverage_button", None),
         ]:
             if btn is not None:
-                btn.setMinimumHeight(28)
+                btn.setFixedHeight(34)
                 btn.setMinimumWidth(96)
+
+        # Keep export action buttons readable: do not over-compact these.
+        if getattr(self, "generate_coverage_button", None) is not None:
+            self.generate_coverage_button.setFixedHeight(34)
+            self.generate_coverage_button.setMinimumWidth(152)
+            self.generate_coverage_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        if getattr(self, "export_layout_button", None) is not None:
+            self.export_layout_button.setFixedHeight(34)
+            self.export_layout_button.setMinimumWidth(132)
+            self.export_layout_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         if hasattr(self.dlg, "lineEditAreaNames"):
             self.dlg.lineEditAreaNames.setStyleSheet("font-size: 9pt; padding: 2px 4px;")
@@ -574,7 +578,7 @@ class UiLayoutMixin:
                 input_widget.setStyleSheet("font-size: 9pt;")
         for aux_btn in (self.help_button, self.export_button):
             if aux_btn is not None:
-                aux_btn.setMinimumHeight(26)
+                aux_btn.setFixedHeight(30)
                 aux_btn.setMinimumWidth(86)
                 aux_btn.setStyleSheet(button_style)
         for export_widget in (
@@ -626,6 +630,10 @@ class UiLayoutMixin:
                     self.dlg.verticalLayout_3.setStretch(idx, 0)
                 except Exception:
                     pass
+        if hasattr(self.dlg, "labelSelezionaRaster"):
+            self.dlg.labelSelezionaRaster.setContentsMargins(0, 0, 0, 0)
+        if hasattr(self.dlg, "labelseleziona"):
+            self.dlg.labelseleziona.setContentsMargins(0, 0, 0, 0)
         # Drawing Options sizing. This is the box titled "Drawing Options".
         if hasattr(self.dlg, "widget"):
             self.dlg.widget.setMinimumHeight(170)
