@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""GPR LAS volume import: NetCDF UGRID mesh (primary) or multiband GeoTIFF (fallback)."""
+"""
+GPR LAS volume import – integrates with the project catalog exactly like
+timeslices: output goes to timeslices_2d/<group_name>/, slices are registered
+in the catalog, and the existing dial / update_visibility_with_dial works
+without any modification.
+"""
 
 import os
 
@@ -10,28 +15,15 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QFormLayout,
     QDoubleSpinBox,
+    QLineEdit,
     QDialogButtonBox,
     QLabel,
+    QCheckBox,
 )
-from qgis.core import (
-    QgsProject,
-    QgsMeshLayer,
-    QgsRasterLayer,
-    QgsSingleBandGrayRenderer,
-    QgsContrastEnhancement,
-)
+from qgis.core import QgsProject
 
 
 class GprVolumeMixin:
-
-    # ------------------------------------------------------------------
-    # State initialisation (called by geosurvey_studio.py constructor)
-    # ------------------------------------------------------------------
-
-    # _gpr_mesh_layer    : QgsMeshLayer | None
-    # _gpr_raster_layer  : QgsRasterLayer | None
-    # _gpr_z_levels      : list[float]
-    # _gpr_use_mesh      : bool
 
     # ------------------------------------------------------------------
     # Internal helpers: project root & existing volumes
@@ -55,111 +47,114 @@ class GprVolumeMixin:
             return []
         result = []
         for name in sorted(os.listdir(volumes_dir)):
-            low = name.lower()
-            if low.endswith(".las") or low.endswith(".laz"):
+            if name.lower().endswith((".las", ".laz")):
                 result.append(os.path.join(volumes_dir, name))
         return result
 
     # ------------------------------------------------------------------
-    # Smart file picker: checks volumes_3d of active project first
+    # Smart file picker (Case A/B/C)
     # ------------------------------------------------------------------
 
     def _pick_las_files_for_slicing(self) -> list:
-        """
-        Case A – no active project / missing volumes_3d  → plain file picker.
-        Case B – volumes_3d exists but empty             → warn + optional picker.
-        Case C – volumes_3d has files                    → ask existing/new/cancel.
-        """
         project_root = self._gpr_active_project_root()
         existing = self._gpr_volumes_in_project(project_root)
         volumes_dir = os.path.join(project_root, "volumes_3d") if project_root else ""
 
-        # Case A
+        # Case A – no project / no volumes_3d
         if not project_root or not os.path.isdir(volumes_dir):
             paths, _ = QFileDialog.getOpenFileNames(
-                self.dlg, "Seleziona file COPC/LAS/LAZ", "",
+                self.dlg, "Seleziona file LAS/LAZ", "",
                 "Point Cloud (*.copc.laz *.las *.laz)",
             )
             return paths or []
 
-        # Case B
+        # Case B – folder exists but empty
         if not existing:
             ans = QMessageBox.question(
                 self.dlg, "Nessun volume nel progetto",
-                f"Nessun file LAS/LAZ trovato in:\n{volumes_dir}\n\n"
-                "Importa prima un LAS/LAZ dal Project Manager per catalogarlo.\n\n"
+                f"Nessun file LAS/LAZ in:\n{volumes_dir}\n\n"
+                "Importa prima un LAS dal Project Manager per catalogarlo.\n\n"
                 "Vuoi comunque selezionare un file da disco adesso?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if ans != QMessageBox.Yes:
                 return []
             paths, _ = QFileDialog.getOpenFileNames(
-                self.dlg, "Seleziona file COPC/LAS/LAZ", "",
+                self.dlg, "Seleziona file LAS/LAZ", "",
                 "Point Cloud (*.copc.laz *.las *.laz)",
             )
             return paths or []
 
-        # Case C
+        # Case C – volumes present
         n = len(existing)
         preview = "\n".join(f"  \u2022 {os.path.basename(p)}" for p in existing[:10])
         if n > 10:
             preview += f"\n  \u2026 e altri {n - 10}"
-
         msg = QMessageBox(self.dlg)
-        msg.setWindowTitle("Volumi disponibili nel progetto")
+        msg.setWindowTitle("Volumi nel progetto")
         msg.setText(
             f"Trovati {n} volume/i in:\n{volumes_dir}\n\n{preview}\n\n"
-            "Vuoi usare un volume esistente oppure importarne uno nuovo?"
+            "Usa un volume esistente o importa un file nuovo?"
         )
         msg.setIcon(QMessageBox.Question)
-        btn_existing = msg.addButton("\U0001f4c2  Usa volume dal progetto", QMessageBox.AcceptRole)
+        btn_ex  = msg.addButton("\U0001f4c2  Usa volume dal progetto", QMessageBox.AcceptRole)
         btn_new = msg.addButton("\U0001f4e5  Importa file nuovo", QMessageBox.ActionRole)
         msg.addButton(QMessageBox.Cancel)
         msg.exec_()
         clicked = msg.clickedButton()
-
-        if clicked == btn_existing:
+        if clicked == btn_ex:
             paths, _ = QFileDialog.getOpenFileNames(
-                self.dlg, "Seleziona volume da volumes_3d", volumes_dir,
+                self.dlg, "Seleziona volume", volumes_dir,
                 "Point Cloud (*.copc.laz *.las *.laz)",
             )
             return paths or []
         if clicked == btn_new:
             paths, _ = QFileDialog.getOpenFileNames(
-                self.dlg, "Seleziona file COPC/LAS/LAZ", "",
+                self.dlg, "Seleziona file LAS/LAZ", "",
                 "Point Cloud (*.copc.laz *.las *.laz)",
             )
             return paths or []
         return []
 
     # ------------------------------------------------------------------
-    # Z range / resolution dialog
+    # Configuration dialog (Z range, step, resolution, radius, group name)
+    # with optional pre-fill from saved sidecar
     # ------------------------------------------------------------------
 
-    def _ask_z_and_resolution(self, z_min_det: float, z_max_det: float) -> dict | None:
-        """
-        Ask the user to confirm or adjust Z min/max, Z step and XY resolution.
-        Returns dict with keys z_min, z_max, z_step, resolution, or None if cancelled.
-        """
+    def _ask_slice_params(
+        self,
+        z_min_det: float,
+        z_max_det: float,
+        default_group: str = "",
+        saved: dict | None = None,   # pre-fill from sidecar
+        is_reslice: bool = False,
+    ) -> dict | None:
         try:
-            default_res = float((self.dlg.lineEditDistanceX.text() or "").strip())
+            default_res  = float((self.dlg.lineEditDistanceX.text() or "").strip())
         except ValueError:
-            default_res = 0.10
+            default_res  = 0.10
         try:
             default_step = float((self.dlg.lineEditDistanceY.text() or "").strip())
         except ValueError:
             default_step = 0.05
 
+        # Use saved params as starting point when re-slicing
+        if saved:
+            z_min_det  = saved.get("z_min",  z_min_det)
+            z_max_det  = saved.get("z_max",  z_max_det)
+            default_res  = saved.get("resolution",  default_res)
+            default_step = saved.get("z_step", default_step)
+
+        default_radius = saved.get("radius", default_res * (2 ** 0.5)) if saved else default_res * (2 ** 0.5)
+
         dlg = QDialog(self.dlg)
-        dlg.setWindowTitle("Configura volume GPR")
-        dlg.setMinimumWidth(340)
+        dlg.setWindowTitle("Re-slice: modifica parametri" if is_reslice else "Configura slice LAS")
+        dlg.setMinimumWidth(360)
         layout = QVBoxLayout(dlg)
 
         info = QLabel(
-            f"Range Z rilevato nel file:\n"
-            f"  Z min = {z_min_det:.4f} m\n"
-            f"  Z max = {z_max_det:.4f} m\n\n"
-            "Modifica i parametri se necessario:"
+            ("Parametri precedenti caricati dal sidecar.\n" if is_reslice else "") +
+            f"Range Z rilevato: [{z_min_det:.4f}, {z_max_det:.4f}] m"
         )
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -174,15 +169,22 @@ class GprVolumeMixin:
             s.setValue(val)
             return s
 
-        sp_zmin = _spin(-9999, 9999, 4, 0.01, z_min_det)
-        sp_zmax = _spin(-9999, 9999, 4, 0.01, z_max_det)
-        sp_step = _spin(0.001, 1000, 4, 0.01, default_step)
-        sp_res  = _spin(0.001, 1000, 4, 0.01, default_res)
+        sp_zmin   = _spin(-9999, 9999, 4, 0.01, z_min_det)
+        sp_zmax   = _spin(-9999, 9999, 4, 0.01, z_max_det)
+        sp_step   = _spin(0.001, 1000, 4, 0.01, default_step)
+        sp_res    = _spin(0.001, 1000, 4, 0.01, default_res)
+        sp_radius = _spin(0.001, 1000, 4, 0.01, default_radius)
 
-        form.addRow("Z minimo (m):", sp_zmin)
-        form.addRow("Z massimo (m):", sp_zmax)
-        form.addRow("Step Z — dz (m):", sp_step)
-        form.addRow("Risoluzione XY (m):", sp_res)
+        le_group = QLineEdit()
+        le_group.setText(saved.get("group_name", default_group) if saved else default_group)
+        le_group.setPlaceholderText("Nome del gruppo (cartella output)")
+
+        form.addRow("Z minimo (m):",        sp_zmin)
+        form.addRow("Z massimo (m):",        sp_zmax)
+        form.addRow("Step Z — dz (m):",     sp_step)
+        form.addRow("Risoluzione XY (m):",  sp_res)
+        form.addRow("Radius IDW (m):",       sp_radius)
+        form.addRow("Nome gruppo:",           le_group)
         layout.addLayout(form)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -194,86 +196,91 @@ class GprVolumeMixin:
             return None
 
         return {
-            "z_min": sp_zmin.value(),
-            "z_max": sp_zmax.value(),
-            "z_step": sp_step.value(),
+            "z_min":      sp_zmin.value(),
+            "z_max":      sp_zmax.value(),
+            "z_step":     sp_step.value(),
             "resolution": sp_res.value(),
+            "radius":     sp_radius.value(),
+            "group_name": le_group.text().strip() or default_group,
         }
 
     # ------------------------------------------------------------------
-    # Dial setup & handler
+    # Catalog registration helpers
     # ------------------------------------------------------------------
 
-    def _setup_gpr_dial(self, n_z: int, z_step: float, z_min: float) -> None:
-        """Configure dials and connect the GPR-specific handler."""
-        self._gpr_z_step = float(z_step)
-        self._gpr_z_min = float(z_min)
-        self._gpr_n_slices = int(n_z)
+    def _register_las_slices_in_catalog(
+        self,
+        project_root: str,
+        group_name: str,
+        slices: list,
+        epsg: int | None,
+        reslice: bool = False,
+    ) -> str:
+        """
+        Register generated TIF slices as timeslice records in the project
+        catalog, create (or reuse) a raster group, and assign them.
+        Returns the group ID.
+        """
+        from .project_catalog import (
+            load_catalog, save_catalog,
+            create_raster_group, register_timeslices_batch,
+            assign_timeslices_to_group, utc_now_iso,
+        )
 
-        for ctrl_name in ("Dial", "dial2"):
-            ctrl = getattr(self.dlg, ctrl_name, None)
-            if ctrl is None:
-                continue
-            ctrl.setMinimum(0)
-            ctrl.setMaximum(max(0, n_z - 1))
-            ctrl.setValue(0)
-            # Add GPR handler as an ADDITIONAL connection (does not replace the
-            # existing update_visibility_with_dial connection in app_runtime_mixin).
-            try:
-                ctrl.valueChanged.disconnect(self._on_gpr_dial_changed)
-            except Exception:
-                pass
-            ctrl.valueChanged.connect(self._on_gpr_dial_changed)
+        crs_authid = f"EPSG:{epsg}" if epsg else None
 
-    def _on_gpr_dial_changed(self, value: int) -> None:
-        """Switch the visible Z level on the mesh or raster layer."""
-        use_mesh = getattr(self, "_gpr_use_mesh", False)
-        z_levels = getattr(self, "_gpr_z_levels", [])
-
-        # --- Mesh path (NetCDF UGRID) ------------------------------------
-        if use_mesh:
-            layer = getattr(self, "_gpr_mesh_layer", None)
-            if layer is not None and layer.isValid():
-                renderer = layer.rendererSettings()
-                renderer.setActiveScalarDatasetGroup(value)
-                layer.setRendererSettings(renderer)
-                layer.triggerRepaint()
-                # Update dock title bar
-                if z_levels and 0 <= value < len(z_levels):
-                    z = z_levels[value]
-                    z_step = getattr(self, "_gpr_z_step", 0.0)
-                    res = getattr(self, "_gpr_res", 0.0)
-                    try:
-                        self.dlg.nameRasterLabel.setText(
-                            f"Z = {z:.4f} m  (\u00b1{z_step/2:.4f} m)"
-                        )
-                    except Exception:
-                        pass
-            return
-
-        # --- Raster fallback (multiband GeoTIFF) -----------------------
-        layer = getattr(self, "_gpr_raster_layer", None)
-        if layer is not None and layer.isValid():
-            band = value + 1  # QgsRasterLayer bands are 1-based
-            renderer = QgsSingleBandGrayRenderer(layer.dataProvider(), band)
-            ce = QgsContrastEnhancement(layer.dataProvider().dataType(band))
-            ce.setContrastEnhancementAlgorithm(
-                QgsContrastEnhancement.StretchToMinimumMaximum
+        if reslice:
+            # Remove old timeslice records that belonged to this group.
+            catalog = load_catalog(project_root)
+            grp = next(
+                (g for g in catalog.get("raster_groups", [])
+                 if (g.get("name") or "").strip().lower() == group_name.strip().lower()),
+                None
             )
-            renderer.setContrastEnhancement(ce)
-            layer.setRenderer(renderer)
-            layer.triggerRepaint()
+            if grp:
+                old_ids = set(grp.get("timeslice_ids", []))
+                catalog["timeslices"] = [
+                    t for t in catalog.get("timeslices", [])
+                    if t.get("id") not in old_ids
+                ]
+                grp["timeslice_ids"] = []
+                save_catalog(project_root, catalog)
+
+        group_record, _ = create_raster_group(project_root, group_name)
+        group_id = group_record["id"]
+
+        now = utc_now_iso()
+        records = []
+        for sl in slices:
+            rec_id = f"timeslice_{now}_{sl['index']:04d}"
+            records.append({
+                "id":          rec_id,
+                "name":        sl["name"],
+                "project_path": sl["path"],
+                "depth_from":  sl["z_from"],
+                "depth_to":    sl["z_to"],
+                "unit":        "m",
+                "crs":         crs_authid,
+                "z_source":    "las_volume",
+                "imported_at": now,
+            })
+
+        register_timeslices_batch(project_root, records)
+        assign_timeslices_to_group(
+            project_root, group_id, [r["id"] for r in records]
+        )
+        return group_id
 
     # ------------------------------------------------------------------
-    # Public: main import action (called by "Import LAS → Slice" button)
+    # Public: main import action
     # ------------------------------------------------------------------
 
     def import_las_as_slices(self):
         """Entry point for the 'Import LAS → Slice' button."""
-        from .gpr_utils import check_laspy, check_netcdf4
+        from .gpr_utils import check_laspy
         from .gpr_las_volume import get_z_range_chunked
+        from .gpr_las_slicer import slice_las_to_tifs, save_slicer_params, load_slicer_params
 
-        # 1. laspy is always required (reads the LAS file)
         result_laspy = check_laspy()
         if not result_laspy.get("ok"):
             QMessageBox.critical(
@@ -282,39 +289,36 @@ class GprVolumeMixin:
             )
             return
 
-        # 2. Smart file picker
         file_paths = self._pick_las_files_for_slicing()
         if not file_paths:
             return
 
-        # 3. netCDF4 check (soft — fallback to multiband TIF if missing)
-        result_nc = check_netcdf4()
-        can_use_mesh = result_nc.get("ok", False)
-        if not can_use_mesh:
-            QMessageBox.information(
-                self.dlg, "netCDF4 non disponibile",
-                "netCDF4 non è installato.\n"
-                "Verrà usato il formato fallback (multiband GeoTIFF).\n\n"
-                + str(result_nc.get("error", "")) + "\n\n"
-                "Installa netCDF4 da OSGeo4W Shell per abilitare il layer mesh UGRID:\n"
-                "  pip install netCDF4",
+        project_root = self._gpr_active_project_root()
+        if not project_root:
+            QMessageBox.warning(
+                self.dlg, "Nessun progetto attivo",
+                "Nessun progetto attivo.\n"
+                "Apri il Project Manager e crea/apri un progetto prima di importare.",
             )
+            return
 
-        # 4. Process each file
         epsg = QgsProject.instance().crs().postgisSrid() or None
-        crs_wkt = ""
-        if epsg:
-            try:
-                from qgis.core import QgsCoordinateReferenceSystem
-                crs_wkt = QgsCoordinateReferenceSystem(f"EPSG:{epsg}").toWkt()
-            except Exception:
-                crs_wkt = ""
-
         loaded_ok = 0
-        failed = 0
+        failed    = 0
 
         for file_path in file_paths:
             base = os.path.splitext(os.path.basename(file_path))[0]
+            # sanitize for use as folder name
+            safe_base = "".join(
+                c if c.isalnum() or c in "_-" else "_" for c in base
+            ).strip("_") or "las_slices"
+
+            # Check for existing sidecar (re-slice scenario)
+            candidate_dir = os.path.join(
+                project_root, "timeslices_2d", safe_base
+            )
+            saved_params = load_slicer_params(candidate_dir)
+            is_reslice   = saved_params is not None
 
             # Read Z range
             try:
@@ -322,127 +326,101 @@ class GprVolumeMixin:
             except Exception as e:
                 QMessageBox.warning(
                     self.dlg, "Errore lettura Z",
-                    f"Impossibile leggere il range Z da:\n{file_path}\n\nErrore: {e}",
+                    f"Impossibile leggere il range Z:\n{file_path}\n\n{e}",
                 )
                 failed += 1
                 continue
 
-            # Ask user for Z config
-            params = self._ask_z_and_resolution(z_min_det, z_max_det)
+            # Config dialog
+            params = self._ask_slice_params(
+                z_min_det, z_max_det,
+                default_group=safe_base,
+                saved=saved_params,
+                is_reslice=is_reslice,
+            )
             if params is None:
-                return  # user cancelled
+                continue
 
-            z_min = params["z_min"]
-            z_max = params["z_max"]
-            z_step = params["z_step"]
-            resolution = params["resolution"]
-
-            layer_name = (
-                f"LAS {base} | "
-                f"Z[{z_min:.3f}, {z_max:.3f}] | "
-                f"dz={z_step:.3f} m | res={resolution:.3f} m"
+            group_name = params["group_name"] or safe_base
+            output_dir = os.path.join(
+                project_root, "timeslices_2d", group_name
             )
+            os.makedirs(output_dir, exist_ok=True)
 
-            # --- Try primary: NetCDF UGRID mesh ---
-            if can_use_mesh:
-                output_nc = os.path.join(
-                    os.path.dirname(file_path), f"{base}_mesh.nc"
-                )
-                try:
-                    from .gpr_netcdf_exporter import las_to_netcdf_mesh
-                    meta = las_to_netcdf_mesh(
-                        file_path, output_nc, resolution, z_step,
-                        z_min, z_max, epsg, crs_wkt or None,
-                    )
-                except Exception as e:
-                    QMessageBox.critical(
-                        self.dlg, "Errore esportazione NetCDF", str(e)
-                    )
-                    failed += 1
-                    continue
-
-                mesh_layer = QgsMeshLayer(output_nc, layer_name, "mdal")
-                if mesh_layer.isValid():
-                    QgsProject.instance().addMapLayer(mesh_layer)
-                    # Activate first dataset group (Z_0000)
-                    rset = mesh_layer.rendererSettings()
-                    rset.setActiveScalarDatasetGroup(0)
-                    mesh_layer.setRendererSettings(rset)
-
-                    self._gpr_mesh_layer = mesh_layer
-                    self._gpr_raster_layer = None
-                    self._gpr_use_mesh = True
-                    self._gpr_z_levels = meta["z_levels"]
-                    self._gpr_res = resolution
-                    self._setup_gpr_dial(meta["n_z"], z_step, z_min)
-
-                    if hasattr(self, "populate_group_list"):
-                        try:
-                            self.populate_group_list()
-                        except Exception:
-                            pass
-
-                    if hasattr(self, "_notify_info"):
-                        self._notify_info(
-                            f"LAS\u2192Mesh OK: {meta['n_z']} livelli Z, "
-                            f"{meta['n_x']}\u00d7{meta['n_y']} celle.",
-                            duration=10,
-                        )
-                    loaded_ok += 1
-                    continue
-
-                # mesh layer not valid → fall through to GeoTIFF
-                QMessageBox.warning(
-                    self.dlg, "Mesh layer non valido",
-                    f"MDAL non ha accettato il NetCDF generato:\n{output_nc}\n\n"
-                    "Uso il fallback multiband GeoTIFF.",
-                )
-
-            # --- Fallback: multiband GeoTIFF ---
-            output_tif = os.path.join(
-                os.path.dirname(file_path), f"{base}_slices.tif"
-            )
+            # Generate slices
             try:
-                from .gpr_netcdf_exporter import las_to_multiband_tif
-                meta = las_to_multiband_tif(
-                    file_path, output_tif, resolution, z_step,
-                    z_min, z_max, epsg,
+                slices = slice_las_to_tifs(
+                    las_path   = file_path,
+                    output_dir = output_dir,
+                    resolution = params["resolution"],
+                    z_step     = params["z_step"],
+                    z_min      = params["z_min"],
+                    z_max      = params["z_max"],
+                    radius     = params["radius"],
+                    epsg       = epsg,
                 )
             except Exception as e:
                 QMessageBox.critical(
-                    self.dlg, "Errore esportazione GeoTIFF", str(e)
+                    self.dlg, "Errore generazione slice", str(e)
                 )
                 failed += 1
                 continue
 
-            raster_layer = QgsRasterLayer(output_tif, layer_name)
-            if not raster_layer.isValid():
+            if not slices:
                 QMessageBox.warning(
-                    self.dlg, "Layer raster non valido",
-                    f"Impossibile caricare il GeoTIFF:\n{output_tif}",
+                    self.dlg, "Nessuna slice generata",
+                    f"Nessun punto trovato nel range Z scelto:\n"
+                    f"[{params['z_min']:.4f}, {params['z_max']:.4f}] m",
                 )
                 failed += 1
                 continue
 
-            QgsProject.instance().addMapLayer(raster_layer)
-            self._gpr_raster_layer = raster_layer
-            self._gpr_mesh_layer = None
-            self._gpr_use_mesh = False
-            self._gpr_z_levels = meta["z_levels"]
-            self._gpr_res = resolution
-            self._setup_gpr_dial(meta["n_z"], z_step, z_min)
-            # Apply stretch on band 1
-            self._on_gpr_dial_changed(0)
+            # Save sidecar for future re-slice
+            save_slicer_params(output_dir, {
+                "source_las":  file_path,
+                "group_name":  group_name,
+                "z_min":       params["z_min"],
+                "z_max":       params["z_max"],
+                "z_step":      params["z_step"],
+                "resolution":  params["resolution"],
+                "radius":      params["radius"],
+                "epsg":        epsg,
+                "n_slices":    len(slices),
+            })
+
+            # Register in catalog (same as timeslice import)
+            try:
+                self._register_las_slices_in_catalog(
+                    project_root, group_name, slices, epsg,
+                    reslice=is_reslice,
+                )
+            except Exception as e:
+                QMessageBox.warning(
+                    self.dlg, "Errore registrazione catalogo", str(e)
+                )
+                # slices are on disk — continue anyway
+
+            # Refresh UI — same call used after every timeslice import
+            if hasattr(self, "populate_group_list"):
+                try:
+                    self.populate_group_list()
+                except Exception:
+                    pass
 
             if hasattr(self, "_notify_info"):
+                action = "Re-slice" if is_reslice else "Import LAS→Slice"
                 self._notify_info(
-                    f"LAS\u2192GeoTIFF OK (fallback): {meta['n_z']} bande.",
-                    duration=10,
+                    f"{action} OK: gruppo '{group_name}', "
+                    f"{len(slices)} slice, "
+                    f"dz={params['z_step']:.3f} m, "
+                    f"res={params['resolution']:.3f} m, "
+                    f"radius={params['radius']:.3f} m.",
+                    duration=12,
                 )
             loaded_ok += 1
 
         if hasattr(self, "_notify_info"):
             self._notify_info(
-                f"Import LAS\u2192Slice completato. OK: {loaded_ok}, falliti: {failed}.",
+                f"Import LAS→Slice completato. OK: {loaded_ok}, falliti: {failed}.",
                 duration=8,
             )
