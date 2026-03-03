@@ -348,14 +348,18 @@ class CatalogGroupMixin:
 
     def update_visibility_with_dial(self, value):
         # ── GPR POINT CLOUD: se caricato, naviga per Z invece dei raster ─
-        if getattr(self, '_gpr_pc_layer', None) is not None and self._gpr_n_slices > 0:
+        _gpr_pc_layer = getattr(self, "_gpr_pc_layer", None)
+        _gpr_n_slices = int(getattr(self, "_gpr_n_slices", 0) or 0)
+        if _gpr_pc_layer is not None and _gpr_n_slices > 0:
             from .gpr_las_volume import set_z_slice
-            idx = max(0, min(value, self._gpr_n_slices - 1))
-            z_low  = self._gpr_z_min + idx * self._gpr_z_step
-            z_high = z_low + self._gpr_z_step
-            ok_2d  = set_z_slice(self._gpr_pc_layer, z_low, z_high)
+            _gpr_z_min = float(getattr(self, "_gpr_z_min", 0.0) or 0.0)
+            _gpr_z_step = float(getattr(self, "_gpr_z_step", 0.05) or 0.05)
+            idx = max(0, min(value, _gpr_n_slices - 1))
+            z_low = _gpr_z_min + idx * _gpr_z_step
+            z_high = z_low + _gpr_z_step
+            ok_2d = set_z_slice(_gpr_pc_layer, z_low, z_high)
             label  = (
-                f"GPR Z-slice [{idx + 1}/{self._gpr_n_slices}] "
+                f"GPR Z-slice [{idx + 1}/{_gpr_n_slices}] "
                 f"{z_low:.3f}m → {z_high:.3f}m"
             )
             if not ok_2d:
