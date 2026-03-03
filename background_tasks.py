@@ -149,6 +149,7 @@ class LasLazImportTask(CallbackTask):
             self.setProgress(100.0)
             return True
 
+        target_dir = os.path.normcase(os.path.abspath(os.path.join(self.project_root, "volumes_3d")))
         for idx, source_path in enumerate(self.file_paths, start=1):
             if self.isCanceled():
                 self.cancelled = True
@@ -161,15 +162,23 @@ class LasLazImportTask(CallbackTask):
                 continue
 
             try:
-                project_path, normalized_name = normalize_copy_into_project(
-                    self.project_root, "volumes_3d", source_path
-                )
+                source_abs = os.path.abspath(source_path)
+                source_dir = os.path.normcase(os.path.dirname(source_abs))
+                already_in_project = source_dir == target_dir
+                if already_in_project:
+                    project_path = source_abs
+                    normalized_name = os.path.basename(source_abs)
+                else:
+                    project_path, normalized_name = normalize_copy_into_project(
+                        self.project_root, "volumes_3d", source_path
+                    )
                 self.imported_files.append(
                     {
                         "source_path": source_path,
                         "project_path": project_path,
                         "normalized_name": normalized_name,
                         "imported_at": utc_now_iso(),
+                        "already_in_project": bool(already_in_project),
                     }
                 )
             except Exception as e:

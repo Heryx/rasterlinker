@@ -401,6 +401,27 @@ class ProjectManagerDialog(
         self._notify_project_updated()
         return True
 
+    def _catalog_model_path_sets(self, catalog=None):
+        data = catalog if isinstance(catalog, dict) else load_catalog(self.project_root)
+        project_paths = {
+            self._normalize_source_for_compare(rec.get("project_path"))
+            for rec in data.get("models_3d", [])
+            if self._normalize_source_for_compare(rec.get("project_path"))
+        }
+        source_paths = {
+            self._normalize_source_for_compare(rec.get("source_path"))
+            for rec in data.get("models_3d", [])
+            if self._normalize_source_for_compare(rec.get("source_path"))
+        }
+        return project_paths, source_paths
+
+    def _loaded_layer_source_set(self):
+        return {
+            self._normalize_source_for_compare(layer.source())
+            for layer in QgsProject.instance().mapLayers().values()
+            if self._normalize_source_for_compare(layer.source())
+        }
+
     def _sync_catalog_from_existing_files(self):
         """
         Scan existing project folders and register files not yet present in catalog.
@@ -756,10 +777,48 @@ class ProjectManagerDialog(
             return
 
         target_project_root = self.project_root
-        task_requested = len(file_paths)
+        selected_requested = len(file_paths)
+        catalog_for_filter = load_catalog(target_project_root)
+        existing_model_project_paths, existing_model_source_paths = self._catalog_model_path_sets(catalog_for_filter)
+        seen_selection_paths = set()
+        pending_file_paths = []
+        skipped_duplicate_selection = 0
+        skipped_existing_catalog = 0
+
+        for source_path in file_paths:
+            norm_source = self._normalize_source_for_compare(source_path)
+            if not norm_source:
+                continue
+            if norm_source in seen_selection_paths:
+                skipped_duplicate_selection += 1
+                continue
+            seen_selection_paths.add(norm_source)
+            if norm_source in existing_model_source_paths or norm_source in existing_model_project_paths:
+                skipped_existing_catalog += 1
+                continue
+            pending_file_paths.append(source_path)
+
+        if skipped_duplicate_selection > 0:
+            self.iface.messageBar().pushInfo(
+                "GeoSurvey Studio",
+                f"LAS/LAZ selection deduplicated: skipped {skipped_duplicate_selection} duplicate path(s).",
+            )
+        if skipped_existing_catalog > 0:
+            self.iface.messageBar().pushInfo(
+                "GeoSurvey Studio",
+                f"LAS/LAZ already cataloged: skipped {skipped_existing_catalog} file(s).",
+            )
+        if not pending_file_paths:
+            self.iface.messageBar().pushInfo(
+                "GeoSurvey Studio",
+                "No new LAS/LAZ files to import.",
+            )
+            return
+
+        task_requested = len(pending_file_paths)
         import_task = LasLazImportTask(
             target_project_root,
-            file_paths,
+            pending_file_paths,
             description="GeoSurvey Studio: Importing LAS/LAZ",
         )
         self._las_import_active = True
@@ -773,6 +832,10 @@ class ProjectManagerDialog(
             cancelled = bool(done_task.cancelled)
             rollback_stats = None
             registered_model_ids = []
+            skipped_runtime_catalog_dupes = 0
+            catalog_now = load_catalog(target_project_root)
+            existing_model_project_paths, existing_model_source_paths = self._catalog_model_path_sets(catalog_now)
+            loaded_layer_sources = self._loaded_layer_source_set()
 
             try:
                 for rec in done_task.imported_files:
@@ -780,6 +843,14 @@ class ProjectManagerDialog(
                     project_path = rec.get("project_path") or ""
                     normalized_name = rec.get("normalized_name") or os.path.basename(project_path)
                     imported_at = rec.get("imported_at") or utc_now_iso()
+                    norm_project = self._normalize_source_for_compare(project_path)
+                    norm_source = self._normalize_source_for_compare(source_path)
+                    if norm_project and norm_project in existing_model_project_paths:
+                        skipped_runtime_catalog_dupes += 1
+                        continue
+                    if norm_source and norm_source in existing_model_source_paths:
+                        skipped_runtime_catalog_dupes += 1
+                        continue
                     try:
                         meta = inspect_las_laz(project_path)
                         meta.update(
@@ -794,20 +865,29 @@ class ProjectManagerDialog(
                         register_model_3d(target_project_root, meta)
                         if meta.get("id"):
                             registered_model_ids.append(meta.get("id"))
+                        if norm_project:
+                            existing_model_project_paths.add(norm_project)
+                        if norm_source:
+                            existing_model_source_paths.add(norm_source)
                         imported += 1
 
-                        layer_name = os.path.basename(project_path)
-                        pc_layer = QgsPointCloudLayer(project_path, layer_name, "pdal")
-                        if pc_layer.isValid():
-                            QgsProject.instance().addMapLayer(pc_layer)
-                            loaded += 1
-                        else:
-                            failed.append(
-                                (
-                                    f"{layer_name}: copied and cataloged, but not loaded in canvas. "
-                                    "Try exporting as uncompressed LAS (recommended 1.2/1.4) and re-import."
+                        should_try_load = True
+                        if norm_project and norm_project in loaded_layer_sources:
+                            should_try_load = False
+                        if should_try_load:
+                            layer_name = os.path.basename(project_path)
+                            pc_layer = QgsPointCloudLayer(project_path, layer_name, "pdal")
+                            if pc_layer.isValid():
+                                QgsProject.instance().addMapLayer(pc_layer)
+                                loaded += 1
+                                loaded_layer_sources.add(norm_project)
+                            else:
+                                failed.append(
+                                    (
+                                        f"{layer_name}: copied and cataloged, but not loaded in canvas. "
+                                        "Try exporting as uncompressed LAS (recommended 1.2/1.4) and re-import."
+                                    )
                                 )
-                            )
                     except Exception as e:
                         label = os.path.basename(source_path) if source_path else normalized_name
                         failed.append(f"{label}: {e}")
@@ -836,10 +916,16 @@ class ProjectManagerDialog(
                             ("rollback removed records", rollback_stats.get("removed_records", 0)),
                         ]
                     )
+                skipped_total = skipped_existing_catalog + skipped_runtime_catalog_dupes
+                if skipped_total > 0:
+                    extras.append(("skipped already cataloged", skipped_total))
+                if skipped_duplicate_selection > 0:
+                    extras.append(("skipped duplicate selection", skipped_duplicate_selection))
+                extras.append(("processed this run", task_requested))
                 self._show_import_failures("LAS/LAZ import warnings", failed)
                 self._report_import_outcome(
                     "LAS/LAZ",
-                    requested=task_requested,
+                    requested=selected_requested,
                     imported=imported,
                     failed=len(failed),
                     cancelled=cancelled,
@@ -1409,20 +1495,23 @@ class ProjectManagerDialog(
             return
         catalog = load_catalog(self.project_root)
         project = QgsProject.instance()
-        existing_sources = {layer.source() for layer in project.mapLayers().values()}
+        existing_sources = self._loaded_layer_source_set()
 
         reloaded_models = 0
         for model in catalog.get("models_3d", []):
             p = model.get("project_path")
             if not p or not os.path.exists(p):
                 continue
-            if p in existing_sources:
+            norm_path = self._normalize_source_for_compare(p)
+            if norm_path and norm_path in existing_sources:
                 continue
             layer_name = model.get("normalized_name") or os.path.basename(p)
             pc_layer = QgsPointCloudLayer(p, layer_name, "pdal")
             if pc_layer.isValid():
                 project.addMapLayer(pc_layer)
                 reloaded_models += 1
+                if norm_path:
+                    existing_sources.add(norm_path)
 
         self.iface.messageBar().pushInfo(
             "GeoSurvey Studio",
