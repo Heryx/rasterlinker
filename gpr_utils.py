@@ -28,29 +28,19 @@ def check_pdal() -> dict:
 
     stdout = (result.stdout or "").strip()
     match = re.search(r"\d+(?:\.\d+)+", stdout)
-    if match:
-        version = match.group(0)
-    elif stdout:
-        version = stdout.splitlines()[0].strip()
-    else:
-        version = "sconosciuta"
+    version = match.group(0) if match else (stdout.splitlines()[0].strip() if stdout else "sconosciuta")
     return {"ok": True, "version": version}
 
 
-def _laspy_install_hint() -> str:
-    """Return OS-appropriate manual install instructions for laspy."""
+def _install_hint(package: str) -> str:
+    """Return OS-appropriate manual install instructions."""
     import platform
     if platform.system() == "Windows":
         return (
-            "Apri 'OSGeo4W Shell' dal menu Start e digita:\n"
-            "  pip install laspy[lazrs]\n\n"
-            "Oppure dalla OSGeo4W Shell:\n"
-            "  python -m pip install laspy[lazrs]"
+            f"Apri 'OSGeo4W Shell' dal menu Start e digita:\n"
+            f"  pip install {package}\n"
         )
-    return (
-        "Installa nel Python di QGIS:\n"
-        f"  {sys.executable} -m pip install laspy[lazrs]"
-    )
+    return f"Installa nel Python di QGIS:\n  {sys.executable} -m pip install {package}"
 
 
 def _find_python_for_pip() -> str:
@@ -80,23 +70,21 @@ def _find_python_for_pip() -> str:
     for c in candidates:
         if os.path.isfile(c):
             return c
-    return sys.executable  # last resort (might still be qgis-bin.exe)
+    return sys.executable
 
 
-def _try_pip_install_laspy() -> tuple:
+def _try_pip_install(package_spec: str) -> tuple:
     """
-    Try to install laspy[lazrs]. Returns (success: bool, error_msg: str).
+    Try to install a package. Returns (success: bool, error_msg: str).
 
     Strategy:
-      1. pip programmatic API  – no subprocess, works inside QGIS's Python.
+      1. pip programmatic API  – no subprocess, works inside QGIS Python.
       2. subprocess with real python.exe (not qgis-bin.exe on OSGeo4W).
     """
-    # --- Method 1: pip programmatic (preferred in QGIS plugins) ----------
+    # Method 1: pip programmatic (preferred in QGIS plugins)
     try:
-        from pip._internal.cli.main import main as _pip_main  # pip >= 18
-        ret = _pip_main(
-            ["install", "laspy[lazrs]", "--quiet", "--no-warn-script-location"]
-        )
+        from pip._internal.cli.main import main as _pip_main
+        ret = _pip_main(["install", package_spec, "--quiet", "--no-warn-script-location"])
         if ret == 0:
             return True, ""
         return False, f"pip exit code {ret}"
@@ -104,28 +92,21 @@ def _try_pip_install_laspy() -> tuple:
         pass
 
     try:
-        import pip as _pip_mod  # old pip (<= 9)
+        import pip as _pip_mod
         if hasattr(_pip_mod, "main"):
-            ret = _pip_mod.main(["install", "laspy[lazrs]", "--quiet"])
+            ret = _pip_mod.main(["install", package_spec, "--quiet"])
             if ret == 0:
                 return True, ""
             return False, f"pip exit code {ret}"
     except Exception:
         pass
 
-    # --- Method 2: subprocess with real python.exe -----------------------
+    # Method 2: subprocess with real python.exe
     python_exe = _find_python_for_pip()
     try:
         proc = subprocess.run(
-            [
-                python_exe,
-                "-m",
-                "pip",
-                "install",
-                "laspy[lazrs]",
-                "--quiet",
-                "--no-warn-script-location",
-            ],
+            [python_exe, "-m", "pip", "install", package_spec,
+             "--quiet", "--no-warn-script-location"],
             capture_output=True,
             text=True,
             timeout=120,
@@ -135,71 +116,73 @@ def _try_pip_install_laspy() -> tuple:
         err = (proc.stderr or proc.stdout or "").strip()
         return False, f"pip exit {proc.returncode}: {err}"
     except subprocess.TimeoutExpired:
-        return False, "timeout durante l'installazione di laspy"
+        return False, "timeout durante l'installazione"
     except Exception as e:
         return False, str(e)
 
 
-def check_laspy() -> dict:
-    """
-    Check if laspy is importable.
-    If not, attempt auto-install via pip API (no subprocess race with QGIS).
-    """
-    # Fast path: already installed
+def _check_and_install(import_name: str, pip_spec: str) -> dict:
+    """Generic check + auto-install pattern for optional dependencies."""
+    import importlib
+
+    # Fast path: already importable
     try:
-        import laspy  # type: ignore
-        return {
-            "ok": True,
-            "version": str(getattr(laspy, "__version__", "sconosciuta")),
-        }
+        m = importlib.import_module(import_name)
+        return {"ok": True, "version": str(getattr(m, "__version__", "sconosciuta"))}
     except ImportError:
         pass
 
-    # Auto-install attempt
-    success, err_msg = _try_pip_install_laspy()
+    success, err_msg = _try_pip_install(pip_spec)
     if not success:
         return {
             "ok": False,
             "error": (
-                f"laspy non installato e auto-install fallito:\n{err_msg}\n\n"
-                + _laspy_install_hint()
+                f"{import_name} non installato e auto-install fallito:\n{err_msg}\n\n"
+                + _install_hint(pip_spec)
             ),
         }
 
-    # Re-import after install (importlib bypasses the cached ImportError)
     try:
-        import importlib
-        _laspy = importlib.import_module("laspy")
+        m = importlib.import_module(import_name)
         return {
             "ok": True,
-            "version": str(getattr(_laspy, "__version__", "sconosciuta")),
+            "version": str(getattr(m, "__version__", "sconosciuta")),
             "just_installed": True,
         }
     except ImportError as e:
         return {
             "ok": False,
             "error": (
-                f"laspy installato ma non importabile in questa sessione ({e}).\n"
+                f"{import_name} installato ma non importabile in questa sessione ({e}).\n"
                 "Riavvia QGIS e riprova."
             ),
         }
 
 
+def check_laspy() -> dict:
+    """Check if laspy is importable; auto-install if missing."""
+    return _check_and_install("laspy", "laspy[lazrs]")
+
+
+def check_netcdf4() -> dict:
+    """Check if netCDF4 is importable; auto-install if missing."""
+    return _check_and_install("netCDF4", "netCDF4")
+
+
 def check_environment() -> str:
-    """Return a multiline status report for PDAL and laspy checks."""
+    """Return a multiline status report for all GPR dependencies."""
     pdal = check_pdal()
     laspy = check_laspy()
+    nc4 = check_netcdf4()
 
-    pdal_line = (
-        f"\u2705 PDAL {pdal.get('version')} trovato"
-        if pdal.get("ok")
-        else f"\u274c PDAL {pdal.get('error')}"
-    )
+    def line(name, result):
+        if result.get("ok"):
+            suffix = " (appena installato — riavvia QGIS)" if result.get("just_installed") else ""
+            return f"\u2705 {name} {result.get('version','')}{suffix}"
+        return f"\u274c {name}: {result.get('error', '')}"
 
-    if laspy.get("ok"):
-        suffix = " (appena installato \u2014 riavvia QGIS)" if laspy.get("just_installed") else ""
-        laspy_line = f"\u2705 laspy {laspy.get('version')} trovato{suffix}"
-    else:
-        laspy_line = f"\u274c {laspy.get('error')}"
-
-    return f"{pdal_line}\n{laspy_line}"
+    return "\n".join([
+        line("PDAL", pdal),
+        line("laspy", laspy),
+        line("netCDF4", nc4),
+    ])

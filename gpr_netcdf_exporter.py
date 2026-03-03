@@ -1,24 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-Convert LAS/LAZ point clouds to a CF-compliant structured NetCDF mesh
-for QgsMeshLayer (MDAL).
-
-Strategy
---------
-Each Z slice is written as a separate 2-D variable (y, x).  QGIS/MDAL loads
-each variable as one dataset group.  The dial index maps directly to:
-
-    renderer = layer.rendererSettings()
-    renderer.setActiveScalarDatasetGroup(z_index)
-    layer.setRendererSettings(renderer)
-    layer.triggerRepaint()
-
-Binning performance
--------------------
-All points are sorted by Z once (O(n log n)).  Per-slice binning uses
-np.searchsorted for O(log n) bounds lookup, so total work is O(n_points)
-rather than O(n_z * n_points).
-"""
+"""LAS → NetCDF UGRID mesh exporter (primary) and multiband GeoTIFF fallback."""
 
 from __future__ import annotations
 
@@ -27,24 +7,132 @@ import os
 import numpy as np
 
 
-# --------------------------------------------------------------------------- #
-# Helpers                                                                      #
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# Shared: read LAS and bin intensity onto a regular 2D grid per Z slice
+# ---------------------------------------------------------------------------
 
-def _z_var_name(iz: int, z_center: float) -> str:
+def _read_las_arrays(las_path: str):
     """
-    Build a valid NetCDF / C-identifier variable name for a Z slice.
-    Format: Z_p066_6970_0042  (+66.697 m, slice 42)
-             Z_m005_0000_0000  (-5.000 m, slice 0)
+    Read X, Y, Z, intensity from a LAS/LAZ file using laspy.
+    Returns (x, y, z, intensity) as float64/float32 numpy arrays.
     """
-    sign = "m" if z_center < 0.0 else "p"
-    z_str = f"{abs(z_center):09.4f}".replace(".", "_")
-    return f"Z_{sign}{z_str}_{iz:04d}"
+    import laspy  # type: ignore
+
+    las = laspy.read(las_path)
+    x = np.asarray(las.x, dtype=np.float64)
+    y = np.asarray(las.y, dtype=np.float64)
+    z = np.asarray(las.z, dtype=np.float64)
+
+    # intensity: try lowercase (laspy 2.x standard) then uppercase variants
+    intensity = None
+    for field in ("intensity", "Intensity", "INTENSITY"):
+        try:
+            intensity = np.asarray(getattr(las, field), dtype=np.float32)
+            if intensity.size == len(x):
+                break
+        except Exception:
+            intensity = None
+
+    if intensity is None or intensity.size != len(x):
+        intensity = np.ones(len(x), dtype=np.float32)
+
+    return x, y, z, intensity
 
 
-# --------------------------------------------------------------------------- #
-# Main converter                                                               #
-# --------------------------------------------------------------------------- #
+def _build_grid_params(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    resolution: float,
+    z_step: float,
+    z_min: float | None,
+    z_max: float | None,
+):
+    """
+    Compute grid dimensions and Z levels.
+    Returns dict with x_min, y_min, x_centers, y_centers, z_levels, n_x, n_y, n_z.
+    """
+    x_min = float(x.min())
+    y_min = float(y.min())
+    x_max = float(x.max())
+    y_max = float(y.max())
+    if z_min is None:
+        z_min = float(z.min())
+    if z_max is None:
+        z_max = float(z.max())
+
+    x_centers = np.arange(x_min, x_max + resolution * 0.5, resolution)
+    y_centers = np.arange(y_min, y_max + resolution * 0.5, resolution)
+    z_levels = np.arange(z_min, z_max + z_step * 0.5, z_step)
+
+    return {
+        "x_min": x_min,
+        "y_min": y_min,
+        "x_max": x_max,
+        "y_max": y_max,
+        "x_centers": x_centers,
+        "y_centers": y_centers,
+        "z_levels": z_levels,
+        "n_x": len(x_centers),
+        "n_y": len(y_centers),
+        "n_z": len(z_levels),
+        "z_min": z_min,
+        "z_max": z_max,
+    }
+
+
+def _bin_intensity(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    intensity: np.ndarray,
+    gp: dict,
+    resolution: float,
+    z_step: float,
+) -> list:
+    """
+    Bin intensity values onto a regular 2D grid for each Z slice.
+    Returns list of n_z float32 arrays shaped (n_y, n_x), NaN where no points.
+    """
+    n_x = gp["n_x"]
+    n_y = gp["n_y"]
+    z_levels = gp["z_levels"]
+    x_min = gp["x_min"]
+    y_min = gp["y_min"]
+
+    data = []
+    for z_lev in z_levels:
+        z_low = z_lev - z_step / 2.0
+        z_high = z_lev + z_step / 2.0
+        mask = (z >= z_low) & (z < z_high)
+
+        grid = np.full((n_y, n_x), np.nan, dtype=np.float32)
+        if np.any(mask):
+            x_sel = x[mask]
+            y_sel = y[mask]
+            i_sel = intensity[mask]
+
+            xi = np.clip(
+                np.round((x_sel - x_min) / resolution).astype(np.int64), 0, n_x - 1
+            )
+            yi = np.clip(
+                np.round((y_sel - y_min) / resolution).astype(np.int64), 0, n_y - 1
+            )
+
+            total = np.zeros((n_y, n_x), dtype=np.float64)
+            count = np.zeros((n_y, n_x), dtype=np.int32)
+            np.add.at(total, (yi, xi), i_sel.astype(np.float64))
+            np.add.at(count, (yi, xi), 1)
+            where_valid = count > 0
+            grid[where_valid] = (total[where_valid] / count[where_valid]).astype(np.float32)
+
+        data.append(grid)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Primary: NetCDF UGRID mesh (QgsMeshLayer / MDAL)
+# ---------------------------------------------------------------------------
 
 def las_to_netcdf_mesh(
     las_path: str,
@@ -54,215 +142,236 @@ def las_to_netcdf_mesh(
     z_min: float | None = None,
     z_max: float | None = None,
     epsg: int | None = None,
-    progress_callback=None,
+    crs_wkt: str | None = None,
 ) -> dict:
     """
-    Convert a LAS/LAZ file to a structured-grid NetCDF mesh.
+    Convert a LAS/LAZ point cloud to a UGRID-1.0 compliant NetCDF file
+    readable as a QgsMeshLayer.
 
-    Parameters
-    ----------
-    las_path          : Input LAS / LAZ file.
-    output_nc         : Output .nc path (parent dir is created if needed).
-    resolution        : XY cell size in file coordinate units (metres).
-    z_step            : Z slice thickness in same units.
-    z_min, z_max      : Z range override (None = use file extents).
-    epsg              : EPSG code for CRS metadata (optional).
-    progress_callback : callable(current_slice: int, total_slices: int).
+    Dataset groups layout (one per Z level):
+        Z_0000 → shallowest Z level
+        Z_0001 → next level
+        ...
+    Each group has a single face-centred intensity dataset.
+    The QGIS dial drives setActiveScalarDatasetGroup(group_index).
 
-    Returns
-    -------
-    dict:
-        output_nc, z_levels (list[float]), n_slices, var_names (list[str]),
-        n_x, n_y, x_origin, y_origin, resolution, z_step, epsg
+    Returns metadata dict: output_path, z_levels, n_z, n_x, n_y, epsg.
     """
-    try:
-        import laspy  # type: ignore
-    except ImportError:
-        raise ImportError("laspy non installato")
-    try:
-        import netCDF4 as nc4  # type: ignore
-    except ImportError:
-        raise ImportError("netCDF4 non installato")
+    import netCDF4 as nc  # type: ignore
 
-    # ------------------------------------------------------------------ #
-    # 1. Read point cloud                                                  #
-    # ------------------------------------------------------------------ #
-    las = laspy.read(las_path)
-    x_pts = np.asarray(las.x, dtype=np.float64)
-    y_pts = np.asarray(las.y, dtype=np.float64)
-    z_pts = np.asarray(las.z, dtype=np.float64)
+    x, y, z, intensity = _read_las_arrays(las_path)
+    gp = _build_grid_params(x, y, z, resolution, z_step, z_min, z_max)
+    data_list = _bin_intensity(x, y, z, intensity, gp, resolution, z_step)
 
-    try:
-        i_pts = np.asarray(las.intensity, dtype=np.float32)
-    except Exception:
-        i_pts = np.ones(len(x_pts), dtype=np.float32)
+    n_x = gp["n_x"]
+    n_y = gp["n_y"]
+    n_z = gp["n_z"]
+    x_min = gp["x_min"]
+    y_min = gp["y_min"]
+    x_centers = gp["x_centers"]
+    y_centers = gp["y_centers"]
+    z_levels = gp["z_levels"]
 
-    # ------------------------------------------------------------------ #
-    # 2. Z range clip                                                      #
-    # ------------------------------------------------------------------ #
-    z_min_use = float(z_min) if z_min is not None else float(z_pts.min())
-    z_max_use = float(z_max) if z_max is not None else float(z_pts.max())
+    n_faces = n_x * n_y
+    n_nodes = (n_x + 1) * (n_y + 1)
+    n_node_cols = n_x + 1
+    FILL = np.float32(-9999.0)
 
-    mask_z = (z_pts >= z_min_use) & (z_pts <= z_max_use)
-    x_pts  = x_pts[mask_z]
-    y_pts  = y_pts[mask_z]
-    z_pts  = z_pts[mask_z]
-    i_pts  = i_pts[mask_z]
+    # --- NetCDF file ---------------------------------------------------
+    ds = nc.Dataset(output_nc, "w", format="NETCDF4")
 
-    if len(x_pts) == 0:
-        raise ValueError(
-            f"Nessun punto nel range Z [{z_min_use:.4f}, {z_max_use:.4f}]"
-        )
+    ds.createDimension("nMesh2d_node", n_nodes)
+    ds.createDimension("nMesh2d_face", n_faces)
+    ds.createDimension("nMaxMesh2d_face_nodes", 4)
 
-    # ------------------------------------------------------------------ #
-    # 3. Regular XY grid                                                   #
-    # ------------------------------------------------------------------ #
-    x_origin = float(x_pts.min())
-    y_origin = float(y_pts.min())
-    x_end    = float(x_pts.max())
-    y_end    = float(y_pts.max())
+    # Topology variable (tells MDAL this is a UGRID mesh)
+    mv = ds.createVariable("Mesh2d", "i4")
+    mv.cf_role = "mesh_topology"
+    mv.long_name = "GPR 2D structured quad mesh"
+    mv.topology_dimension = np.int32(2)
+    mv.node_coordinates = "Mesh2d_node_x Mesh2d_node_y"
+    mv.face_node_connectivity = "Mesh2d_face_nodes"
+    mv.face_coordinates = "Mesh2d_face_x Mesh2d_face_y"
+    mv[:] = np.int32(0)
 
-    x_grid = np.arange(x_origin, x_end + resolution * 0.5, resolution)
-    y_grid = np.arange(y_origin, y_end + resolution * 0.5, resolution)
-    n_x = len(x_grid)
-    n_y = len(y_grid)
+    # Node coordinates (cell corners)
+    x_nodes = x_min - resolution / 2.0 + np.arange(n_node_cols) * resolution
+    y_nodes = y_min - resolution / 2.0 + np.arange(n_y + 1) * resolution
+    xx_n, yy_n = np.meshgrid(x_nodes, y_nodes)  # (n_y+1, n_x+1)
 
-    # ------------------------------------------------------------------ #
-    # 4. Z levels (slice centres)                                          #
-    # ------------------------------------------------------------------ #
-    z_levels = np.arange(
-        z_min_use + z_step * 0.5,
-        z_max_use + z_step * 0.501,   # small epsilon so last step is included
-        z_step,
+    vx = ds.createVariable("Mesh2d_node_x", "f8", ("nMesh2d_node",))
+    vx[:] = xx_n.ravel()
+    vx.standard_name = "projection_x_coordinate"
+    vx.units = "m"
+    vx.long_name = "x-coordinate of mesh nodes"
+
+    vy = ds.createVariable("Mesh2d_node_y", "f8", ("nMesh2d_node",))
+    vy[:] = yy_n.ravel()
+    vy.standard_name = "projection_y_coordinate"
+    vy.units = "m"
+    vy.long_name = "y-coordinate of mesh nodes"
+
+    # Face centres
+    xx_f, yy_f = np.meshgrid(x_centers, y_centers)  # (n_y, n_x)
+
+    fx = ds.createVariable("Mesh2d_face_x", "f8", ("nMesh2d_face",))
+    fx[:] = xx_f.ravel()
+    fx.standard_name = "projection_x_coordinate"
+    fx.units = "m"
+
+    fy = ds.createVariable("Mesh2d_face_y", "f8", ("nMesh2d_face",))
+    fy[:] = yy_f.ravel()
+    fy.standard_name = "projection_y_coordinate"
+    fy.units = "m"
+
+    # Face–node connectivity (CCW: SW, SE, NE, NW)
+    IY, IX = np.meshgrid(np.arange(n_y), np.arange(n_x), indexing="ij")
+    iy_f = IY.ravel()
+    ix_f = IX.ravel()
+    n_sw = iy_f * n_node_cols + ix_f
+    n_se = n_sw + 1
+    n_ne = n_sw + n_node_cols + 1
+    n_nw = n_sw + n_node_cols
+    face_conn = np.column_stack([n_sw, n_se, n_ne, n_nw]).astype(np.int32)
+
+    fn = ds.createVariable(
+        "Mesh2d_face_nodes", "i4", ("nMesh2d_face", "nMaxMesh2d_face_nodes")
     )
-    n_z = len(z_levels)
-    if n_z == 0:
-        raise ValueError(f"Range Z troppo piccolo per z_step={z_step}")
+    fn[:] = face_conn
+    fn.cf_role = "face_node_connectivity"
+    fn.start_index = np.int32(0)
+    fn.long_name = "Vertex nodes of each face"
 
-    # ------------------------------------------------------------------ #
-    # 5. Pre-compute grid indices; sort all points by Z for fast slicing   #
-    # ------------------------------------------------------------------ #
-    xi_all = np.round((x_pts - x_origin) / resolution).astype(np.int32)
-    yi_all = np.round((y_pts - y_origin) / resolution).astype(np.int32)
-    valid  = (xi_all >= 0) & (xi_all < n_x) & (yi_all >= 0) & (yi_all < n_y)
-
-    xi_v = xi_all[valid]
-    yi_v = yi_all[valid]
-    z_v  = z_pts[valid]
-    i_v  = i_pts[valid]
-
-    sort_idx = np.argsort(z_v, kind="stable")
-    xi_v = xi_v[sort_idx]
-    yi_v = yi_v[sort_idx]
-    z_v  = z_v[sort_idx]
-    i_v  = i_v[sort_idx]
-
-    # ------------------------------------------------------------------ #
-    # 6. Write NetCDF                                                       #
-    # ------------------------------------------------------------------ #
-    out_dir = os.path.dirname(os.path.abspath(output_nc))
-    os.makedirs(out_dir, exist_ok=True)
-
-    ds = nc4.Dataset(output_nc, "w", format="NETCDF4")
-    ds.createDimension("y", n_y)
-    ds.createDimension("x", n_x)
-
-    # X coordinate variable (MDAL CF driver recognises axis/standard_name)
-    xv = ds.createVariable("x", "f8", ("x",))
-    xv[:] = x_grid
-    xv.units         = "m"
-    xv.long_name     = "X easting"
-    xv.standard_name = "projection_x_coordinate"
-    xv.axis          = "X"
-
-    # Y coordinate variable
-    yv = ds.createVariable("y", "f8", ("y",))
-    yv[:] = y_grid
-    yv.units         = "m"
-    yv.long_name     = "Y northing"
-    yv.standard_name = "projection_y_coordinate"
-    yv.axis          = "Y"
-
-    # CRS reference variable (CF convention)
+    # CRS variable
+    grid_mapping_name = "unknown_crs"
     if epsg:
         crs_v = ds.createVariable("crs", "i4")
-        crs_v.grid_mapping_name = "transverse_mercator"
-        crs_v.epsg_code         = int(epsg)
-        crs_v.long_name         = f"CRS EPSG:{epsg}"
-        crs_v.crs_wkt           = f"EPSG:{epsg}"
+        crs_v.epsg_code = f"EPSG:{epsg}"
+        crs_v.long_name = "coordinate reference system"
+        if crs_wkt:
+            crs_v.spatial_ref = crs_wkt
+            crs_v.crs_wkt = crs_wkt
+        grid_mapping_name = "crs"
 
-    # Global attributes
-    ds.Conventions = "CF-1.6"
-    ds.featureType = "grid"
-    ds.title       = f"GPR volume \u2013 {os.path.basename(las_path)}"
-    ds.source      = las_path
-    ds.z_step      = float(z_step)
-    ds.resolution  = float(resolution)
-    ds.n_slices    = n_z
-    if epsg:
-        ds.epsg = int(epsg)
-
-    # ------------------------------------------------------------------ #
-    # 7. One 2-D variable per Z slice                                       #
-    # ------------------------------------------------------------------ #
-    var_names: list[str] = []
-
-    for iz, z_center in enumerate(z_levels):
-        z_low  = z_center - z_step * 0.5
-        z_high = z_center + z_step * 0.5
-
-        lo = int(np.searchsorted(z_v, z_low,  side="left"))
-        hi = int(np.searchsorted(z_v, z_high, side="left"))
-
-        vname = _z_var_name(iz, z_center)
-        var_names.append(vname)
-
-        v = ds.createVariable(
-            vname, "f4", ("y", "x"),
-            fill_value=np.nan,
-            zlib=True, complevel=4,
+    # Data variables — one per Z level (= one MDAL dataset group each)
+    for iz, z_lev in enumerate(z_levels):
+        vname = f"Z_{iz:04d}"
+        dv = ds.createVariable(
+            vname,
+            "f4",
+            ("nMesh2d_face",),
+            fill_value=FILL,
+            zlib=True,
+            complevel=4,
         )
-        v.long_name     = f"GPR intensity @ Z = {z_center:.4f} m"
-        v.units         = "counts"
-        v.missing_value = np.nan
-        v.z_center      = float(z_center)
-        v.slice_index   = iz
+        dv.long_name = f"GPR intensity at Z = {z_lev:.4f} m"
+        dv.units = "counts"
+        dv.location = "face"
+        dv.mesh = "Mesh2d"
+        dv.coordinates = "Mesh2d_face_x Mesh2d_face_y"
         if epsg:
-            v.grid_mapping = "crs"
+            dv.grid_mapping = grid_mapping_name
 
-        if hi > lo:
-            xi_s = xi_v[lo:hi]
-            yi_s = yi_v[lo:hi]
-            i_s  = i_v[lo:hi]
+        flat = data_list[iz].ravel()
+        flat = np.where(np.isnan(flat), FILL, flat)
+        dv[:] = flat
 
-            total = np.zeros((n_y, n_x), dtype=np.float64)
-            count = np.zeros((n_y, n_x), dtype=np.int32)
-            np.add.at(total, (yi_s, xi_s), i_s.astype(np.float64))
-            np.add.at(count, (yi_s, xi_s), 1)
-
-            v[:] = np.where(
-                count > 0,
-                (total / count).astype(np.float32),
-                np.nan,
-            )
-        else:
-            v[:] = np.nan  # empty slice
-
-        if progress_callback:
-            progress_callback(iz + 1, n_z)
-
+    ds.Conventions = "CF-1.6 UGRID-1.0"
+    ds.title = f"GPR mesh volume from {os.path.basename(las_path)}"
+    ds.history = f"Created by GeoSurvey Studio gpr_netcdf_exporter"
     ds.close()
 
     return {
-        "output_nc":  output_nc,
-        "z_levels":   z_levels.tolist(),
-        "n_slices":   n_z,
-        "var_names":  var_names,
-        "n_x":        n_x,
-        "n_y":        n_y,
-        "x_origin":   x_origin,
-        "y_origin":   y_origin,
-        "resolution": resolution,
-        "z_step":     z_step,
-        "epsg":       epsg,
+        "output_path": output_nc,
+        "z_levels": z_levels.tolist(),
+        "n_z": int(n_z),
+        "n_x": int(n_x),
+        "n_y": int(n_y),
+        "x_min": float(x_min),
+        "y_min": float(y_min),
+        "resolution": float(resolution),
+        "epsg": epsg,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Fallback: multiband GeoTIFF (no external deps beyond GDAL which QGIS has)
+# ---------------------------------------------------------------------------
+
+def las_to_multiband_tif(
+    las_path: str,
+    output_tif: str,
+    resolution: float = 0.10,
+    z_step: float = 0.05,
+    z_min: float | None = None,
+    z_max: float | None = None,
+    epsg: int | None = None,
+) -> dict:
+    """
+    Convert LAS to a multiband GeoTIFF (1 band per Z slice).
+    Used as fallback when netCDF4 is not available.
+    Loaded as QgsRasterLayer; dial switches the rendered band.
+    """
+    from osgeo import gdal, osr  # type: ignore
+
+    x, y, z, intensity = _read_las_arrays(las_path)
+    gp = _build_grid_params(x, y, z, resolution, z_step, z_min, z_max)
+    data_list = _bin_intensity(x, y, z, intensity, gp, resolution, z_step)
+
+    n_x = gp["n_x"]
+    n_y = gp["n_y"]
+    n_z = gp["n_z"]
+    x_min = gp["x_min"]
+    y_min = gp["y_min"]
+    y_max = gp["y_max"]
+    z_levels = gp["z_levels"]
+    NODATA = -9999.0
+
+    driver = gdal.GetDriverByName("GTiff")
+    ds = driver.Create(
+        output_tif,
+        n_x,
+        n_y,
+        n_z,
+        gdal.GDT_Float32,
+        options=["COMPRESS=LZW", "TILED=YES", "BIGTIFF=IF_SAFER"],
+    )
+
+    # GeoTransform: top-left corner, positive X, negative Y
+    gt = (
+        x_min - resolution / 2.0,
+        resolution,
+        0.0,
+        y_max + resolution / 2.0,
+        0.0,
+        -resolution,
+    )
+    ds.SetGeoTransform(gt)
+
+    if epsg:
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(int(epsg))
+        ds.SetProjection(srs.ExportToWkt())
+
+    for iz, z_lev in enumerate(z_levels):
+        band = ds.GetRasterBand(iz + 1)
+        # Raster Y=0 is top (north) → flip the grid (stored bottom-first)
+        band.WriteArray(np.flipud(data_list[iz]))
+        band.SetNoDataValue(NODATA)
+        band.SetDescription(f"Z={z_lev:.4f}m")
+        band.FlushCache()
+
+    ds.FlushCache()
+    ds = None
+
+    return {
+        "output_path": output_tif,
+        "z_levels": z_levels.tolist(),
+        "n_z": int(n_z),
+        "n_x": int(n_x),
+        "n_y": int(n_y),
+        "x_min": float(x_min),
+        "y_min": float(y_min),
+        "resolution": float(resolution),
+        "epsg": epsg,
     }
