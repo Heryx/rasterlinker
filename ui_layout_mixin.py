@@ -19,6 +19,8 @@ from .grid_options_ui import build_grid_options_controls
 class UiLayoutMixin:
     def _init_ui_layout(self):
         """Initialise UI layout widget references. Called by the plugin constructor."""
+        self._is_narrow_layout = None
+        self._is_short_layout = None
         self.dialog_main_layout = None
         self.tools_tabs = None
         self.tools_panel_widget = None

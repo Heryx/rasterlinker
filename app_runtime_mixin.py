@@ -290,7 +290,9 @@ class AppRuntimeMixin:
         # Keep wide layout active on medium dock widths; narrow only when really constrained.
         is_narrow = width < 640
         is_short = height < 860
-        if self._is_narrow_layout is is_narrow and self._is_short_layout is is_short:
+        prev_narrow = getattr(self, "_is_narrow_layout", None)
+        prev_short = getattr(self, "_is_short_layout", None)
+        if prev_narrow is is_narrow and prev_short is is_short:
             return
 
         gl3 = self.dlg.gridLayout_3

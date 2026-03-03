@@ -16,8 +16,13 @@ from .ui_layout_mixin import UiLayoutMixin
 from .app_runtime_mixin import AppRuntimeMixin
 from .update_checker_mixin import UpdateCheckerMixin
 
-from .resources import *
 import os.path
+
+try:
+    from .resources import *  # noqa: F401,F403
+    _HAS_QT_RESOURCES = True
+except Exception:
+    _HAS_QT_RESOURCES = False
 
 
 class GeoSurveyStudioPlugin(
@@ -108,7 +113,10 @@ class GeoSurveyStudioPlugin(
             self.plugin_toolbar.setObjectName("GeoSurveyStudioMainToolbar")
             self.plugin_toolbar.setToolTip("GeoSurvey Studio tools")
 
-        icon_path = ':/plugins/geosurvey_studio/icon.png'
+        if _HAS_QT_RESOURCES:
+            icon_path = ':/plugins/geosurvey_studio/icon.png'
+        else:
+            icon_path = os.path.join(self.plugin_dir, "icon.png")
         self.add_action(icon_path, text=self.tr(u'GeoSurvey Studio'), callback=self.run, parent=self.iface.mainWindow())
         pm_action = self.add_action(
             icon_path,

@@ -269,7 +269,7 @@ class TraceToolsMixin:
     ) -> QAction:
         icon = self._qgis_theme_icon(*icon_names)
         if icon is None or icon.isNull():
-            icon = QIcon(':/plugins/geosurvey_studio/icon.png')
+            icon = QIcon(os.path.join(self.plugin_dir, "icon.png"))
         action = QAction(icon, text, self.iface.mainWindow())
         action.setToolTip(text)
         action.setCheckable(bool(checkable))
