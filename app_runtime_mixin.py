@@ -496,6 +496,11 @@ class AppRuntimeMixin:
             True,
             type=bool,
         )
+        # ── Stato navigazione volume GPR LAS ────────────────────────────
+        self._gpr_pc_layer = None    # QgsPointCloudLayer attivo (solo modalità PC)
+        self._gpr_z_min = 0.0        # Z minimo del volume caricato
+        self._gpr_z_step = 0.05      # passo Z in metri (profondità per slice)
+        self._gpr_n_slices = 0       # numero totale slice calcolate dal range Z
 
         self.dlg.lineEditDistanceX.setText(
             self.settings.value(self._settings_key("grid/distance_x"), self.dlg.lineEditDistanceX.text())
