@@ -62,6 +62,11 @@ class GridWorkflowMixin:
         self.internal_grid_checkbox = None
         self.last_area_layer = None
         self.last_grid_layer = None
+        # Stato navigazione GPR point cloud / slice raster
+        self._gpr_pc_layer = None       # QgsPointCloudLayer attivo (modalità PC)
+        self._gpr_z_min = 0.0           # Z minimo del volume caricato
+        self._gpr_z_step = 0.05         # passo Z (profondità per slice)
+        self._gpr_n_slices = 0          # numero totale slice calcolate
 
     def _cleanup_grid_state(self):
         """Teardown grid workflow transient UI state. Called by plugin unload()."""
