@@ -347,6 +347,24 @@ class CatalogGroupMixin:
             ctrl.blockSignals(False)
 
     def update_visibility_with_dial(self, value):
+        # ── GPR POINT CLOUD: se caricato, naviga per Z invece dei raster ─
+        if getattr(self, '_gpr_pc_layer', None) is not None and self._gpr_n_slices > 0:
+            from .gpr_las_volume import set_z_slice
+            idx = max(0, min(value, self._gpr_n_slices - 1))
+            z_low  = self._gpr_z_min + idx * self._gpr_z_step
+            z_high = z_low + self._gpr_z_step
+            ok_2d  = set_z_slice(self._gpr_pc_layer, z_low, z_high)
+            label  = (
+                f"GPR Z-slice [{idx + 1}/{self._gpr_n_slices}] "
+                f"{z_low:.3f}m → {z_high:.3f}m"
+            )
+            if not ok_2d:
+                label += "  ⚠ solo 3D (aggiorna QGIS ≥ 3.36)"
+            if hasattr(self, 'dlg') and hasattr(self.dlg, 'nomeraster'):
+                self.dlg.nomeraster.setText(label)
+            return
+        # ─────────────────────────────────────────────────────────────────
+
         selected_group_items = self.dlg.groupListWidget.selectedItems()
         if not selected_group_items:
             QMessageBox.warning(self.dlg, "Error", "Select at least one group before using the dial.")
