@@ -560,6 +560,7 @@ class UiLayoutMixin:
 
         for btn in [
             getattr(self, "load_groups_button", None),
+            getattr(self, "import_las_slice_button", None),
             self.dlg.zoomSelectedGroupsButton,
             getattr(self, "import_groups_button", None),
             self.dlg.createGroupButton,
