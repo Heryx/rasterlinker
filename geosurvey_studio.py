@@ -32,7 +32,25 @@ class GeoSurveyStudioPlugin(
     TraceBuild3DMixin,
     TraceToolsMixin,
 ):
-    """QGIS Plugin Implementation."""
+    """QGIS Plugin implementation with explicit mixin resolution order.
+
+    MRO (left-to-right precedence among top-level mixins):
+    1. UpdateCheckerMixin
+    2. AppRuntimeMixin
+    3. CatalogGroupMixin
+    4. CatalogToolsMixin
+    5. GridWorkflowMixin
+    6. UiLayoutMixin
+    7. TraceInfoMixin
+    8. TraceCaptureMixin
+    9. TraceBuild3DMixin
+    10. TraceToolsMixin
+
+    Potential method-name conflicts to watch:
+    - `_safe_float`: defined in `CatalogToolsMixin` and in the TraceCapture branch
+      (`TraceCaptureSnappingMixin`). With the current MRO, `CatalogToolsMixin`
+      wins. Current implementations are behaviorally equivalent.
+    """
 
     def __init__(self, iface):
         """Constructor.

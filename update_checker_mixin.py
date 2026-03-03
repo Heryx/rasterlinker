@@ -6,24 +6,26 @@ import json
 import os
 import re
 from datetime import date
+from typing import Any, Dict, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
 
 class UpdateCheckerMixin:
     _VERSION_RE = re.compile(r"(\d+(?:\.\d+){0,5})")
     _GITHUB_REPO_RE = re.compile(r"github\.com[:/]+([^/]+)/([^/#?]+)", re.IGNORECASE)
 
-    def _init_update_checker(self):
+    def _init_update_checker(self) -> None:
         """Initialise update-checker state. Called by the plugin constructor."""
         self.check_updates_action = None
         self._update_checked_this_session = False
 
-    def _update_settings_key(self, key):
+    def _update_settings_key(self, key: str) -> str:
         if hasattr(self, "_settings_key"):
             return self._settings_key(f"updates/{key}")
         return f"GeoSurveyStudio/updates/{key}"
 
-    def _plugin_metadata_general(self):
+    def _plugin_metadata_general(self) -> Dict[str, str]:
         cached = getattr(self, "_metadata_general_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -41,10 +43,10 @@ class UpdateCheckerMixin:
         self._metadata_general_cache = data
         return data
 
-    def _local_plugin_version(self):
+    def _local_plugin_version(self) -> str:
         return self._plugin_metadata_general().get("version", "")
 
-    def _extract_github_owner_repo(self, value):
+    def _extract_github_owner_repo(self, value: Any) -> Tuple[Optional[str], Optional[str]]:
         txt = str(value or "").strip()
         if not txt:
             return None, None
@@ -69,7 +71,7 @@ class UpdateCheckerMixin:
             return owner, repo
         return None, None
 
-    def _github_owner_repo(self):
+    def _github_owner_repo(self) -> Tuple[Optional[str], Optional[str]]:
         general = self._plugin_metadata_general()
         # `update_repository` lets users pin update checks to a specific repo
         # without changing homepage/tracker links.
@@ -79,7 +81,7 @@ class UpdateCheckerMixin:
                 return owner, repo
         return None, None
 
-    def _normalize_version_text(self, value):
+    def _normalize_version_text(self, value: Any) -> str:
         txt = str(value or "").strip()
         if txt.lower().startswith("v"):
             txt = txt[1:].strip()
@@ -88,7 +90,7 @@ class UpdateCheckerMixin:
             return ""
         return match.group(1)
 
-    def _version_tuple(self, value):
+    def _version_tuple(self, value: Any) -> Tuple[int, ...]:
         norm = self._normalize_version_text(value)
         if not norm:
             return tuple()
@@ -100,7 +102,7 @@ class UpdateCheckerMixin:
                 out.append(0)
         return tuple(out)
 
-    def _is_remote_version_newer(self, local_version, remote_version):
+    def _is_remote_version_newer(self, local_version: str, remote_version: str) -> bool:
         left = self._version_tuple(local_version)
         right = self._version_tuple(remote_version)
         if not left or not right:
@@ -110,7 +112,7 @@ class UpdateCheckerMixin:
         right = right + (0,) * (max_len - len(right))
         return right > left
 
-    def _github_get_json(self, url):
+    def _github_get_json(self, url: str) -> Any:
         req = Request(
             url,
             headers={
@@ -121,7 +123,7 @@ class UpdateCheckerMixin:
         with urlopen(req, timeout=6) as resp:
             return json.loads(resp.read().decode("utf-8", errors="replace"))
 
-    def _fetch_latest_remote_version(self):
+    def _fetch_latest_remote_version(self) -> Dict[str, str]:
         owner, repo = self._github_owner_repo()
         if not owner or not repo:
             raise RuntimeError("GitHub repository URL is not configured in metadata.")
@@ -159,7 +161,13 @@ class UpdateCheckerMixin:
                 }
         raise RuntimeError("No releases/tags available on GitHub.")
 
-    def _show_update_available_dialog(self, local_version, remote_version, page_url, source):
+    def _show_update_available_dialog(
+        self,
+        local_version: str,
+        remote_version: str,
+        page_url: str,
+        source: str,
+    ) -> None:
         try:
             from qgis.PyQt.QtCore import QUrl
             from qgis.PyQt.QtGui import QDesktopServices
@@ -191,7 +199,7 @@ class UpdateCheckerMixin:
         if msg.clickedButton() is open_btn and page_url:
             QDesktopServices.openUrl(QUrl(page_url))
 
-    def _notify_update_status(self, text, warn=False, duration=7):
+    def _notify_update_status(self, text: str, warn: bool = False, duration: int = 7) -> None:
         if warn:
             try:
                 self.iface.messageBar().pushWarning("GeoSurvey Studio", text)
@@ -215,7 +223,7 @@ class UpdateCheckerMixin:
         else:
             QMessageBox.information(self._ui_parent() if hasattr(self, "_ui_parent") else None, "Update Check", text)
 
-    def _check_for_updates(self, manual=False):
+    def _check_for_updates(self, manual: bool = False) -> None:
         local_version = self._local_plugin_version()
         if not local_version:
             if manual:
@@ -251,10 +259,10 @@ class UpdateCheckerMixin:
         if manual:
             self._notify_update_status(f"You are up to date (v{local_version}).", warn=False)
 
-    def check_for_updates_manual(self):
+    def check_for_updates_manual(self) -> None:
         self._check_for_updates(manual=True)
 
-    def maybe_check_for_updates_on_start(self):
+    def maybe_check_for_updates_on_start(self) -> None:
         # Run once per session and at most once per day.
         if getattr(self, "_update_checked_this_session", False):
             return

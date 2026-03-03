@@ -2,6 +2,7 @@
 """Trace tools mixin for GeoSurvey Studio plugin."""
 
 import os
+from typing import Any, Callable, Dict, List
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
@@ -14,13 +15,13 @@ from .project_catalog import load_catalog
 
 
 class TraceToolsMixin:
-    def _init_trace_tools(self):
+    def _init_trace_tools(self) -> None:
         """Initialise trace toolbar state. Called by the plugin constructor."""
         self.trace_toolbar = None
         self.trace_info_action = None
         self.trace_toolbar_actions = {}
 
-    def _cleanup_trace_tools(self):
+    def _cleanup_trace_tools(self) -> None:
         """Teardown trace toolbar state. Called by plugin unload()."""
         if self.trace_toolbar is not None:
             try:
@@ -35,7 +36,7 @@ class TraceToolsMixin:
         self.trace_info_action = None
         self.trace_toolbar_actions = {}
 
-    def _layer_is_in_trace_group(self, layer):
+    def _layer_is_in_trace_group(self, layer: Any) -> bool:
         if layer is None:
             return False
         try:
@@ -56,7 +57,7 @@ class TraceToolsMixin:
             return False
         return False
 
-    def _safe_feature_count(self, layer):
+    def _safe_feature_count(self, layer: Any) -> int:
         if layer is None:
             return 0
         try:
@@ -64,8 +65,8 @@ class TraceToolsMixin:
         except Exception:
             return 0
 
-    def _line_layers_in_project(self):
-        layers = []
+    def _line_layers_in_project(self) -> List[QgsVectorLayer]:
+        layers: List[QgsVectorLayer] = []
         for lyr in QgsProject.instance().mapLayers().values():
             if not isinstance(lyr, QgsVectorLayer):
                 continue
@@ -79,7 +80,7 @@ class TraceToolsMixin:
             layers.append(lyr)
         return layers
 
-    def _is_trace_related_line_layer(self, layer):
+    def _is_trace_related_line_layer(self, layer: Any) -> bool:
         if layer is None:
             return False
         # Group-based fallback for legacy projects: any line under "Line Traces"
@@ -95,7 +96,7 @@ class TraceToolsMixin:
             return False
         return "trace_id" in field_names or ("z_mode" in field_names and "z_source" in field_names)
 
-    def _layer_source_file_exists(self, layer):
+    def _layer_source_file_exists(self, layer: Any) -> bool:
         if layer is None:
             return False
         src = (layer.source() or "").strip()
@@ -106,8 +107,8 @@ class TraceToolsMixin:
             return False
         return os.path.exists(base)
 
-    def _collect_end_to_end_workflow_status(self):
-        status = []
+    def _collect_end_to_end_workflow_status(self) -> List[Dict[str, Any]]:
+        status: List[Dict[str, Any]] = []
 
         project_root = self._require_project_root(notify=False) if hasattr(self, "_require_project_root") else None
         project_ok = bool(project_root and os.path.isdir(project_root))
@@ -226,7 +227,7 @@ class TraceToolsMixin:
 
         return status
 
-    def run_end_to_end_workflow_check(self, checked=False):
+    def run_end_to_end_workflow_check(self, checked: bool = False) -> None:
         status = self._collect_end_to_end_workflow_status()
         total = len(status)
         passed = len([s for s in status if s.get("ok")])
@@ -258,7 +259,14 @@ class TraceToolsMixin:
         else:
             QMessageBox.warning(self._ui_parent(), title, text)
 
-    def _add_trace_toolbar_action(self, toolbar, text, callback, *icon_names, checkable=False):
+    def _add_trace_toolbar_action(
+        self,
+        toolbar: Any,
+        text: str,
+        callback: Callable[..., Any],
+        *icon_names: str,
+        checkable: bool = False,
+    ) -> QAction:
         icon = self._qgis_theme_icon(*icon_names)
         if icon is None or icon.isNull():
             icon = QIcon(':/plugins/geosurvey_studio/icon.png')
@@ -271,7 +279,7 @@ class TraceToolsMixin:
         self.trace_toolbar_actions[text] = action
         return action
 
-    def _ensure_trace_actions(self):
+    def _ensure_trace_actions(self) -> None:
         if self.trace_toolbar_actions:
             return
         self._add_trace_toolbar_action(
@@ -392,7 +400,7 @@ class TraceToolsMixin:
             "mActionAddPointLayer.svg",
         )
 
-    def _init_trace_toolbar(self):
+    def _init_trace_toolbar(self) -> None:
         if self.trace_toolbar is not None:
             return
         self._ensure_trace_actions()
@@ -422,7 +430,7 @@ class TraceToolsMixin:
                 toolbar.addAction(action)
         self.trace_toolbar = toolbar
 
-    def _trigger_iface_action(self, *action_getters):
+    def _trigger_iface_action(self, *action_getters: str) -> bool:
         for getter_name in action_getters:
             getter = getattr(self.iface, getter_name, None)
             if not callable(getter):
@@ -437,7 +445,7 @@ class TraceToolsMixin:
                 continue
         return False
 
-    def _build_trace_info_tools_panel(self, parent):
+    def _build_trace_info_tools_panel(self, parent: QWidget) -> QWidget:
         self._ensure_trace_actions()
         tools_widget = QWidget(parent)
         tools_layout = QHBoxLayout(tools_widget)
