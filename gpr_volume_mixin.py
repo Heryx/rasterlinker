@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-GPR LAS volume import – integrates with the project catalog exactly like
-timeslices: output goes to timeslices_2d/<group_name>/, slices are registered
-in the catalog, and the existing dial / update_visibility_with_dial works
-without any modification.
+GPR LAS volume import – integra con il catalogo esattamente come le timeslice.
 """
 
 import os
@@ -16,9 +13,9 @@ from qgis.PyQt.QtWidgets import (
     QFormLayout,
     QDoubleSpinBox,
     QLineEdit,
+    QComboBox,
     QDialogButtonBox,
     QLabel,
-    QCheckBox,
 )
 from qgis.core import QgsProject
 
@@ -26,7 +23,7 @@ from qgis.core import QgsProject
 class GprVolumeMixin:
 
     # ------------------------------------------------------------------
-    # Internal helpers: project root & existing volumes
+    # Internal helpers
     # ------------------------------------------------------------------
 
     def _gpr_active_project_root(self) -> str:
@@ -45,22 +42,21 @@ class GprVolumeMixin:
         volumes_dir = os.path.join(project_root, "volumes_3d")
         if not os.path.isdir(volumes_dir):
             return []
-        result = []
-        for name in sorted(os.listdir(volumes_dir)):
-            if name.lower().endswith((".las", ".laz")):
-                result.append(os.path.join(volumes_dir, name))
-        return result
+        return [
+            os.path.join(volumes_dir, n)
+            for n in sorted(os.listdir(volumes_dir))
+            if n.lower().endswith((".las", ".laz"))
+        ]
 
     # ------------------------------------------------------------------
-    # Smart file picker (Case A/B/C)
+    # Smart file picker
     # ------------------------------------------------------------------
 
     def _pick_las_files_for_slicing(self) -> list:
         project_root = self._gpr_active_project_root()
-        existing = self._gpr_volumes_in_project(project_root)
-        volumes_dir = os.path.join(project_root, "volumes_3d") if project_root else ""
+        existing     = self._gpr_volumes_in_project(project_root)
+        volumes_dir  = os.path.join(project_root, "volumes_3d") if project_root else ""
 
-        # Case A – no project / no volumes_3d
         if not project_root or not os.path.isdir(volumes_dir):
             paths, _ = QFileDialog.getOpenFileNames(
                 self.dlg, "Seleziona file LAS/LAZ", "",
@@ -68,7 +64,6 @@ class GprVolumeMixin:
             )
             return paths or []
 
-        # Case B – folder exists but empty
         if not existing:
             ans = QMessageBox.question(
                 self.dlg, "Nessun volume nel progetto",
@@ -85,7 +80,6 @@ class GprVolumeMixin:
             )
             return paths or []
 
-        # Case C – volumes present
         n = len(existing)
         preview = "\n".join(f"  \u2022 {os.path.basename(p)}" for p in existing[:10])
         if n > 10:
@@ -98,7 +92,7 @@ class GprVolumeMixin:
         )
         msg.setIcon(QMessageBox.Question)
         btn_ex  = msg.addButton("\U0001f4c2  Usa volume dal progetto", QMessageBox.AcceptRole)
-        btn_new = msg.addButton("\U0001f4e5  Importa file nuovo", QMessageBox.ActionRole)
+        btn_new = msg.addButton("\U0001f4e5  Importa file nuovo",      QMessageBox.ActionRole)
         msg.addButton(QMessageBox.Cancel)
         msg.exec_()
         clicked = msg.clickedButton()
@@ -117,8 +111,7 @@ class GprVolumeMixin:
         return []
 
     # ------------------------------------------------------------------
-    # Configuration dialog (Z range, step, resolution, radius, group name)
-    # with optional pre-fill from saved sidecar
+    # Configuration dialog
     # ------------------------------------------------------------------
 
     def _ask_slice_params(
@@ -126,8 +119,9 @@ class GprVolumeMixin:
         z_min_det: float,
         z_max_det: float,
         default_group: str = "",
-        saved: dict | None = None,   # pre-fill from sidecar
+        saved: dict | None = None,
         is_reslice: bool = False,
+        field_info: dict | None = None,   # from diagnose_las_fields()
     ) -> dict | None:
         try:
             default_res  = float((self.dlg.lineEditDistanceX.text() or "").strip())
@@ -138,26 +132,55 @@ class GprVolumeMixin:
         except ValueError:
             default_step = 0.05
 
-        # Use saved params as starting point when re-slicing
         if saved:
-            z_min_det  = saved.get("z_min",  z_min_det)
-            z_max_det  = saved.get("z_max",  z_max_det)
+            z_min_det    = saved.get("z_min",       z_min_det)
+            z_max_det    = saved.get("z_max",       z_max_det)
             default_res  = saved.get("resolution",  default_res)
-            default_step = saved.get("z_step", default_step)
+            default_step = saved.get("z_step",      default_step)
+        default_radius = saved.get("radius", default_res * 2 ** 0.5) if saved else default_res * 2 ** 0.5
 
-        default_radius = saved.get("radius", default_res * (2 ** 0.5)) if saved else default_res * (2 ** 0.5)
+        # --- build field list from diagnosis ---
+        fi = field_info or {}
+        available_fields = fi.get("available", [])   # [(name, min, max, has_data)]
+        suggested_field  = fi.get("suggested", "intensity")
+        if saved and saved.get("value_field"):
+            suggested_field = saved["value_field"]
 
+        # Build display labels: "intensity  [0 – 255]  ✓" style
+        field_names   = []
+        field_labels  = []
+        for name, mn, mx, has_data in available_fields:
+            label = f"{name}   [{mn:.0f} – {mx:.0f}]"
+            if has_data:
+                label = "\u2713 " + label
+            else:
+                label = "\u2610 " + label
+            field_names.append(name)
+            field_labels.append(label)
+
+        # Always include intensity even if not in diagnosis
+        if "intensity" not in field_names:
+            field_names.insert(0, "intensity")
+            field_labels.insert(0, "\u2610 intensity   [?]")
+
+        # --- build dialog ---
         dlg = QDialog(self.dlg)
         dlg.setWindowTitle("Re-slice: modifica parametri" if is_reslice else "Configura slice LAS")
-        dlg.setMinimumWidth(360)
+        dlg.setMinimumWidth(400)
         layout = QVBoxLayout(dlg)
 
-        info = QLabel(
-            ("Parametri precedenti caricati dal sidecar.\n" if is_reslice else "") +
+        # Header info
+        n_points = fi.get("n_points", 0)
+        pf_id    = fi.get("point_format", -1)
+        info_text = (
+            ("Parametri precedenti caricati.\n" if is_reslice else "") +
             f"Range Z rilevato: [{z_min_det:.4f}, {z_max_det:.4f}] m"
         )
-        info.setWordWrap(True)
-        layout.addWidget(info)
+        if n_points > 0:
+            info_text += f"\nPunti: {n_points:,}   |   Point format: {pf_id}"
+        info_lbl = QLabel(info_text)
+        info_lbl.setWordWrap(True)
+        layout.addWidget(info_lbl)
 
         form = QFormLayout()
 
@@ -175,16 +198,27 @@ class GprVolumeMixin:
         sp_res    = _spin(0.001, 1000, 4, 0.01, default_res)
         sp_radius = _spin(0.001, 1000, 4, 0.01, default_radius)
 
+        # Field selector
+        cb_field = QComboBox()
+        for lbl in field_labels:
+            cb_field.addItem(lbl)
+        # Pre-select suggested
+        try:
+            cb_field.setCurrentIndex(field_names.index(suggested_field))
+        except ValueError:
+            pass
+
         le_group = QLineEdit()
         le_group.setText(saved.get("group_name", default_group) if saved else default_group)
         le_group.setPlaceholderText("Nome del gruppo (cartella output)")
 
-        form.addRow("Z minimo (m):",        sp_zmin)
-        form.addRow("Z massimo (m):",        sp_zmax)
-        form.addRow("Step Z — dz (m):",     sp_step)
-        form.addRow("Risoluzione XY (m):",  sp_res)
-        form.addRow("Radius IDW (m):",       sp_radius)
-        form.addRow("Nome gruppo:",           le_group)
+        form.addRow("Campo valori:",       cb_field)
+        form.addRow("Z minimo (m):",       sp_zmin)
+        form.addRow("Z massimo (m):",      sp_zmax)
+        form.addRow("Step Z — dz (m):",    sp_step)
+        form.addRow("Risoluzione XY (m):", sp_res)
+        form.addRow("Radius IDW (m):",      sp_radius)
+        form.addRow("Nome gruppo:",          le_group)
         layout.addLayout(form)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -195,17 +229,21 @@ class GprVolumeMixin:
         if dlg.exec_() != QDialog.Accepted:
             return None
 
+        chosen_idx   = cb_field.currentIndex()
+        chosen_field = field_names[chosen_idx] if 0 <= chosen_idx < len(field_names) else "intensity"
+
         return {
-            "z_min":      sp_zmin.value(),
-            "z_max":      sp_zmax.value(),
-            "z_step":     sp_step.value(),
-            "resolution": sp_res.value(),
-            "radius":     sp_radius.value(),
-            "group_name": le_group.text().strip() or default_group,
+            "z_min":       sp_zmin.value(),
+            "z_max":       sp_zmax.value(),
+            "z_step":      sp_step.value(),
+            "resolution":  sp_res.value(),
+            "radius":      sp_radius.value(),
+            "group_name":  le_group.text().strip() or default_group,
+            "value_field": chosen_field,
         }
 
     # ------------------------------------------------------------------
-    # Catalog registration helpers
+    # Catalog registration
     # ------------------------------------------------------------------
 
     def _register_las_slices_in_catalog(
@@ -216,26 +254,18 @@ class GprVolumeMixin:
         epsg: int | None,
         reslice: bool = False,
     ) -> str:
-        """
-        Register generated TIF slices as timeslice records in the project
-        catalog, create (or reuse) a raster group, and assign them.
-        Returns the group ID.
-        """
         from .project_catalog import (
             load_catalog, save_catalog,
             create_raster_group, register_timeslices_batch,
             assign_timeslices_to_group, utc_now_iso,
         )
 
-        crs_authid = f"EPSG:{epsg}" if epsg else None
-
         if reslice:
-            # Remove old timeslice records that belonged to this group.
             catalog = load_catalog(project_root)
             grp = next(
                 (g for g in catalog.get("raster_groups", [])
                  if (g.get("name") or "").strip().lower() == group_name.strip().lower()),
-                None
+                None,
             )
             if grp:
                 old_ids = set(grp.get("timeslice_ids", []))
@@ -248,27 +278,26 @@ class GprVolumeMixin:
 
         group_record, _ = create_raster_group(project_root, group_name)
         group_id = group_record["id"]
+        now      = utc_now_iso()
+        crs_auth = f"EPSG:{epsg}" if epsg else None
 
-        now = utc_now_iso()
-        records = []
-        for sl in slices:
-            rec_id = f"timeslice_{now}_{sl['index']:04d}"
-            records.append({
-                "id":          rec_id,
-                "name":        sl["name"],
+        records = [
+            {
+                "id":           f"timeslice_{now}_{sl['index']:04d}",
+                "name":         sl["name"],
                 "project_path": sl["path"],
-                "depth_from":  sl["z_from"],
-                "depth_to":    sl["z_to"],
-                "unit":        "m",
-                "crs":         crs_authid,
-                "z_source":    "las_volume",
-                "imported_at": now,
-            })
+                "depth_from":   sl["z_from"],
+                "depth_to":     sl["z_to"],
+                "unit":         "m",
+                "crs":          crs_auth,
+                "z_source":     "las_volume",
+                "imported_at":  now,
+            }
+            for sl in slices
+        ]
 
         register_timeslices_batch(project_root, records)
-        assign_timeslices_to_group(
-            project_root, group_id, [r["id"] for r in records]
-        )
+        assign_timeslices_to_group(project_root, group_id, [r["id"] for r in records])
         return group_id
 
     # ------------------------------------------------------------------
@@ -276,10 +305,13 @@ class GprVolumeMixin:
     # ------------------------------------------------------------------
 
     def import_las_as_slices(self):
-        """Entry point for the 'Import LAS → Slice' button."""
+        """Entry point for the 'Import LAS \u2192 Slice' button."""
         from .gpr_utils import check_laspy
         from .gpr_las_volume import get_z_range_chunked
-        from .gpr_las_slicer import slice_las_to_tifs, save_slicer_params, load_slicer_params
+        from .gpr_las_slicer import (
+            slice_las_to_tifs, save_slicer_params, load_slicer_params,
+            diagnose_las_fields,
+        )
 
         result_laspy = check_laspy()
         if not result_laspy.get("ok"):
@@ -297,30 +329,34 @@ class GprVolumeMixin:
         if not project_root:
             QMessageBox.warning(
                 self.dlg, "Nessun progetto attivo",
-                "Nessun progetto attivo.\n"
                 "Apri il Project Manager e crea/apri un progetto prima di importare.",
             )
             return
 
-        epsg = QgsProject.instance().crs().postgisSrid() or None
+        epsg      = QgsProject.instance().crs().postgisSrid() or None
         loaded_ok = 0
         failed    = 0
 
         for file_path in file_paths:
             base = os.path.splitext(os.path.basename(file_path))[0]
-            # sanitize for use as folder name
             safe_base = "".join(
                 c if c.isalnum() or c in "_-" else "_" for c in base
             ).strip("_") or "las_slices"
 
-            # Check for existing sidecar (re-slice scenario)
-            candidate_dir = os.path.join(
-                project_root, "timeslices_2d", safe_base
-            )
-            saved_params = load_slicer_params(candidate_dir)
-            is_reslice   = saved_params is not None
+            # Check for sidecar (re-slice)
+            candidate_dir = os.path.join(project_root, "timeslices_2d", safe_base)
+            saved_params  = load_slicer_params(candidate_dir)
+            is_reslice    = saved_params is not None
 
-            # Read Z range
+            # Step 1: quick field diagnosis (reads only first 30k points)
+            if hasattr(self, "_notify_info"):
+                self._notify_info("Analisi campi del file LAS in corso\u2026", duration=5)
+            try:
+                field_info = diagnose_las_fields(file_path)
+            except Exception:
+                field_info = {}
+
+            # Step 2: read Z range
             try:
                 z_min_det, z_max_det = get_z_range_chunked(file_path)
             except Exception as e:
@@ -331,33 +367,41 @@ class GprVolumeMixin:
                 failed += 1
                 continue
 
-            # Config dialog
+            # Step 3: config dialog (with field selector)
             params = self._ask_slice_params(
                 z_min_det, z_max_det,
                 default_group=safe_base,
                 saved=saved_params,
                 is_reslice=is_reslice,
+                field_info=field_info,
             )
             if params is None:
                 continue
 
             group_name = params["group_name"] or safe_base
-            output_dir = os.path.join(
-                project_root, "timeslices_2d", group_name
-            )
+            output_dir = os.path.join(project_root, "timeslices_2d", group_name)
             os.makedirs(output_dir, exist_ok=True)
 
-            # Generate slices
+            # Step 4: generate slice TIFs
+            if hasattr(self, "_notify_info"):
+                self._notify_info(
+                    f"Generazione slice in corso\u2026 "
+                    f"campo='{params['value_field']}', "
+                    f"dz={params['z_step']:.3f} m, "
+                    f"res={params['resolution']:.3f} m",
+                    duration=30,
+                )
             try:
                 slices = slice_las_to_tifs(
-                    las_path   = file_path,
-                    output_dir = output_dir,
-                    resolution = params["resolution"],
-                    z_step     = params["z_step"],
-                    z_min      = params["z_min"],
-                    z_max      = params["z_max"],
-                    radius     = params["radius"],
-                    epsg       = epsg,
+                    las_path    = file_path,
+                    output_dir  = output_dir,
+                    resolution  = params["resolution"],
+                    z_step      = params["z_step"],
+                    z_min       = params["z_min"],
+                    z_max       = params["z_max"],
+                    radius      = params["radius"],
+                    epsg        = epsg,
+                    value_field = params["value_field"],
                 )
             except Exception as e:
                 QMessageBox.critical(
@@ -369,13 +413,13 @@ class GprVolumeMixin:
             if not slices:
                 QMessageBox.warning(
                     self.dlg, "Nessuna slice generata",
-                    f"Nessun punto trovato nel range Z scelto:\n"
+                    f"Nessun punto nel range Z scelto:\n"
                     f"[{params['z_min']:.4f}, {params['z_max']:.4f}] m",
                 )
                 failed += 1
                 continue
 
-            # Save sidecar for future re-slice
+            # Step 5: save sidecar
             save_slicer_params(output_dir, {
                 "source_las":  file_path,
                 "group_name":  group_name,
@@ -384,11 +428,12 @@ class GprVolumeMixin:
                 "z_step":      params["z_step"],
                 "resolution":  params["resolution"],
                 "radius":      params["radius"],
+                "value_field": params["value_field"],
                 "epsg":        epsg,
                 "n_slices":    len(slices),
             })
 
-            # Register in catalog (same as timeslice import)
+            # Step 6: register in catalog (= timeslice logic)
             try:
                 self._register_las_slices_in_catalog(
                     project_root, group_name, slices, epsg,
@@ -398,29 +443,27 @@ class GprVolumeMixin:
                 QMessageBox.warning(
                     self.dlg, "Errore registrazione catalogo", str(e)
                 )
-                # slices are on disk — continue anyway
 
-            # Refresh UI — same call used after every timeslice import
+            # Step 7: refresh UI
             if hasattr(self, "populate_group_list"):
                 try:
                     self.populate_group_list()
                 except Exception:
                     pass
 
+            action = "Re-slice" if is_reslice else "Import LAS\u2192Slice"
             if hasattr(self, "_notify_info"):
-                action = "Re-slice" if is_reslice else "Import LAS→Slice"
                 self._notify_info(
-                    f"{action} OK: gruppo '{group_name}', "
+                    f"{action} OK: '{group_name}', "
                     f"{len(slices)} slice, "
-                    f"dz={params['z_step']:.3f} m, "
-                    f"res={params['resolution']:.3f} m, "
-                    f"radius={params['radius']:.3f} m.",
+                    f"campo='{params['value_field']}', "
+                    f"dz={params['z_step']:.3f} m, res={params['resolution']:.3f} m.",
                     duration=12,
                 )
             loaded_ok += 1
 
         if hasattr(self, "_notify_info"):
             self._notify_info(
-                f"Import LAS→Slice completato. OK: {loaded_ok}, falliti: {failed}.",
+                f"Import LAS\u2192Slice completato. OK: {loaded_ok}, falliti: {failed}.",
                 duration=8,
             )
