@@ -11,6 +11,7 @@ from .trace_capture_mixin import TraceCaptureMixin
 from .trace_build3d_mixin import TraceBuild3DMixin
 from .catalog_group_mixin import CatalogGroupMixin
 from .catalog_tools_mixin import CatalogToolsMixin
+from .gpr_volume_mixin import GprVolumeMixin
 from .grid_workflow_mixin import GridWorkflowMixin
 from .ui_layout_mixin import UiLayoutMixin
 from .app_runtime_mixin import AppRuntimeMixin
@@ -30,6 +31,7 @@ class GeoSurveyStudioPlugin(
     AppRuntimeMixin,
     CatalogGroupMixin,
     CatalogToolsMixin,
+    GprVolumeMixin,
     GridWorkflowMixin,
     UiLayoutMixin,
     TraceInfoMixin,
