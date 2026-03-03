@@ -172,7 +172,6 @@ class AppRuntimeMixin:
             self.export_layout_button.setToolTip("Quick PDF export for selected group.")
             self.export_layout_button.setStatusTip("Export quick layout PDF")
             self.export_layout_button.clicked.connect(self.export_group_layout_quick)
-            self.dlg.gridLayout.addWidget(self.export_layout_button, 7, 0, 1, 2)
 
             if hasattr(self.dlg, "groupNameEdit"):
                 self.dlg.groupNameEdit.setPlaceholderText("New group name")
