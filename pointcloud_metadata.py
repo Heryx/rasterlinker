@@ -9,58 +9,48 @@ import struct
 from qgis.core import QgsPointCloudLayer
 
 
-def _validate_uncompressed_las_header(file_path):
-    """Validate uncompressed LAS point-count vs file-size consistency."""
+def _check_las_signature(file_path: str) -> None:
+    """
+    Minimal sanity check: verify the LASF signature and that the file
+    is large enough to contain a basic header.
+
+    Deliberately does NOT check point_count vs file_size because:
+    - Some tools (CloudCompare, LAStools, custom subsamplers) write the
+      original point_count in the header after subsampling, making the
+      body smaller than the header claims.
+    - Compressed LAS variants stored with a .las extension appear smaller
+      than point_count * point_size.
+    - PDAL (via QgsPointCloudLayer) is the authoritative validity check
+      and handles all these cases correctly.
+    """
     if os.path.splitext(file_path)[1].lower() != ".las":
-        return
+        return  # LAZ / COPC: skip, PDAL handles them
 
     with open(file_path, "rb") as fh:
-        header = fh.read(375)
+        header = fh.read(128)
 
-    if len(header) < 111:
-        raise ValueError("Header LAS incompleto (file troppo corto).")
+    if len(header) < 4:
+        raise ValueError("File LAS troppo corto per essere valido.")
     if header[0:4] != b"LASF":
-        raise ValueError("Header LAS non valido (firma LASF mancante).")
-
-    version_major = header[24]
-    version_minor = header[25]
-    point_offset = struct.unpack_from("<I", header, 96)[0]
-    point_size = struct.unpack_from("<H", header, 105)[0]
-    legacy_count = struct.unpack_from("<I", header, 107)[0]
-    has_extended_count = (version_major > 1) or (
-        version_major == 1 and version_minor >= 4
-    )
-    if has_extended_count and len(header) < 255:
-        raise ValueError("Header LAS 1.4 incompleto (campo point_count esteso mancante).")
-
-    extended_count = (
-        struct.unpack_from("<Q", header, 247)[0] if has_extended_count else 0
-    )
-    point_count = extended_count if extended_count > 0 else legacy_count
-
-    if point_count <= 0 or point_size <= 0:
-        return
-
-    file_size = os.path.getsize(file_path)
-    minimum_size = int(point_offset) + int(point_count) * int(point_size)
-    if minimum_size > file_size:
         raise ValueError(
-            "Header LAS incoerente: "
-            f"point_count={point_count}, point_size={point_size}, "
-            f"offset={point_offset}, file_size={file_size}. "
-            "File troncato/corrotto o esportazione LAS non valida."
+            "File LAS non valido: firma LASF mancante. "
+            "Il file potrebbe essere corrotto o non essere un LAS."
         )
 
 
-def inspect_las_laz(file_path):
+def inspect_las_laz(file_path: str) -> dict:
     """
     Return best-effort metadata for a LAS/LAZ file.
+
+    Raises ValueError if the file is missing, empty, lacks the LASF
+    signature, or cannot be loaded by the PDAL provider.
     """
     if not os.path.isfile(file_path):
         raise ValueError(f"Point cloud file not found: {file_path}")
     if os.path.getsize(file_path) <= 0:
         raise ValueError(f"Point cloud file is empty: {file_path}")
-    _validate_uncompressed_las_header(file_path)
+
+    _check_las_signature(file_path)
 
     layer_name = os.path.basename(file_path)
     layer = QgsPointCloudLayer(file_path, layer_name, "pdal")
@@ -75,13 +65,12 @@ def inspect_las_laz(file_path):
         except Exception:
             err_txt = ""
         suffix = f" | provider: {err_txt}" if err_txt else ""
-        raise ValueError(f"Invalid point cloud layer: {file_path}{suffix}")
+        raise ValueError(f"PDAL non riesce ad aprire il file: {file_path}{suffix}")
 
     extent = layer.extent()
     crs_authid = layer.crs().authid() if layer.crs().isValid() else None
 
     point_count = None
-    # pointCount API may vary by QGIS version/provider.
     if hasattr(layer, "pointCount"):
         try:
             point_count = int(layer.pointCount())
