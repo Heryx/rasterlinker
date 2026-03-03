@@ -10,7 +10,7 @@ except ImportError:
     laspy = None
     np = None
     _HAS_LASPY = False
-from qgis.core import QgsLayerTreeLayer, QgsPointCloudLayer, QgsProject
+from qgis.core import QgsPointCloudLayer
 
 
 def get_z_range_chunked(las_path: str, chunk_size: int = 200_000) -> tuple[float, float]:
@@ -38,14 +38,6 @@ def get_z_range_chunked(las_path: str, chunk_size: int = 200_000) -> tuple[float
         raise ValueError("File LAS vuoto o privo di coordinate Z")
 
     return float(z_min), float(z_max)
-
-
-def load_gpr_pointcloud(las_path: str, layer_name: str = "GPR_Volume") -> QgsPointCloudLayer:
-    """Create and validate a QGIS point cloud layer backed by PDAL."""
-    layer = QgsPointCloudLayer(las_path, layer_name, "pdal")
-    if not layer.isValid():
-        raise ValueError("Impossibile caricare il LAS: richiede QGIS >= 3.18 con provider PDAL attivo.")
-    return layer
 
 
 def set_z_slice(layer: QgsPointCloudLayer, z_low: float, z_high: float) -> bool:
