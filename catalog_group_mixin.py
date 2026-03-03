@@ -364,7 +364,12 @@ class CatalogGroupMixin:
             )
             if not ok_2d:
                 label += "  ⚠ solo 3D (aggiorna QGIS ≥ 3.36)"
-            if hasattr(self, 'dlg') and hasattr(self.dlg, 'nomeraster'):
+            if hasattr(self, "_set_name_raster_label"):
+                try:
+                    self._set_name_raster_label(label)
+                except Exception:
+                    pass
+            elif hasattr(self, "dlg") and hasattr(self.dlg, "nomeraster"):
                 self.dlg.nomeraster.setText(label)
             return
         # ─────────────────────────────────────────────────────────────────

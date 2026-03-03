@@ -46,12 +46,13 @@ class GeoSurveyStudioPlugin(
     2. AppRuntimeMixin
     3. CatalogGroupMixin
     4. CatalogToolsMixin
-    5. GridWorkflowMixin
-    6. UiLayoutMixin
-    7. TraceInfoMixin
-    8. TraceCaptureMixin
-    9. TraceBuild3DMixin
-    10. TraceToolsMixin
+    5. GprVolumeMixin
+    6. GridWorkflowMixin
+    7. UiLayoutMixin
+    8. TraceInfoMixin
+    9. TraceCaptureMixin
+    10. TraceBuild3DMixin
+    11. TraceToolsMixin
 
     Potential method-name conflicts to watch:
     - `_safe_float`: defined in `CatalogToolsMixin` and in the TraceCapture branch
