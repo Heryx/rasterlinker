@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from typing import Optional
 
 import numpy as np
 
@@ -18,10 +19,10 @@ def generate_slices_pdal(
     z_max: float,
     z_step: float,
     resolution: float = 0.10,
-    radius: float = None,
+    radius: Optional[float] = None,
     output_type: str = "mean",
     amplitude_field: str = "Intensity",
-    crs_epsg: int = None,
+    crs_epsg: Optional[int] = None,
 ) -> list[str]:
     """Generate GeoTIFF slices from LAS/COPC using PDAL pipelines."""
     if shutil.which("pdal") is None:
@@ -91,4 +92,3 @@ def generate_slices_pdal(
             output_paths.append(out_tif)
 
     return sorted(output_paths)
-
