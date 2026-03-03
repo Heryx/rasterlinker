@@ -30,6 +30,7 @@ class UiLayoutMixin:
         self.group_tools_label = None
         self.image_tools_label = None
         self.load_groups_button = None
+        self.import_las_slice_button = None
         self.import_groups_button = None
         self.enhance_minmax_button = None
         self.enhance_batch_button = None
@@ -129,8 +130,19 @@ class UiLayoutMixin:
         group_layout.addWidget(self.dlg.zoomSelectedGroupsButton, 0, 1, 1, 1)
         group_layout.addWidget(self.import_groups_button, 1, 0, 1, 1)
         group_layout.addWidget(self.dlg.createGroupButton, 1, 1, 1, 1)
+        self.import_las_slice_button = QPushButton("🗂 Import LAS → Slice", group_tab)
+        self.import_las_slice_button.setObjectName("importLasSliceButton")
+        self.import_las_slice_button.setToolTip(
+            "Importa COPC/LAS GPR, genera slice GeoTIFF via PDAL.\n"
+            "Distance X = risoluzione raster (m)\n"
+            "Distance Y = spessore slice Z (m)\n"
+            "Area Names = nome gruppo output\n"
+            "Richiede: PDAL nel PATH + laspy>=2.0"
+        )
+        self.import_las_slice_button.clicked.connect(self.import_las_as_slices)
+        group_layout.addWidget(self.import_las_slice_button, 2, 0, 1, 2)
         if hasattr(self.dlg, "groupNameEdit"):
-            group_layout.addWidget(self.dlg.groupNameEdit, 2, 0, 1, 2)
+            group_layout.addWidget(self.dlg.groupNameEdit, 3, 0, 1, 2)
         group_layout.setColumnStretch(0, 1)
         group_layout.setColumnStretch(1, 1)
         group_layout.setRowStretch(0, 0)
