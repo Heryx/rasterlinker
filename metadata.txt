@@ -3,7 +3,7 @@
 # This file should be included when you package your plugin.# Mandatory items:
 
 [general]
-name=GeoSurvey Studio
+name=GeoSurvey Studio (Refactor)
 qgisMinimumVersion=3.0
 description=QGIS plugin to organize raster datasets in groups and create oriented survey grids from drawn areas.
 version=1.1.1
