@@ -4,6 +4,7 @@
 from qgis.PyQt.QtCore import QSettings, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
+from qgis.core import QgsMessageLog, Qgis
 from .trace_tools_mixin import TraceToolsMixin
 from .trace_info_mixin import TraceInfoMixin
 from .trace_capture_mixin import TraceCaptureMixin
@@ -133,14 +134,14 @@ class GeoSurveyStudioPlugin(
             else:
                 try:
                     self.plugin_toolbar.removeAction(action)
-                except Exception:
-                    pass
+                except Exception as e:
+                    QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
         self.actions = []
         if self.plugin_toolbar is not None:
             try:
                 self.iface.mainWindow().removeToolBar(self.plugin_toolbar)
-            except Exception:
-                pass
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
             self.plugin_toolbar.deleteLater()
             self.plugin_toolbar = None
         if self.dock_widget is not None:
@@ -151,16 +152,16 @@ class GeoSurveyStudioPlugin(
         if self.trace_toolbar is not None:
             try:
                 self.iface.mainWindow().removeToolBar(self.trace_toolbar)
-            except Exception:
-                pass
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
             self.trace_toolbar.deleteLater()
             self.trace_toolbar = None
             self.trace_toolbar_actions = {}
         if self.trace_info_dock is not None:
             try:
                 self.iface.removeDockWidget(self.trace_info_dock)
-            except Exception:
-                pass
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
             self.trace_info_dock.deleteLater()
             self.trace_info_dock = None
             self.trace_info_table = None
@@ -197,8 +198,8 @@ class GeoSurveyStudioPlugin(
                     if canvas.viewport() is not None:
                         canvas.viewport().removeEventFilter(self.trace_canvas_click_filter)
                     canvas.removeEventFilter(self.trace_canvas_click_filter)
-            except Exception:
-                pass
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
             self.trace_canvas_click_filter = None
             self.trace_canvas_click_capture_enabled = False
             self.trace_pending_vertex_clicks = []
@@ -212,12 +213,12 @@ class GeoSurveyStudioPlugin(
         if self.orientation_helper_dialog is not None:
             try:
                 self.orientation_helper_dialog.hide()
-            except Exception:
-                pass
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
             try:
                 self.orientation_helper_dialog.deleteLater()
-            except Exception:
-                pass
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
             self.orientation_helper_dialog = None
             self.orientation_helper_status_label = None
             self.orientation_helper_edits = {}
