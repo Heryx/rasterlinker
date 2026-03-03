@@ -65,6 +65,29 @@ class TraceCaptureMixin(TraceStorageMixin, TraceLabelingMixin, TraceEditingMixin
         self.trace_canvas_wheel_modifier = "alt"
         self.trace_discard_outside_raster = False
 
+    def _cleanup_trace_capture(self):
+        """Teardown trace capture runtime state. Called by plugin unload()."""
+        if self.trace_canvas_click_filter is not None:
+            try:
+                canvas = self.iface.mapCanvas()
+                if canvas is not None:
+                    if canvas.viewport() is not None:
+                        canvas.viewport().removeEventFilter(self.trace_canvas_click_filter)
+                    canvas.removeEventFilter(self.trace_canvas_click_filter)
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
+        self.trace_canvas_click_filter = None
+        self.trace_canvas_click_capture_enabled = False
+        self.trace_pending_vertex_clicks = []
+        self.trace_canvas_wheel_modifier = "alt"
+        self.trace_interpretation_prompted_keys = set()
+        self.trace_interpretation_prompted_trace_ids = set()
+        self.trace_draw_session_state = "idle"
+        self.trace_postprocess_inflight = set()
+        self.trace_postprocess_done = set()
+        self.trace_postprocess_done_trace_ids = set()
+        self.trace_z_grid_cache = {}
+
     def _trace_debug_enabled(self):
         try:
             raw_local = getattr(self, "trace_debug_logging", None)

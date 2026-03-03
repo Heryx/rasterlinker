@@ -5,7 +5,7 @@ import json
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
-from qgis.core import QgsProject
+from qgis.core import QgsProject, QgsMessageLog, Qgis
 from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QDockWidget,
@@ -66,6 +66,47 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         self.trace_info_saved_selected_fid = None
         self.trace_info_saved_selected_trace_id = ""
         self.trace_info_form_preview_key = "timeslice"
+
+    def _cleanup_trace_info(self):
+        """Teardown trace info dock state. Called by plugin unload()."""
+        if self.trace_info_dock is not None:
+            try:
+                self.iface.removeDockWidget(self.trace_info_dock)
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
+            try:
+                self.trace_info_dock.deleteLater()
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
+            self.trace_info_dock = None
+
+        self.trace_info_table = None
+        self.trace_info_model = None
+        self.trace_info_filter_edit = None
+        self.trace_info_filter_field_combo = None
+        self.trace_info_mode_combo = None
+        self.trace_info_sort_field_combo = None
+        self.trace_info_sort_order_combo = None
+        self.trace_info_depth_pick_combo = None
+        self.trace_info_depth_pick_btn = None
+        self.trace_depth_pick_mode = "off"
+        self.trace_info_stack = None
+        self.trace_info_form_list = None
+        self.trace_info_form_fields = {}
+        self.trace_info_vertex_table = None
+        self.trace_info_source_layer_id = None
+        self.trace_info_form_preview_combo = None
+        self.trace_info_form_preview_key = "timeslice"
+        self.trace_info_view_table_btn = None
+        self.trace_info_view_form_btn = None
+        self.trace_info_query_btn = None
+        self.trace_info_query_panel = None
+        self.trace_info_interpretation_prompt_action = None
+        self.trace_info_discard_outside_raster_action = None
+        self.trace_info_help_btn = None
+        self.trace_info_help_panel = None
+        self.trace_info_selection_guard = False
+        self.trace_info_is_docked = False
 
     def _set_trace_interpretation_prompt_enabled(self, enabled, persist=True):
         self.trace_prompt_interpretation_popup = bool(enabled)

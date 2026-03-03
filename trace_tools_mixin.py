@@ -7,7 +7,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 from PyQt5.QtWidgets import QWidget, QHBoxLayout, QToolButton, QMessageBox, QFrame, QMenu
-from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes
+from qgis.core import QgsProject, QgsVectorLayer, QgsWkbTypes, QgsMessageLog, Qgis
 from .layer_property_utils import get_layer_property
 
 from .project_catalog import load_catalog
@@ -16,6 +16,21 @@ from .project_catalog import load_catalog
 class TraceToolsMixin:
     def _init_trace_tools(self):
         """Initialise trace toolbar state. Called by the plugin constructor."""
+        self.trace_toolbar = None
+        self.trace_info_action = None
+        self.trace_toolbar_actions = {}
+
+    def _cleanup_trace_tools(self):
+        """Teardown trace toolbar state. Called by plugin unload()."""
+        if self.trace_toolbar is not None:
+            try:
+                self.iface.mainWindow().removeToolBar(self.trace_toolbar)
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
+            try:
+                self.trace_toolbar.deleteLater()
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
         self.trace_toolbar = None
         self.trace_info_action = None
         self.trace_toolbar_actions = {}

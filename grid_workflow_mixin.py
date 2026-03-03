@@ -13,6 +13,7 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.core import (
     Qgis,
+    QgsMessageLog,
     QgsLayerTreeGroup,
     QgsPointLocator,
     QgsProject,
@@ -61,6 +62,22 @@ class GridWorkflowMixin:
         self.internal_grid_checkbox = None
         self.last_area_layer = None
         self.last_grid_layer = None
+
+    def _cleanup_grid_state(self):
+        """Teardown grid workflow transient UI state. Called by plugin unload()."""
+        if self.orientation_helper_dialog is not None:
+            try:
+                self.orientation_helper_dialog.hide()
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
+            try:
+                self.orientation_helper_dialog.deleteLater()
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
+            self.orientation_helper_dialog = None
+        self.orientation_helper_status_label = None
+        self.orientation_helper_edits = {}
+        self._orientation_helper_syncing = False
 
     def _orientation_main_fields_map(self):
         dlg = getattr(self, "dlg", None)
