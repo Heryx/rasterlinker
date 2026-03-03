@@ -1,27 +1,27 @@
 """LAS/LAZ → GeoTIFF slice generator with IDW interpolation.
 
-Field diagnosis reads only the first N points (fast) so the selection
-dialog can be shown before loading the full file.
+Supports:
+  - single-band (intensity / any field)
+  - 3-band RGB (field='rgb') → GeoTIFF + QML sidecar multibandcolor
 """
 
 from __future__ import annotations
 
 import json
 import os
+import textwrap
 
 import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# LAS field diagnosis  (fast: reads first n_sample points only)
+# LAS field diagnosis  (fast: first n_sample points only)
 # ---------------------------------------------------------------------------
 
-# Fields that carry useful raster values for GPR/geophysics
 _USEFUL_FIELDS = (
     "intensity", "red", "green", "blue",
     "amplitude", "reflectance", "deviation", "signal",
 )
-# Fields that are always present but never useful as raster values
 _SKIP_FIELDS = frozenset((
     "x", "y", "z", "X", "Y", "Z",
     "return_number", "number_of_returns",
@@ -34,20 +34,20 @@ _SKIP_FIELDS = frozenset((
 
 def diagnose_las_fields(las_path: str, n_sample: int = 30000) -> dict:
     """
-    Quick diagnosis of available value fields in a LAS/LAZ file.
-    Reads only the first `n_sample` points.
+    Quick diagnosis of available value fields.
+    Reads only first `n_sample` points.
 
-    Returns a dict:
+    Returns:
         {
-          "available": [(name, min, max, has_data: bool), ...],
-          "suggested": field_name,
+          "available":    [(name, min, max, has_data), ...],
+          "suggested":    field_name,
           "point_format": int,
-          "n_points": int,
+          "n_points":     int,
         }
     """
     import laspy  # type: ignore
 
-    result: dict = {
+    result = {
         "available":    [],
         "suggested":    "intensity",
         "point_format": -1,
@@ -57,19 +57,16 @@ def diagnose_las_fields(las_path: str, n_sample: int = 30000) -> dict:
     try:
         with laspy.LasReader(las_path) as reader:
             result["point_format"] = int(reader.header.point_format.id)
-            result["n_points"] = int(reader.header.point_count)
+            result["n_points"]     = int(reader.header.point_count)
 
-            fmt = reader.header.point_format
+            fmt      = reader.header.point_format
             all_dims = list(fmt.dimension_names)
-
-            # Extra bytes fields
             try:
                 for ed in fmt.extra_dims:
                     all_dims.append(ed.name)
             except Exception:
                 pass
 
-            # Read first chunk for value estimation
             sample = None
             try:
                 for chunk in reader.chunk_iterator(n_sample):
@@ -82,57 +79,66 @@ def diagnose_las_fields(las_path: str, n_sample: int = 30000) -> dict:
                 if name in _SKIP_FIELDS:
                     continue
                 try:
-                    arr = np.asarray(getattr(sample or reader, name), dtype=np.float64)
+                    arr    = np.asarray(getattr(sample or reader, name), dtype=np.float64)
                     finite = arr[np.isfinite(arr)]
                     if finite.size == 0:
                         continue
-                    mn = float(finite.min())
-                    mx = float(finite.max())
+                    mn, mx   = float(finite.min()), float(finite.max())
                     has_data = mx > mn or mx > 0
                     result["available"].append((name, mn, mx, has_data))
                 except Exception:
                     pass
 
     except Exception:
-        # Minimal fallback: report intensity with unknown range
         result["available"] = [("intensity", 0.0, 0.0, False)]
         return result
 
-    # Sort: useful fields with data first, then others
-    def _sort_key(entry):
-        name, mn, mx, has_data = entry
-        prio = 0 if name in _USEFUL_FIELDS else 1
-        has = 0 if has_data else 1
-        return (prio, has, name)
+    # Sort: useful fields with data first
+    def _sort_key(e):
+        name, mn, mx, has_data = e
+        return (0 if name in _USEFUL_FIELDS else 1, 0 if has_data else 1, name)
 
     result["available"].sort(key=_sort_key)
 
-    # Auto-suggest: first field in priority list that has data
-    for name, mn, mx, has_data in result["available"]:
-        if has_data:
-            result["suggested"] = name
-            break
+    # --- Check whether RGB is fully available with data ---
+    field_map = {name: (mn, mx, hd) for name, mn, mx, hd in result["available"]}
+    r_ok = field_map.get("red",   (0, 0, False))[2]
+    g_ok = field_map.get("green", (0, 0, False))[2]
+    b_ok = field_map.get("blue",  (0, 0, False))[2]
+
+    if r_ok and g_ok and b_ok:
+        # Aggregate range: min of mins, max of maxes
+        mn_rgb = min(field_map["red"][0], field_map["green"][0], field_map["blue"][0])
+        mx_rgb = max(field_map["red"][1], field_map["green"][1], field_map["blue"][1])
+        # Insert at top of list
+        result["available"].insert(0, ("rgb", mn_rgb, mx_rgb, True))
+        result["suggested"] = "rgb"
+    else:
+        # Fall back to first field with data
+        for name, mn, mx, has_data in result["available"]:
+            if has_data:
+                result["suggested"] = name
+                break
 
     return result
 
 
 # ---------------------------------------------------------------------------
-# LAS reading (full file)
+# LAS reading
 # ---------------------------------------------------------------------------
 
 def _read_las_arrays(las_path: str, value_field: str = "intensity"):
     """
-    Read X, Y, Z, and the chosen value field from LAS/LAZ.
-    Returns (x, y, z, values) as float64/float32 numpy arrays.
+    Read X, Y, Z and a single value field.  Returns (x, y, z, values).
     """
     import laspy  # type: ignore
 
-    las = laspy.read(las_path)
-    x = np.asarray(las.x, dtype=np.float64)
-    y = np.asarray(las.y, dtype=np.float64)
-    z = np.asarray(las.z, dtype=np.float64)
-
+    las    = laspy.read(las_path)
+    x      = np.asarray(las.x, dtype=np.float64)
+    y      = np.asarray(las.y, dtype=np.float64)
+    z      = np.asarray(las.z, dtype=np.float64)
     values = None
+
     try:
         raw = np.asarray(getattr(las, value_field), dtype=np.float32)
         if raw.size == len(x):
@@ -141,7 +147,6 @@ def _read_las_arrays(las_path: str, value_field: str = "intensity"):
         pass
 
     if values is None:
-        # Fallback: try common aliases
         for alias in ("intensity", "Intensity", "red", "amplitude"):
             try:
                 raw = np.asarray(getattr(las, alias), dtype=np.float32)
@@ -157,8 +162,25 @@ def _read_las_arrays(las_path: str, value_field: str = "intensity"):
     return x, y, z, values
 
 
+def _read_las_rgb(las_path: str):
+    """
+    Read X, Y, Z, R, G, B.  Returns (x, y, z, r, g, b) all as float32 / float64.
+    R/G/B are float32 (original uint16 scale preserved).
+    """
+    import laspy  # type: ignore
+
+    las = laspy.read(las_path)
+    x   = np.asarray(las.x,     dtype=np.float64)
+    y   = np.asarray(las.y,     dtype=np.float64)
+    z   = np.asarray(las.z,     dtype=np.float64)
+    r   = np.asarray(las.red,   dtype=np.float32)
+    g   = np.asarray(las.green, dtype=np.float32)
+    b   = np.asarray(las.blue,  dtype=np.float32)
+    return x, y, z, r, g, b
+
+
 # ---------------------------------------------------------------------------
-# IDW binning
+# IDW binning (vectorised)
 # ---------------------------------------------------------------------------
 
 def _bin_with_idw(
@@ -173,12 +195,11 @@ def _bin_with_idw(
     radius: float,
 ) -> np.ndarray:
     """
-    Bin point values onto a regular grid using IDW-2 within `radius`.
-    Cells with no contributing points are NaN.
+    Bin values onto a regular grid using IDW-2 within `radius` metres.
+    Returns float32 grid shape (n_y, n_x); NaN where no data.
     """
     total = np.zeros((n_y, n_x), dtype=np.float64)
     wsum  = np.zeros((n_y, n_x), dtype=np.float64)
-
     r_cells = max(0, int(np.ceil(radius / resolution)))
 
     for diy in range(-r_cells, r_cells + 1):
@@ -188,37 +209,31 @@ def _bin_with_idw(
 
             x_cell = x_min + xi * resolution
             y_cell = y_min + yi * resolution
-            dist2  = (x_pts - x_cell) ** 2 + (y_pts - y_cell) ** 2
-            dist   = np.sqrt(dist2)
+            dist   = np.sqrt((x_pts - x_cell) ** 2 + (y_pts - y_cell) ** 2)
 
-            in_bounds = (
+            in_b = (
                 (xi >= 0) & (xi < n_x) &
                 (yi >= 0) & (yi < n_y) &
                 (dist <= radius)
             )
-            if not np.any(in_bounds):
+            if not np.any(in_b):
                 continue
 
-            xi_v   = xi[in_bounds]
-            yi_v   = yi[in_bounds]
-            i_v    = i_pts[in_bounds].astype(np.float64)
-            dist_v = dist[in_bounds]
-            w = 1.0 / (dist_v ** 2 + 1e-9)
-
-            np.add.at(total, (yi_v, xi_v), w * i_v)
-            np.add.at(wsum,  (yi_v, xi_v), w)
+            w = 1.0 / (dist[in_b] ** 2 + 1e-9)
+            np.add.at(total, (yi[in_b], xi[in_b]), w * i_pts[in_b].astype(np.float64))
+            np.add.at(wsum,  (yi[in_b], xi[in_b]), w)
 
     grid = np.full((n_y, n_x), np.nan, dtype=np.float32)
-    has_data = wsum > 0
-    grid[has_data] = (total[has_data] / wsum[has_data]).astype(np.float32)
+    hd   = wsum > 0
+    grid[hd] = (total[hd] / wsum[hd]).astype(np.float32)
     return grid
 
 
 # ---------------------------------------------------------------------------
-# GeoTIFF writer
+# GeoTIFF writers
 # ---------------------------------------------------------------------------
 
-def _write_tif(
+def _write_tif_singleband(
     grid: np.ndarray,
     out_path: str,
     x_min: float,
@@ -227,11 +242,12 @@ def _write_tif(
     resolution: float,
     epsg: int | None,
 ) -> None:
+    """Write a single-band float32 GeoTIFF."""
     from osgeo import gdal, osr  # type: ignore
 
     n_y, n_x = grid.shape
-    NODATA = -9999.0
-    data = np.where(np.isnan(grid), NODATA, grid).astype(np.float32)
+    NODATA   = -9999.0
+    data     = np.where(np.isnan(grid), NODATA, grid).astype(np.float32)
 
     driver = gdal.GetDriverByName("GTiff")
     ds = driver.Create(
@@ -246,7 +262,6 @@ def _write_tif(
         srs = osr.SpatialReference()
         srs.ImportFromEPSG(int(epsg))
         ds.SetProjection(srs.ExportToWkt())
-
     band = ds.GetRasterBand(1)
     band.WriteArray(np.flipud(data))
     band.SetNoDataValue(NODATA)
@@ -255,8 +270,150 @@ def _write_tif(
     ds = None
 
 
+def _write_tif_rgb(
+    r_grid: np.ndarray,
+    g_grid: np.ndarray,
+    b_grid: np.ndarray,
+    out_path: str,
+    x_min: float,
+    y_min: float,
+    y_max: float,
+    resolution: float,
+    epsg: int | None,
+) -> tuple:
+    """
+    Write a 3-band float32 GeoTIFF (band 1=R, 2=G, 3=B).
+    Returns (min_r, max_r, min_g, max_g, min_b, max_b) for QML generation.
+    """
+    from osgeo import gdal, osr  # type: ignore
+
+    NODATA = -9999.0
+    n_y, n_x = r_grid.shape
+
+    def _prep(arr):
+        return np.where(np.isnan(arr), NODATA, arr).astype(np.float32)
+
+    r_data = _prep(r_grid)
+    g_data = _prep(g_grid)
+    b_data = _prep(b_grid)
+
+    driver = gdal.GetDriverByName("GTiff")
+    ds = driver.Create(
+        out_path, n_x, n_y, 3, gdal.GDT_Float32,
+        options=["COMPRESS=LZW", "TILED=YES"],
+    )
+    ds.SetGeoTransform(
+        (x_min - resolution / 2.0, resolution, 0.0,
+         y_max + resolution / 2.0, 0.0, -resolution)
+    )
+    if epsg:
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(int(epsg))
+        ds.SetProjection(srs.ExportToWkt())
+
+    for idx, arr in enumerate([r_data, g_data, b_data], start=1):
+        bnd = ds.GetRasterBand(idx)
+        bnd.WriteArray(np.flipud(arr))
+        bnd.SetNoDataValue(NODATA)
+        bnd.FlushCache()
+
+    ds.FlushCache()
+    ds = None
+
+    def _safe_range(arr):
+        valid = arr[arr != NODATA]
+        if valid.size == 0:
+            return 0.0, 1.0
+        return float(valid.min()), float(valid.max())
+
+    mn_r, mx_r = _safe_range(r_data)
+    mn_g, mx_g = _safe_range(g_data)
+    mn_b, mx_b = _safe_range(b_data)
+    return mn_r, mx_r, mn_g, mx_g, mn_b, mx_b
+
+
 # ---------------------------------------------------------------------------
-# Sidecar
+# QML sidecar for multiband renderer
+# ---------------------------------------------------------------------------
+
+_QML_TEMPLATE = textwrap.dedent("""\
+    <!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+    <qgis version="3.0" styleCategories="AllStyleCategories">
+      <flags>
+        <Identifiable>1</Identifiable>
+        <Removable>1</Removable>
+        <Searchable>0</Searchable>
+      </flags>
+      <pipe>
+        <provider>
+          <resampling enabled="false" maxOversampling="2"
+                      zoomedInResamplingMethod="nearestNeighbour"
+                      zoomedOutResamplingMethod="nearestNeighbour"/>
+        </provider>
+        <rasterrenderer type="multibandcolor" opacity="1" alphaBand="-1"
+                        redBand="1" greenBand="2" blueBand="3" nodataColor="">
+          <rasterTransparency/>
+          <minMaxOrigin>
+            <limits>MinMax</limits>
+            <extent>WholeRaster</extent>
+            <statAccuracy>Estimated</statAccuracy>
+            <cumulativeCutLower>0.02</cumulativeCutLower>
+            <cumulativeCutUpper>0.98</cumulativeCutUpper>
+            <stdDevFactor>2</stdDevFactor>
+          </minMaxOrigin>
+          <redContrastEnhancement>
+            <minValue>{min_r}</minValue>
+            <maxValue>{max_r}</maxValue>
+            <algorithm>StretchToMinimumMaximum</algorithm>
+          </redContrastEnhancement>
+          <greenContrastEnhancement>
+            <minValue>{min_g}</minValue>
+            <maxValue>{max_g}</maxValue>
+            <algorithm>StretchToMinimumMaximum</algorithm>
+          </greenContrastEnhancement>
+          <blueContrastEnhancement>
+            <minValue>{min_b}</minValue>
+            <maxValue>{max_b}</maxValue>
+            <algorithm>StretchToMinimumMaximum</algorithm>
+          </blueContrastEnhancement>
+        </rasterrenderer>
+        <brightnesscontrast brightness="0" contrast="0" gamma="1"/>
+        <huesaturation saturation="0" grayscaleMode="0"
+                       colorizeOn="0" colorizeRed="255"
+                       colorizeGreen="128" colorizeBlue="128"
+                       colorizeStrength="100" invertColors="0"/>
+        <rasterresampler maxOversampling="2"/>
+        <resamplingStage>resamplingFilter</resamplingStage>
+      </pipe>
+      <blendMode>0</blendMode>
+    </qgis>
+""")
+
+
+def _write_qml_multiband(
+    tif_path: str,
+    min_r: float, max_r: float,
+    min_g: float, max_g: float,
+    min_b: float, max_b: float,
+) -> str:
+    """
+    Write a `.qml` sidecar next to the TIF so QGIS auto-applies
+    'Multiband color' renderer (R=band1, G=band2, B=band3) on load.
+    Returns the QML file path.
+    """
+    qml_content = _QML_TEMPLATE.format(
+        min_r=min_r, max_r=max_r,
+        min_g=min_g, max_g=max_g,
+        min_b=min_b, max_b=max_b,
+    )
+    qml_path = os.path.splitext(tif_path)[0] + ".qml"
+    with open(qml_path, "w", encoding="utf-8") as f:
+        f.write(qml_content)
+    return qml_path
+
+
+# ---------------------------------------------------------------------------
+# Sidecar params (for re-slice)
 # ---------------------------------------------------------------------------
 
 SIDECAR_FILENAME = ".las_slicer_params.json"
@@ -296,18 +453,27 @@ def slice_las_to_tifs(
     value_field: str = "intensity",
 ) -> list[dict]:
     """
-    Slice a LAS/LAZ file into N GeoTIFF rasters (one per Z interval).
-    Uses IDW interpolation within `radius` metres.
+    Slice a LAS/LAZ file into GeoTIFF rasters (one per Z interval).
 
-    Returns list of dicts:
-        path, z_from, z_to, z_center, index, name
+    When value_field == 'rgb':
+      - creates 3-band (R, G, B) GeoTIFF
+      - writes a QML sidecar with multibandcolor renderer
+
+    Otherwise creates single-band float32 GeoTIFF.
+
+    Returns list of dicts: path, z_from, z_to, z_center, index, name.
     """
     if radius is None:
         radius = resolution * (2 ** 0.5)
 
     os.makedirs(output_dir, exist_ok=True)
 
-    x, y, z, values = _read_las_arrays(las_path, value_field)
+    use_rgb = (value_field == "rgb")
+
+    if use_rgb:
+        x, y, z, r, g, b = _read_las_rgb(las_path)
+    else:
+        x, y, z, values = _read_las_arrays(las_path, value_field)
 
     if z_min is None:
         z_min = float(z.min())
@@ -335,24 +501,41 @@ def slice_las_to_tifs(
         if not np.any(mask):
             continue
 
-        grid = _bin_with_idw(
-            x[mask], y[mask], values[mask],
-            x_min, y_min, n_x, n_y, resolution, radius,
-        )
-
         z_label  = f"{z_lev:.4f}".replace(".", "_").replace("-", "m")
         tif_name = f"slice_{iz:04d}_z{z_label}.tif"
         tif_path = os.path.join(output_dir, tif_name)
 
-        _write_tif(grid, tif_path, x_min, y_min, y_max, resolution, epsg)
+        kw = dict(
+            x_min=x_min, y_min=y_min, n_x=n_x, n_y=n_y,
+            resolution=resolution, radius=radius,
+        )
+
+        if use_rgb:
+            r_grid = _bin_with_idw(x[mask], y[mask], r[mask], **kw)
+            g_grid = _bin_with_idw(x[mask], y[mask], g[mask], **kw)
+            b_grid = _bin_with_idw(x[mask], y[mask], b[mask], **kw)
+
+            mn_r, mx_r, mn_g, mx_g, mn_b, mx_b = _write_tif_rgb(
+                r_grid, g_grid, b_grid,
+                tif_path, x_min, y_min, y_max, resolution, epsg,
+            )
+            _write_qml_multiband(
+                tif_path,
+                mn_r, mx_r, mn_g, mx_g, mn_b, mx_b,
+            )
+        else:
+            grid = _bin_with_idw(x[mask], y[mask], values[mask], **kw)
+            _write_tif_singleband(
+                grid, tif_path, x_min, y_min, y_max, resolution, epsg,
+            )
 
         results.append({
-            "path":      tif_path,
-            "z_from":    round(z_from, 6),
-            "z_to":      round(z_to,   6),
-            "z_center":  round(float(z_lev), 6),
-            "index":     iz,
-            "name":      os.path.splitext(tif_name)[0],
+            "path":     tif_path,
+            "z_from":   round(z_from, 6),
+            "z_to":     round(z_to,   6),
+            "z_center": round(float(z_lev), 6),
+            "index":    iz,
+            "name":     os.path.splitext(tif_name)[0],
         })
 
     return results

@@ -80,7 +80,7 @@ class GprVolumeMixin:
             )
             return paths or []
 
-        n = len(existing)
+        n       = len(existing)
         preview = "\n".join(f"  \u2022 {os.path.basename(p)}" for p in existing[:10])
         if n > 10:
             preview += f"\n  \u2026 e altri {n - 10}"
@@ -121,7 +121,7 @@ class GprVolumeMixin:
         default_group: str = "",
         saved: dict | None = None,
         is_reslice: bool = False,
-        field_info: dict | None = None,   # from diagnose_las_fields()
+        field_info: dict | None = None,
     ) -> dict | None:
         try:
             default_res  = float((self.dlg.lineEditDistanceX.text() or "").strip())
@@ -133,43 +133,45 @@ class GprVolumeMixin:
             default_step = 0.05
 
         if saved:
-            z_min_det    = saved.get("z_min",       z_min_det)
-            z_max_det    = saved.get("z_max",       z_max_det)
-            default_res  = saved.get("resolution",  default_res)
-            default_step = saved.get("z_step",      default_step)
-        default_radius = saved.get("radius", default_res * 2 ** 0.5) if saved else default_res * 2 ** 0.5
+            z_min_det    = saved.get("z_min",      z_min_det)
+            z_max_det    = saved.get("z_max",      z_max_det)
+            default_res  = saved.get("resolution", default_res)
+            default_step = saved.get("z_step",     default_step)
+        default_radius   = (
+            saved.get("radius", default_res * 2 ** 0.5) if saved
+            else default_res * 2 ** 0.5
+        )
 
-        # --- build field list from diagnosis ---
+        # --- build field list ---
         fi = field_info or {}
-        available_fields = fi.get("available", [])   # [(name, min, max, has_data)]
+        available_fields = fi.get("available", [])
         suggested_field  = fi.get("suggested", "intensity")
         if saved and saved.get("value_field"):
             suggested_field = saved["value_field"]
 
-        # Build display labels: "intensity  [0 – 255]  ✓" style
-        field_names   = []
-        field_labels  = []
+        field_names  = []
+        field_labels = []
         for name, mn, mx, has_data in available_fields:
-            label = f"{name}   [{mn:.0f} – {mx:.0f}]"
-            if has_data:
-                label = "\u2713 " + label
+            if name == "rgb":
+                label = f"\U0001f3a8 RGB \u2014 3 bande (rosso, verde, blu)   [{mn:.0f} \u2013 {mx:.0f}]"
             else:
-                label = "\u2610 " + label
+                prefix = "\u2713" if has_data else "\u2610"
+                label  = f"{prefix} {name}   [{mn:.0f} \u2013 {mx:.0f}]"
             field_names.append(name)
             field_labels.append(label)
 
-        # Always include intensity even if not in diagnosis
         if "intensity" not in field_names:
             field_names.insert(0, "intensity")
             field_labels.insert(0, "\u2610 intensity   [?]")
 
         # --- build dialog ---
         dlg = QDialog(self.dlg)
-        dlg.setWindowTitle("Re-slice: modifica parametri" if is_reslice else "Configura slice LAS")
-        dlg.setMinimumWidth(400)
+        dlg.setWindowTitle(
+            "Re-slice: modifica parametri" if is_reslice else "Configura slice LAS"
+        )
+        dlg.setMinimumWidth(420)
         layout = QVBoxLayout(dlg)
 
-        # Header info
         n_points = fi.get("n_points", 0)
         pf_id    = fi.get("point_format", -1)
         info_text = (
@@ -178,9 +180,9 @@ class GprVolumeMixin:
         )
         if n_points > 0:
             info_text += f"\nPunti: {n_points:,}   |   Point format: {pf_id}"
-        info_lbl = QLabel(info_text)
-        info_lbl.setWordWrap(True)
-        layout.addWidget(info_lbl)
+        lbl = QLabel(info_text)
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
 
         form = QFormLayout()
 
@@ -192,21 +194,19 @@ class GprVolumeMixin:
             s.setValue(val)
             return s
 
+        cb_field  = QComboBox()
+        for lbl_text in field_labels:
+            cb_field.addItem(lbl_text)
+        try:
+            cb_field.setCurrentIndex(field_names.index(suggested_field))
+        except ValueError:
+            pass
+
         sp_zmin   = _spin(-9999, 9999, 4, 0.01, z_min_det)
         sp_zmax   = _spin(-9999, 9999, 4, 0.01, z_max_det)
         sp_step   = _spin(0.001, 1000, 4, 0.01, default_step)
         sp_res    = _spin(0.001, 1000, 4, 0.01, default_res)
         sp_radius = _spin(0.001, 1000, 4, 0.01, default_radius)
-
-        # Field selector
-        cb_field = QComboBox()
-        for lbl in field_labels:
-            cb_field.addItem(lbl)
-        # Pre-select suggested
-        try:
-            cb_field.setCurrentIndex(field_names.index(suggested_field))
-        except ValueError:
-            pass
 
         le_group = QLineEdit()
         le_group.setText(saved.get("group_name", default_group) if saved else default_group)
@@ -215,10 +215,10 @@ class GprVolumeMixin:
         form.addRow("Campo valori:",       cb_field)
         form.addRow("Z minimo (m):",       sp_zmin)
         form.addRow("Z massimo (m):",      sp_zmax)
-        form.addRow("Step Z — dz (m):",    sp_step)
+        form.addRow("Step Z \u2014 dz (m):",    sp_step)
         form.addRow("Risoluzione XY (m):", sp_res)
-        form.addRow("Radius IDW (m):",      sp_radius)
-        form.addRow("Nome gruppo:",          le_group)
+        form.addRow("Radius IDW (m):",     sp_radius)
+        form.addRow("Nome gruppo:",         le_group)
         layout.addLayout(form)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -229,8 +229,8 @@ class GprVolumeMixin:
         if dlg.exec_() != QDialog.Accepted:
             return None
 
-        chosen_idx   = cb_field.currentIndex()
-        chosen_field = field_names[chosen_idx] if 0 <= chosen_idx < len(field_names) else "intensity"
+        idx          = cb_field.currentIndex()
+        chosen_field = field_names[idx] if 0 <= idx < len(field_names) else "intensity"
 
         return {
             "z_min":       sp_zmin.value(),
@@ -297,7 +297,9 @@ class GprVolumeMixin:
         ]
 
         register_timeslices_batch(project_root, records)
-        assign_timeslices_to_group(project_root, group_id, [r["id"] for r in records])
+        assign_timeslices_to_group(
+            project_root, group_id, [r["id"] for r in records]
+        )
         return group_id
 
     # ------------------------------------------------------------------
@@ -338,25 +340,24 @@ class GprVolumeMixin:
         failed    = 0
 
         for file_path in file_paths:
-            base = os.path.splitext(os.path.basename(file_path))[0]
+            base      = os.path.splitext(os.path.basename(file_path))[0]
             safe_base = "".join(
                 c if c.isalnum() or c in "_-" else "_" for c in base
             ).strip("_") or "las_slices"
 
-            # Check for sidecar (re-slice)
             candidate_dir = os.path.join(project_root, "timeslices_2d", safe_base)
             saved_params  = load_slicer_params(candidate_dir)
             is_reslice    = saved_params is not None
 
-            # Step 1: quick field diagnosis (reads only first 30k points)
+            # Quick field diagnosis (only first 30k points)
             if hasattr(self, "_notify_info"):
-                self._notify_info("Analisi campi del file LAS in corso\u2026", duration=5)
+                self._notify_info("Analisi campi LAS in corso\u2026", duration=5)
             try:
                 field_info = diagnose_las_fields(file_path)
             except Exception:
                 field_info = {}
 
-            # Step 2: read Z range
+            # Read Z range
             try:
                 z_min_det, z_max_det = get_z_range_chunked(file_path)
             except Exception as e:
@@ -367,7 +368,7 @@ class GprVolumeMixin:
                 failed += 1
                 continue
 
-            # Step 3: config dialog (with field selector)
+            # Config dialog
             params = self._ask_slice_params(
                 z_min_det, z_max_det,
                 default_group=safe_base,
@@ -382,15 +383,14 @@ class GprVolumeMixin:
             output_dir = os.path.join(project_root, "timeslices_2d", group_name)
             os.makedirs(output_dir, exist_ok=True)
 
-            # Step 4: generate slice TIFs
             if hasattr(self, "_notify_info"):
                 self._notify_info(
                     f"Generazione slice in corso\u2026 "
                     f"campo='{params['value_field']}', "
-                    f"dz={params['z_step']:.3f} m, "
-                    f"res={params['resolution']:.3f} m",
-                    duration=30,
+                    f"dz={params['z_step']:.3f} m, res={params['resolution']:.3f} m",
+                    duration=60,
                 )
+
             try:
                 slices = slice_las_to_tifs(
                     las_path    = file_path,
@@ -419,7 +419,7 @@ class GprVolumeMixin:
                 failed += 1
                 continue
 
-            # Step 5: save sidecar
+            # Save sidecar
             save_slicer_params(output_dir, {
                 "source_las":  file_path,
                 "group_name":  group_name,
@@ -433,7 +433,7 @@ class GprVolumeMixin:
                 "n_slices":    len(slices),
             })
 
-            # Step 6: register in catalog (= timeslice logic)
+            # Register in catalog
             try:
                 self._register_las_slices_in_catalog(
                     project_root, group_name, slices, epsg,
@@ -444,7 +444,7 @@ class GprVolumeMixin:
                     self.dlg, "Errore registrazione catalogo", str(e)
                 )
 
-            # Step 7: refresh UI
+            # Refresh UI
             if hasattr(self, "populate_group_list"):
                 try:
                     self.populate_group_list()
@@ -452,12 +452,11 @@ class GprVolumeMixin:
                     pass
 
             action = "Re-slice" if is_reslice else "Import LAS\u2192Slice"
+            bands  = "3 bande RGB" if params["value_field"] == "rgb" else f"campo '{params['value_field']}'"
             if hasattr(self, "_notify_info"):
                 self._notify_info(
-                    f"{action} OK: '{group_name}', "
-                    f"{len(slices)} slice, "
-                    f"campo='{params['value_field']}', "
-                    f"dz={params['z_step']:.3f} m, res={params['resolution']:.3f} m.",
+                    f"{action} OK: '{group_name}', {len(slices)} slice, "
+                    f"{bands}, dz={params['z_step']:.3f} m, res={params['resolution']:.3f} m.",
                     duration=12,
                 )
             loaded_ok += 1
