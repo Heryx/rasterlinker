@@ -17,6 +17,46 @@ from .grid_options_ui import build_grid_options_controls
 
 
 class UiLayoutMixin:
+    def _init_ui_layout(self):
+        """Initialise UI layout widget references. Called by the plugin constructor."""
+        self.dialog_main_layout = None
+        self.tools_tabs = None
+        self.tools_panel_widget = None
+        self.tools_panel_layout = None
+        self.bottom_controls_widget = None
+        self.left_nav_widget = None
+        self.group_tools_label = None
+        self.image_tools_label = None
+        self.load_groups_button = None
+        self.import_groups_button = None
+        self.enhance_minmax_button = None
+        self.enhance_batch_button = None
+        self.save_style_button = None
+        self.load_style_button = None
+        self.export_layout_button = None
+        self.generate_coverage_button = None
+        self.export_mode_combo = None
+        self.export_coverage_mode_combo = None
+        self.export_map_content_combo = None
+        self.export_theme_combo = None
+        self.export_page_size_combo = None
+        self.export_orientation_combo = None
+        self.export_dpi_combo = None
+        self.export_scale_spin = None
+        self.export_custom_unit_combo = None
+        self.export_custom_w_spin = None
+        self.export_custom_h_spin = None
+        self.coord_x0_label = None
+        self.coord_x1_label = None
+        self.coord_y0_label = None
+        self.coord_y1_label = None
+        self.cell_x_label = None
+        self.cell_y_label = None
+        self.area_name_label = None
+        self.name_raster_panel = None
+        self.name_raster_title = None
+        self.name_raster_lines = []
+
     def _clear_qt_layout(self, layout):
         if layout is None:
             return
@@ -330,7 +370,6 @@ class UiLayoutMixin:
         if self.internal_grid_checkbox is not None:
             self.internal_grid_checkbox.setParent(panel)
 
-        # Compact XY and cell fields to keep the drawing section tighter.
         for edit in (
             self.dlg.lineEditX0Y0,
             self.dlg.lineEditX1Y0,
@@ -357,7 +396,6 @@ class UiLayoutMixin:
                 draw_btn.setMaximumWidth(170)
                 draw_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
-        # Left block: Set Orientation + XY coordinates.
         orientation_block = QWidget(panel)
         orientation_block.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         orientation_layout = QGridLayout(orientation_block)
@@ -374,7 +412,6 @@ class UiLayoutMixin:
         orientation_layout.addWidget(self.dlg.lineEditY0, 4, 0, 1, 1)
         orientation_layout.addWidget(self.dlg.lineEditX0Y1, 4, 1, 1, 1)
 
-        # Middle block: Draw Polygon + area/cell values.
         drawing_block = QWidget(panel)
         drawing_block.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         drawing_layout = QGridLayout(drawing_block)
@@ -403,18 +440,12 @@ class UiLayoutMixin:
         panel_layout.setRowStretch(0, 0)
 
         self.bottom_controls_widget = panel
-        # Keep all plugin content inside gridLayout_3 to avoid dock over-expansion.
         self.dlg.gridLayout_3.addWidget(panel, 2, 0, 1, 4)
 
     def _swap_drawing_and_navigation_sections(self):
-        """
-        Keep dial/slider in left column and keep top-right area for tool tabs.
-        Drawing Options are hosted in bottom panel (next to XY/Cell controls).
-        """
         if self.dlg is None:
             return
 
-        # Build left navigation widget once and host dial + slider there.
         if self.left_nav_widget is None:
             nav_widget = QWidget(self.dlg.layoutWidget)
             nav_layout = QVBoxLayout(nav_widget)
@@ -424,25 +455,19 @@ class UiLayoutMixin:
             nav_layout.addWidget(self.dlg.Dial)
             self.left_nav_widget = nav_widget
 
-        # Left column order: raster list, group list, navigation, name raster.
         if hasattr(self.dlg, "verticalLayout_3"):
             self.dlg.verticalLayout_3.removeWidget(self.dlg.widget)
             self.dlg.verticalLayout_3.removeWidget(self.left_nav_widget)
             self.dlg.verticalLayout_3.insertWidget(4, self.left_nav_widget)
 
-        # Right-top hosts tabs/actions (group/image/export).
         if hasattr(self.dlg, "gridLayout_3") and getattr(self, "tools_panel_widget", None) is not None:
             self.dlg.gridLayout_3.addWidget(self.tools_panel_widget, 0, 2, 1, 2, Qt.AlignTop)
-        # Drawing Options: place directly below tabs (right column).
-        # IMPORTANT: this controls only the Drawing Options box (self.dlg.widget),
-        # not raster/group list heights.
         if getattr(self, "tools_panel_layout", None) is not None and hasattr(self.dlg, "widget"):
             self.dlg.widget.setParent(self.tools_panel_widget)
             self.dlg.widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
             self.dlg.widget.setMinimumWidth(250)
             self.dlg.widget.setMinimumHeight(170)
             self.dlg.widget.setMaximumHeight(250)
-            # Keep only one instance in the right tools column.
             self.tools_panel_layout.removeWidget(self.dlg.widget)
             self.tools_panel_layout.addWidget(self.dlg.widget, 0, Qt.AlignTop)
 
@@ -453,16 +478,12 @@ class UiLayoutMixin:
         )
         label_style = "color: #202020; font-size: 9pt;"
 
-        # Make navigation controls easier to use.
         self.dlg.dial2.setMinimumSize(88, 88)
         self.dlg.dial2.setMaximumSize(110, 110)
         self.dlg.dial2.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.dlg.dial2.setNotchTarget(2.0)
         self.dlg.Dial.setMinimumHeight(18)
         self.dlg.Dial.setMaximumHeight(22)
-        # Left lists sizing (Raster/Group). If these look different than expected,
-        # check app_runtime_mixin._apply_responsive_main_layout too: it can override
-        # these values on startup/resize.
         if hasattr(self.dlg, "rasterListWidget"):
             self.dlg.rasterListWidget.setMinimumWidth(220)
             self.dlg.rasterListWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -478,7 +499,6 @@ class UiLayoutMixin:
             self.dlg.groupListWidget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             self.dlg.groupListWidget.setStyleSheet("font-size: 9pt;")
 
-        # Improve readability/consistency of layout-managed action buttons.
         for btn in [
             getattr(self, "load_groups_button", None),
             getattr(self, "import_groups_button", None),
@@ -498,7 +518,6 @@ class UiLayoutMixin:
                 btn.setStyleSheet(button_style)
                 btn.setIconSize(QSize(16, 16))
 
-        # Keep bottom-left drawing buttons on dedicated sizing rules.
         for btn in (self.dlg.selectGridPointsButton, self.dlg.createGridButton):
             if btn is not None:
                 btn.setMinimumHeight(28)
@@ -509,7 +528,6 @@ class UiLayoutMixin:
                 btn.setStyleSheet(button_style)
                 btn.setIconSize(QSize(16, 16))
 
-        # Compact right-side tools block to leave more visual room for drawing options.
         for btn in [
             getattr(self, "load_groups_button", None),
             self.dlg.zoomSelectedGroupsButton,
@@ -608,31 +626,25 @@ class UiLayoutMixin:
             self.dlg.gridLayout_3.setColumnStretch(1, 0)
             self.dlg.gridLayout_3.setColumnStretch(2, 6)
             self.dlg.gridLayout_3.setColumnStretch(3, 0)
-            # Keep top-right tabs aligned; drawing options are in bottom panel.
             if getattr(self, "tools_panel_widget", None) is not None:
                 self.dlg.gridLayout_3.addWidget(self.tools_panel_widget, 0, 2, 1, 2, Qt.AlignTop)
-            # Keep left/right top blocks compact; free height goes to row 3 filler.
             self.dlg.gridLayout_3.setRowStretch(0, 0)
             self.dlg.gridLayout_3.setRowStretch(1, 0)
             self.dlg.gridLayout_3.setRowStretch(2, 0)
             self.dlg.gridLayout_3.setRowStretch(3, 1)
         if hasattr(self.dlg, "verticalLayout_3"):
-            # Keep a visible gap between left widgets and separator line.
             self.dlg.verticalLayout_3.setContentsMargins(0, 0, 6, 0)
             self.dlg.verticalLayout_3.setSpacing(2)
-            # Reset stretch policy to avoid pushing bottom controls outside viewport.
             for idx in range(self.dlg.verticalLayout_3.count()):
                 try:
                     self.dlg.verticalLayout_3.setStretch(idx, 0)
                 except Exception:
                     pass
-        # Drawing Options sizing. This is the box titled "Drawing Options".
         if hasattr(self.dlg, "widget"):
             self.dlg.widget.setMinimumHeight(170)
             self.dlg.widget.setMaximumHeight(250)
             self.dlg.widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         if self.left_nav_widget is not None:
-            # Keep slider visibly below the dial without overlap.
             self.left_nav_widget.setMinimumHeight(104)
             self.left_nav_widget.setMaximumHeight(124)
             self.left_nav_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -640,7 +652,6 @@ class UiLayoutMixin:
             self.dlg.line.setFixedWidth(2)
             self.dlg.line.setStyleSheet("color: #9a9a9a;")
         if self.bottom_controls_widget is None:
-            # Always use layout-managed controls; avoid absolute-position fallback.
             self._build_bottom_controls_layout()
 
     def _init_name_raster_panel(self):
@@ -731,7 +742,6 @@ class UiLayoutMixin:
             button.setIconSize(QSize(16, 16))
 
     def _apply_button_icons(self):
-        # Use QGIS native theme icons when available.
         self._set_button_icon(getattr(self.dlg, "createGroupButton", None), "mActionAddGroup.svg", "mActionNewVectorLayer.svg")
         self._set_button_icon(getattr(self, "load_groups_button", None), "mActionAddRasterLayer.svg", "mActionOpenTable.svg")
         self._set_button_icon(getattr(self.dlg, "zoomSelectedGroupsButton", None), "mActionZoomToSelected.svg", "mActionZoomFullExtent.svg")
@@ -754,7 +764,6 @@ class UiLayoutMixin:
     def _build_grid_options_controls(self):
         if self.dlg is None or not hasattr(self.dlg, "horizontalLayout_2"):
             return
-        # Avoid duplicated controls after plugin reload/reopen.
         self._clear_qt_layout(self.dlg.horizontalLayout_2)
         self.snap_checkbox = None
         self.snap_mode_combo = None

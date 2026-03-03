@@ -35,6 +35,38 @@ from .trace_info_state_mixin import TraceInfoStateMixin
 
 
 class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
+    def _init_trace_info(self):
+        """Initialise trace info dock state. Called by the plugin constructor."""
+        self.trace_info_dock = None
+        self.trace_info_is_docked = False
+        self.trace_info_table = None
+        self.trace_info_model = None
+        self.trace_info_filter_edit = None
+        self.trace_info_filter_field_combo = None
+        self.trace_info_mode_combo = None
+        self.trace_info_sort_field_combo = None
+        self.trace_info_sort_order_combo = None
+        self.trace_info_depth_pick_combo = None
+        self.trace_info_depth_pick_btn = None
+        self.trace_info_stack = None
+        self.trace_info_form_list = None
+        self.trace_info_form_fields = {}
+        self.trace_info_vertex_table = None
+        self.trace_info_form_preview_combo = None
+        self.trace_info_view_table_btn = None
+        self.trace_info_view_form_btn = None
+        self.trace_info_query_btn = None
+        self.trace_info_query_panel = None
+        self.trace_info_interpretation_prompt_action = None
+        self.trace_info_discard_outside_raster_action = None
+        self.trace_info_help_btn = None
+        self.trace_info_help_panel = None
+        self.trace_info_source_layer_id = None
+        self.trace_info_selection_guard = False
+        self.trace_info_saved_selected_fid = None
+        self.trace_info_saved_selected_trace_id = ""
+        self.trace_info_form_preview_key = "timeslice"
+
     def _set_trace_interpretation_prompt_enabled(self, enabled, persist=True):
         self.trace_prompt_interpretation_popup = bool(enabled)
         act = getattr(self, "trace_info_interpretation_prompt_action", None)
@@ -67,8 +99,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             seen.add(lid)
             candidates.append(layer)
 
-        # 1) Priority: layers under existing plugin trace group.
-        # IMPORTANT: do not auto-create groups during startup sync.
         try:
             grp = self._find_trace_group() if hasattr(self, "_find_trace_group") else None
             if grp is not None and hasattr(grp, "findLayers"):
@@ -79,7 +109,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         except Exception:
             pass
 
-        # 2) Fallback: any line layer that already looks trace-related.
         for lyr in project_layers:
             try:
                 is_line = self._is_line_layer(lyr)
@@ -100,7 +129,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             if trace_like:
                 _add_candidate(lyr)
 
-        # Ensure schema/ids for legacy layers, then sync labels+relations.
         for lyr in candidates:
             try:
                 if hasattr(self, "_ensure_trace_layer_schema_and_form"):
@@ -175,7 +203,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         if persist:
             self._save_trace_info_ui_state()
 
-
     def _on_trace_info_table_selection_changed(self):
         if self.trace_info_selection_guard:
             return
@@ -185,7 +212,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
     def _on_trace_info_form_list_selection_changed(self):
         if self.trace_info_selection_guard:
             return
-        # Form list shares the same selection model as table view.
         self._update_trace_info_form_from_table_selection()
         self._save_trace_info_ui_state()
 
@@ -309,7 +335,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
                 if not selected_rows and self.trace_info_form_list is None:
                     self._select_trace_info_row(row)
 
-        # In form view, allow picking from the left list even when table page is hidden.
         if row_data is None and self.trace_info_form_list is not None:
             form_selected_rows = (
                 self.trace_info_form_list.selectionModel().selectedRows()
@@ -321,7 +346,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
                 if isinstance(payload, dict):
                     row_data = payload
 
-        # Ensure one selected row when data exists.
         if (
             row_data is None
             and self.trace_info_table is not None
@@ -411,7 +435,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         idx_depth_min = fields.indexOf("depth_min")
         idx_depth_max = fields.indexOf("depth_max")
         if idx_status < 0:
-            # Keep UI consistent even for legacy vertex layers missing explicit status.
             field_names.append("depth_status")
         table.setColumnCount(len(field_names))
         table.setHorizontalHeaderLabels(field_names)
@@ -537,7 +560,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(4)
 
-        # Hidden state holder for "filter column" to support menu-based UX (QGIS-like).
         filter_field_combo = QComboBox(left_widget)
         filter_field_combo.addItem("All fields", "all")
         filter_field_combo.addItem("Trace ID", "trace_id")
@@ -551,7 +573,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         filter_field_combo.addItem("Comment", "comment")
         filter_field_combo.setVisible(False)
 
-        # Hidden state holder for depth pick strategy when depth_from/depth_to range exists.
         depth_pick_combo = QComboBox(left_widget)
         depth_pick_combo.addItem("Depth: None", "off")
         depth_pick_combo.addItem("Depth: Min", "min")
@@ -902,14 +923,13 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         header = table.horizontalHeader()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # FID
-        table.setColumnWidth(1, 170)  # Trace ID
-        table.setColumnWidth(2, 240)  # Time-slice
-        table.setColumnWidth(3, 90)   # Depth
-        table.setColumnWidth(4, 90)   # Z mode
-        table.setColumnWidth(5, 80)   # Length
-        table.setColumnWidth(6, 70)   # Vertices
-        # Requested: keep FID/Trace ID internal, hide from visible table columns.
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.setColumnWidth(1, 170)
+        table.setColumnWidth(2, 240)
+        table.setColumnWidth(3, 90)
+        table.setColumnWidth(4, 90)
+        table.setColumnWidth(5, 80)
+        table.setColumnWidth(6, 70)
         table.setColumnHidden(0, True)
         table.setColumnHidden(1, True)
         table_page_layout.addWidget(table, 1)
@@ -931,7 +951,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         form_list_header.setStretchLastSection(True)
         form_list_header.setSectionResizeMode(QHeaderView.Interactive)
         form_list_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        # Keep module list focused on one preview column (configured by combo).
         for col_idx in (0, 1):
             form_list.setColumnHidden(col_idx, True)
         form_list.setSelectionModel(table.selectionModel())
@@ -1020,7 +1039,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
         main_layout.addWidget(left_widget, 1)
 
         dock.setWidget(container)
-        # Start fully detached: do not call addDockWidget until user explicitly docks.
         dock.setFloating(True)
         dock.resize(700, 460)
 
@@ -1067,7 +1085,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
                     self._connect_trace_layer_signals(layer)
         except Exception:
             pass
-        # Ensure line<->vertex relations and vertex label layers are present for existing traces.
         self._resync_vertex_layers_for_all_traces()
         self.refresh_trace_info_table()
 
@@ -1292,8 +1309,6 @@ class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
             self._update_trace_info_form_from_table_selection()
         self._save_trace_info_ui_state()
 
-        # Keep refresh lightweight: do not rebuild vertex layers here.
-        # Vertex sync is executed in explicit draw/save/generate workflows.
         if hasattr(self, "_sync_draw_action_checked_for_layer"):
             try:
                 self._sync_draw_action_checked_for_layer(layer)
