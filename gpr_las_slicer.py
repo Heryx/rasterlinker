@@ -7,15 +7,17 @@ Supports:
 
 Interpolation methods:
   - 'idw'    : Inverse Distance Weighting with configurable power exponent
-               (gather approach via scipy.spatial.cKDTree)
+               Standard (isotropic) or anisotropic variant for GPR line data.
+               Gather approach via scipy.spatial.cKDTree.
   - 'kriging': Ordinary Kriging via pykrige (requires: pip install pykrige)
-               Variogram models: exponential, spherical, gaussian, linear
+               Variogram models: exponential, spherical, gaussian, linear.
+               Supports automatic variogram parameter estimation.
 
 GPR-specific processing pipeline:
-  1. Amplitude outlier removal  (_remove_amplitude_outliers)
-  2. Interpolation              (IDW kdtree or Kriging)
-  3. Fill NoData gaps           (_fill_nodata_grid)        [optional]
-  4. Gaussian smoothing         (_smooth_grid_gaussian)    [optional]
+  1. Amplitude outlier removal  (_remove_amplitude_outliers)  [optional]
+  2. Interpolation              (IDW isotropic/anisotropic or Kriging)
+  3. Fill NoData gaps           (_fill_nodata_grid)            [optional]
+  4. Gaussian smoothing         (_smooth_grid_gaussian)        [optional]
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# LAS field diagnosis: detailed preview of actual values
+# LAS field diagnosis
 # ---------------------------------------------------------------------------
 
 _SKIP_FIELDS = frozenset((
@@ -58,25 +60,8 @@ def diagnose_las_fields_detailed(
     """
     Read the first `n_sample` points and return a detailed field report.
 
-    Returns:
-    {
-      "rows": [
-          {
-            "name":     str,
-            "values":   [float, ...],   # first n_preview sample values
-            "min":      float,
-            "max":      float,
-            "has_data": bool,           # max > 0 or max > min
-          }, ...
-      ],
-      "all_field_names": [str, ...],    # all non-skip dimension names
-      "suggested_r": str,
-      "suggested_g": str,
-      "suggested_b": str,
-      "suggested_single": str,
-      "point_format": int,
-      "n_points": int,
-    }
+    Returns a dict with keys: rows, all_field_names, suggested_r/g/b/single,
+    point_format, n_points.
     """
     import laspy  # type: ignore
 
@@ -229,25 +214,12 @@ def _remove_amplitude_outliers(
     values: np.ndarray,
     n_sigma: float = 3.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Remove GPR amplitude outliers using a simple sigma-clipping filter.
+    """Remove GPR amplitude outliers using sigma-clipping.
 
     GPR-specific outliers (antenna ringing, metallic reflections, surface
-    coupling spikes) appear as amplitude values far from the mean. This
-    filter removes points whose amplitude deviates more than `n_sigma`
-    standard deviations from the slice mean.
-
-    A higher `n_sigma` is more permissive (keeps more points);
-    a lower value is more aggressive. Typical range: 2.5 – 4.0.
-
-    Parameters
-    ----------
-    x, y    : point coordinates
-    values  : radar amplitude/intensity values
-    n_sigma : clipping threshold in standard deviations (default 3.0)
-
-    Returns
-    -------
-    Filtered (x, y, values) arrays.
+    coupling spikes) appear as amplitude values far from the slice mean.
+    Removes points whose amplitude deviates more than `n_sigma` standard
+    deviations. Typical range: 2.5 – 4.0.
     """
     if values.size == 0:
         return x, y, values
@@ -263,7 +235,39 @@ def _remove_amplitude_outliers(
 
 
 # ---------------------------------------------------------------------------
-# GPR-specific: adaptive radius from inter-line spacing
+# GPR-specific: acquisition direction estimation via PCA
+# ---------------------------------------------------------------------------
+
+def _estimate_acquisition_direction(
+    x: np.ndarray,
+    y: np.ndarray,
+) -> float:
+    """Estimate the principal acquisition direction of GPR lines via PCA.
+
+    GPR surveys consist of parallel lines. PCA on the XY point cloud
+    identifies the direction of maximum variance, which corresponds to
+    the along-line direction. The perpendicular is the cross-line direction
+    (where the inter-line gaps occur).
+
+    Returns
+    -------
+    angle_deg : float
+        Angle in degrees (0-180) of the principal acquisition direction
+        measured counter-clockwise from the positive X axis.
+    """
+    if x.size < 3:
+        return 0.0
+    pts  = np.column_stack([x - x.mean(), y - y.mean()])
+    cov  = np.cov(pts.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    # Principal direction = eigenvector with largest eigenvalue
+    principal = eigvecs[:, np.argmax(eigvals)]
+    angle_deg = float(np.degrees(np.arctan2(principal[1], principal[0]))) % 180.0
+    return angle_deg
+
+
+# ---------------------------------------------------------------------------
+# GPR-specific: adaptive radius + anisotropy from inter-line spacing
 # ---------------------------------------------------------------------------
 
 def _estimate_interline_radius(
@@ -271,35 +275,43 @@ def _estimate_interline_radius(
     y: np.ndarray,
     percentile: float = 95.0,
     multiplier: float = 1.5,
-) -> float:
-    """Estimate search radius from the inter-line spacing of GPR data.
+) -> dict:
+    """Estimate search radius and anisotropy from GPR inter-line spacing.
 
-    GPR datasets consist of parallel acquisition lines. The optimal IDW
-    search radius should cover at least the gap between adjacent lines.
-    This function estimates that gap by computing the distance to the
-    nearest neighbour for each point and taking the given percentile
-    (capturing the widest gaps, i.e. the inter-line spacing) then
-    multiplying by `multiplier` to ensure full coverage.
-
-    Parameters
-    ----------
-    x, y        : point coordinates
-    percentile  : percentile of nearest-neighbour distances to use (default 95)
-    multiplier  : safety factor applied to the estimated spacing (default 1.5)
+    Computes nearest-neighbour distances for all points. The high-percentile
+    distances correspond to inter-line gaps; the low-percentile distances
+    correspond to along-line spacing.
 
     Returns
     -------
-    Estimated search radius in CRS units.
+    dict with keys:
+        radius          : recommended isotropic search radius
+        anisotropy_ratio: ratio cross-line / along-line spacing (>1 means
+                          points are closer along the line than across)
+        acquisition_angle: principal acquisition direction in degrees
     """
     from scipy.spatial import cKDTree  # type: ignore
 
-    if x.size < 2:
-        return 1.0
-    tree   = cKDTree(np.column_stack([x, y]))
-    dists, _ = tree.query(np.column_stack([x, y]), k=2)
-    nn_dists = dists[:, 1]  # distance to nearest neighbour
-    radius   = float(np.percentile(nn_dists, percentile)) * multiplier
-    return max(radius, 1e-6)
+    if x.size < 4:
+        return {"radius": 1.0, "anisotropy_ratio": 1.0, "acquisition_angle": 0.0}
+
+    tree = cKDTree(np.column_stack([x, y]))
+    # k=2 gives nearest neighbour; k=6 gives a richer neighbourhood sample
+    dists, _ = tree.query(np.column_stack([x, y]), k=min(6, x.size))
+
+    nn_dists    = dists[:, 1]                              # nearest neighbour
+    along_line  = float(np.percentile(nn_dists, 10))      # dense direction
+    cross_line  = float(np.percentile(nn_dists, percentile))  # sparse direction
+
+    radius           = cross_line * multiplier
+    anisotropy_ratio = (cross_line / along_line) if along_line > 1e-9 else 1.0
+    acquisition_angle = _estimate_acquisition_direction(x, y)
+
+    return {
+        "radius":           max(radius, 1e-6),
+        "anisotropy_ratio": anisotropy_ratio,
+        "acquisition_angle": acquisition_angle,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -307,37 +319,24 @@ def _estimate_interline_radius(
 # ---------------------------------------------------------------------------
 
 def _fill_nodata_grid(grid: np.ndarray, max_distance: int = 5) -> np.ndarray:
-    """Fill NaN cells in the interpolated grid using nearest-neighbour diffusion.
+    """Fill NaN cells using nearest-neighbour diffusion.
 
     GPR acquisition lines leave systematic NaN bands between lines after
-    interpolation. This function fills those gaps by propagating valid
-    values outward up to `max_distance` cells, using
-    scipy.ndimage.distance_transform_edt for efficiency.
-
-    Parameters
-    ----------
-    grid         : 2-D float32 array with NaN where no data
-    max_distance : maximum fill distance in grid cells (default 5)
-
-    Returns
-    -------
-    Filled float32 grid (remaining NaN only where fill distance exceeded).
+    interpolation. Fills those gaps by propagating valid values outward
+    up to `max_distance` cells via scipy.ndimage.distance_transform_edt.
     """
     from scipy.ndimage import distance_transform_edt  # type: ignore
 
-    nan_mask  = np.isnan(grid)
+    nan_mask = np.isnan(grid)
     if not nan_mask.any():
         return grid
 
-    valid_mask = ~nan_mask
-    # For each NaN cell, find the index of the nearest valid cell
     dist, (row_idx, col_idx) = distance_transform_edt(
         nan_mask,
         return_distances=True,
         return_indices=True,
     )
     filled = grid.copy()
-    # Fill only within max_distance cells
     fill_where = nan_mask & (dist <= max_distance)
     filled[fill_where] = grid[row_idx[fill_where], col_idx[fill_where]]
     return filled
@@ -348,22 +347,10 @@ def _fill_nodata_grid(grid: np.ndarray, max_distance: int = 5) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def _smooth_grid_gaussian(grid: np.ndarray, sigma: float = 1.0) -> np.ndarray:
-    """Apply Gaussian smoothing to the interpolated grid.
+    """Apply Gaussian smoothing with correct NaN handling.
 
-    Reduces inter-line interpolation artefacts and high-frequency noise
-    in GPR time-slice maps. NaN cells are handled by normalised convolution
-    (ignoring NaN in both numerator and denominator) so that valid data
-    near NaN boundaries is not contaminated.
-
-    Parameters
-    ----------
-    grid  : 2-D float32 array (NaN = no data)
-    sigma : Gaussian standard deviation in grid cells (default 1.0)
-            Typical values: 0.5 (light) – 2.0 (heavy)
-
-    Returns
-    -------
-    Smoothed float32 grid (NaN preserved where no valid neighbours exist).
+    Reduces inter-line interpolation artefacts. Uses normalised convolution
+    so that valid data near NaN boundaries is not contaminated.
     """
     from scipy.ndimage import gaussian_filter  # type: ignore
 
@@ -399,12 +386,7 @@ def _bin_with_idw(
     radius: float,
     power: float = 2.0,
 ) -> np.ndarray:
-    """IDW binning onto regular grid using scatter approach (legacy).
-
-    Kept for backward compatibility. For new code prefer _bin_with_idw_kdtree.
-
-    weight:  w = 1 / (dist^power + epsilon)
-    """
+    """IDW scatter approach (legacy). Prefer _bin_with_idw_kdtree for new code."""
     total   = np.zeros((n_y, n_x), dtype=np.float64)
     wsum    = np.zeros((n_y, n_x), dtype=np.float64)
     r_cells = max(0, int(np.ceil(radius / resolution)))
@@ -438,7 +420,7 @@ def _bin_with_idw(
 
 
 # ---------------------------------------------------------------------------
-# IDW binning — gather approach with scipy cKDTree (recommended)
+# IDW binning — isotropic gather with cKDTree
 # ---------------------------------------------------------------------------
 
 def _bin_with_idw_kdtree(
@@ -454,21 +436,14 @@ def _bin_with_idw_kdtree(
     power: float = 2.0,
     min_points: int = 3,
 ) -> np.ndarray:
-    """IDW binning using a gather approach via scipy.spatial.cKDTree.
+    """Isotropic IDW gather via scipy.spatial.cKDTree.
 
     For each grid cell, queries all source points within `radius` and
     computes the inverse-distance-weighted average:
 
         estimated = sum(wi * zi) / sum(wi)   where  wi = 1 / (hi^power + eps)
 
-    GPR note: `min_points` prevents unstable estimates in the gaps between
-    acquisition lines, where only 1-2 isolated points from adjacent lines
-    might fall within the search radius.
-
-    Parameters
-    ----------
-    min_points : minimum number of source points required to estimate a cell.
-                 Cells with fewer neighbours are left as NaN. Default 3.
+    `min_points` prevents unstable estimates in GPR inter-line gaps.
     """
     from scipy.spatial import cKDTree  # type: ignore
 
@@ -499,6 +474,100 @@ def _bin_with_idw_kdtree(
 
 
 # ---------------------------------------------------------------------------
+# IDW binning — anisotropic gather (GPR parallel lines)
+# ---------------------------------------------------------------------------
+
+def _bin_with_idw_anisotropic(
+    x_pts: np.ndarray,
+    y_pts: np.ndarray,
+    i_pts: np.ndarray,
+    x_min: float,
+    y_min: float,
+    n_x: int,
+    n_y: int,
+    resolution: float,
+    radius: float,
+    power: float = 2.0,
+    min_points: int = 3,
+    anisotropy_ratio: float = 1.0,
+    anisotropy_angle: float = 0.0,
+) -> np.ndarray:
+    """Anisotropic IDW gather for GPR data with parallel acquisition lines.
+
+    GPR surveys produce a point density that is much higher along the
+    acquisition lines than across them. Standard isotropic IDW tends to
+    over-smooth across lines and under-weight along-line data.
+
+    This function applies an elliptical distance metric that stretches
+    the search neighbourhood along the cross-line direction:
+
+        d_aniso = sqrt( (dx_rot / 1)^2 + (dy_rot / anisotropy_ratio)^2 )
+
+    where dx_rot, dy_rot are the point offsets rotated into the acquisition
+    coordinate system (along-line, cross-line).
+
+    Parameters
+    ----------
+    anisotropy_ratio  : ratio of cross-line to along-line scale factor (>1).
+                        Estimated automatically by _estimate_interline_radius.
+                        A value of 3 means the cross-line direction is weighted
+                        3x more loosely than the along-line direction.
+    anisotropy_angle  : principal acquisition direction in degrees CCW from X.
+                        Estimated by _estimate_acquisition_direction.
+    """
+    from scipy.spatial import cKDTree  # type: ignore
+
+    if anisotropy_ratio <= 0:
+        anisotropy_ratio = 1.0
+
+    angle_rad = np.radians(anisotropy_angle)
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+
+    def _aniso_dist(px, py, cx, cy):
+        """Elliptical distance in acquisition coordinate system."""
+        dx = px - cx
+        dy = py - cy
+        # Rotate into acquisition frame (along-line = X', cross-line = Y')
+        dx_rot =  dx * cos_a + dy * sin_a
+        dy_rot = -dx * sin_a + dy * cos_a
+        return np.sqrt(dx_rot ** 2 + (dy_rot / anisotropy_ratio) ** 2)
+
+    gx = x_min + np.arange(n_x) * resolution
+    gy = y_min + np.arange(n_y) * resolution
+    gxx, gyy  = np.meshgrid(gx, gy)
+    grid_pts  = np.column_stack([gxx.ravel(), gyy.ravel()])
+
+    # Use a slightly enlarged isotropic radius for the KD-tree query
+    # (the anisotropic filter is applied afterwards)
+    search_r = radius * max(1.0, anisotropy_ratio)
+    tree     = cKDTree(np.column_stack([x_pts, y_pts]))
+    results  = tree.query_ball_point(grid_pts, r=search_r, workers=-1)
+
+    i_pts_f64 = i_pts.astype(np.float64)
+    grid      = np.full(n_x * n_y, np.nan, dtype=np.float32)
+
+    for k, idx_list in enumerate(results):
+        if not idx_list:
+            continue
+        idx = np.asarray(idx_list, dtype=np.int64)
+        cx  = grid_pts[k, 0]
+        cy  = grid_pts[k, 1]
+        d   = _aniso_dist(x_pts[idx], y_pts[idx], cx, cy)
+        # Apply the actual anisotropic radius filter
+        in_r = d <= radius
+        if in_r.sum() < min_points:
+            continue
+        d_in = d[in_r]
+        w    = 1.0 / (d_in ** power + 1e-9)
+        ws   = w.sum()
+        if ws > 0:
+            grid[k] = float(np.dot(w, i_pts_f64[idx[in_r]]) / ws)
+
+    return grid.reshape(n_y, n_x)
+
+
+# ---------------------------------------------------------------------------
 # Kriging interpolation (Ordinary Kriging via pykrige)
 # ---------------------------------------------------------------------------
 
@@ -513,15 +582,28 @@ def _bin_with_kriging(
     resolution: float,
     variogram_model: str = "exponential",
     nugget: float = 0.0,
+    auto_variogram: bool = False,
 ) -> np.ndarray:
     """Ordinary Kriging interpolation onto a regular grid.
 
-    Uses the GPRSlice covariance model:
+    GPRSlice covariance model (exponential variogram):
 
         cij = c0 + c1          if h == 0
-        cij = c1 * exp(-3h/a)  if h >  0   (exponential variogram)
+        cij = c1 * exp(-3h/a)  if h >  0
 
-    Variogram models: 'exponential' (default), 'spherical', 'gaussian', 'linear'.
+    where c0 = nugget, c1 = partial sill, a = range.
+
+    Parameters
+    ----------
+    variogram_model : 'exponential' (default, matches GPRSlice formula),
+                      'spherical', 'gaussian', 'linear'
+    nugget          : nugget effect c0 (used when auto_variogram=False)
+    auto_variogram  : if True, pykrige estimates nugget, sill and range
+                      automatically from the data of each slice via
+                      weighted least-squares fit of the experimental
+                      variogram. Recommended for heterogeneous GPR datasets.
+                      When True, the `nugget` parameter is ignored.
+
     Requires: pip install pykrige
     """
     if not _HAS_PYKRIGE:
@@ -533,15 +615,29 @@ def _bin_with_kriging(
     gx = x_min + np.arange(n_x) * resolution
     gy = y_min + np.arange(n_y) * resolution
 
-    ok = _OrdinaryKriging(
-        x_pts,
-        y_pts,
-        i_pts.astype(np.float64),
-        variogram_model=variogram_model,
-        variogram_parameters={"nugget": nugget},
-        verbose=False,
-        enable_plotting=False,
-    )
+    if auto_variogram:
+        # Let pykrige fit nugget, sill and range from the data
+        ok = _OrdinaryKriging(
+            x_pts,
+            y_pts,
+            i_pts.astype(np.float64),
+            variogram_model=variogram_model,
+            nlags=6,
+            weight=True,        # weight experimental variogram by pair count
+            verbose=False,
+            enable_plotting=False,
+        )
+    else:
+        ok = _OrdinaryKriging(
+            x_pts,
+            y_pts,
+            i_pts.astype(np.float64),
+            variogram_model=variogram_model,
+            variogram_parameters={"nugget": nugget},
+            verbose=False,
+            enable_plotting=False,
+        )
+
     z_grid, _variance = ok.execute("grid", gx, gy)
     return np.asarray(z_grid, dtype=np.float32)
 
@@ -691,11 +787,7 @@ SIDECAR_FILENAME = ".las_slicer_params.json"
 
 
 def save_slicer_params(output_dir, params):
-    """Persist slicing parameters to a JSON sidecar file.
-
-    Includes all interpolation and GPR-specific post-processing settings
-    so that the exact configuration can be reloaded and reapplied later.
-    """
+    """Persist all slicing and interpolation parameters to a JSON sidecar."""
     path = os.path.join(output_dir, SIDECAR_FILENAME)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(params, f, indent=2, ensure_ascii=True)
@@ -703,7 +795,7 @@ def save_slicer_params(output_dir, params):
 
 
 def load_slicer_params(output_dir):
-    """Load slicing parameters from the JSON sidecar file, or return None."""
+    """Load slicing parameters from the JSON sidecar, or return None."""
     path = os.path.join(output_dir, SIDECAR_FILENAME)
     if not os.path.isfile(path):
         return None
@@ -737,6 +829,11 @@ def slice_las_to_tifs(
     min_points: int = 3,
     kriging_model: str = "exponential",
     kriging_nugget: float = 0.0,
+    kriging_auto_variogram: bool = False,
+    # --- GPR anisotropy ---
+    use_anisotropic_idw: bool = False,
+    anisotropy_ratio: float | None = None,
+    anisotropy_angle: float | None = None,
     # --- GPR-specific filters ---
     auto_radius: bool = False,
     amplitude_sigma: float | None = None,
@@ -749,44 +846,46 @@ def slice_las_to_tifs(
 
     Processing pipeline per slice
     -----------------------------
-    1. [optional] Amplitude outlier removal  (amplitude_sigma)
-    2. Interpolation onto regular grid       (IDW kdtree or Kriging)
-    3. [optional] Fill NaN inter-line gaps   (fill_nodata)
-    4. [optional] Gaussian smoothing         (smooth_sigma > 0)
+    1. [optional] Amplitude outlier removal   (amplitude_sigma)
+    2. Interpolation onto regular grid        (IDW isotropic/anisotropic or Kriging)
+    3. [optional] Fill NaN inter-line gaps    (fill_nodata)
+    4. [optional] Gaussian smoothing          (smooth_sigma > 0)
 
     Parameters
     ----------
-    las_path             : path to input LAS/LAZ file
-    output_dir           : output directory for GeoTIFFs
-    resolution           : grid cell size in CRS units
-    z_step               : Z slice thickness
-    z_min, z_max         : optional Z range override
-    radius               : IDW search radius (default: resolution * sqrt(2)).
-                           Overridden by auto_radius if True.
-    epsg                 : output EPSG code (None = no CRS set)
-    value_field          : LAS field to interpolate, or 'rgb' for 3-band
-    r_field, g_field, b_field : LAS fields for RGB mode
+    las_path, output_dir, resolution, z_step, z_min, z_max, radius, epsg,
+    value_field, r_field, g_field, b_field : as before.
 
-    interpolation_method : 'idw' (default) or 'kriging'
-    idw_power            : IDW smoothing exponent a (GPRSlice notation).
-                           Default 2.0.
-    min_points           : minimum neighbours required to estimate a cell.
-                           Cells with fewer points left as NaN. Default 3.
-    kriging_model        : variogram model ('exponential', 'spherical',
-                           'gaussian', 'linear'). Default 'exponential'.
-    kriging_nugget       : nugget effect c0. Default 0.0.
+    interpolation_method  : 'idw' (default) or 'kriging'
+    idw_power             : IDW smoothing exponent a (GPRSlice: wi = 1/h^a).
+                            Default 2.0.
+    min_points            : minimum neighbours to estimate a cell. Default 3.
+    kriging_model         : variogram model for Kriging.
+                            'exponential' (default) matches GPRSlice formula.
+    kriging_nugget        : nugget c0 (used when kriging_auto_variogram=False).
+    kriging_auto_variogram: if True, pykrige estimates nugget, sill and range
+                            automatically from each slice's data via WLS fit
+                            of the experimental variogram. Recommended for
+                            heterogeneous GPR datasets. Default False.
 
-    auto_radius          : if True, estimate search radius automatically from
-                           the inter-line spacing of the dataset. Default False.
-    amplitude_sigma      : if set, remove GPR amplitude outliers beyond
-                           this many standard deviations before interpolating.
-                           Recommended: 3.0. Default None (disabled).
-    fill_nodata          : if True, fill NaN gaps between acquisition lines
-                           using nearest-neighbour diffusion. Default False.
-    fill_nodata_max_distance : maximum fill distance in grid cells. Default 5.
-    smooth_sigma         : Gaussian smoothing sigma in grid cells applied
-                           after interpolation. 0 = disabled (default).
-                           Typical values: 0.5 (light) to 2.0 (heavy).
+    use_anisotropic_idw   : if True, use elliptical IDW distance metric
+                            suited for GPR parallel-line acquisitions.
+                            Default False.
+    anisotropy_ratio      : cross-line / along-line scale factor (>1).
+                            If None and use_anisotropic_idw=True, estimated
+                            automatically from the data.
+    anisotropy_angle      : principal acquisition direction in degrees.
+                            If None and use_anisotropic_idw=True, estimated
+                            automatically via PCA.
+
+    auto_radius           : estimate search radius from inter-line spacing.
+                            Default False.
+    amplitude_sigma       : sigma-clipping threshold for GPR amplitude
+                            outlier removal. None = disabled. Default None.
+    fill_nodata           : fill NaN gaps between lines. Default False.
+    fill_nodata_max_distance : max fill distance in grid cells. Default 5.
+    smooth_sigma          : Gaussian smoothing sigma (grid cells).
+                            0 = disabled. Default 0.0.
 
     Returns
     -------
@@ -823,26 +922,50 @@ def slice_las_to_tifs(
     n_x = len(np.arange(x_min, x_max + resolution * 0.5, resolution))
     n_y = len(np.arange(y_min, y_max + resolution * 0.5, resolution))
 
-    # Auto-estimate search radius from inter-line spacing
-    if auto_radius:
-        radius = _estimate_interline_radius(x, y)
+    # --- Auto-estimate radius and anisotropy from inter-line spacing ---
+    _aniso_info = None
+    if auto_radius or (use_anisotropic_idw and
+                       (anisotropy_ratio is None or anisotropy_angle is None)):
+        _aniso_info = _estimate_interline_radius(x, y)
 
-    _kw_base    = dict(x_min=x_min, y_min=y_min, n_x=n_x, n_y=n_y,
-                       resolution=resolution)
-    _kw_idw     = dict(**_kw_base, radius=radius,
-                       power=idw_power, min_points=min_points)
-    _kw_kriging = dict(**_kw_base, variogram_model=kriging_model,
-                       nugget=kriging_nugget)
+    if auto_radius and _aniso_info is not None:
+        radius = _aniso_info["radius"]
+
+    _eff_ratio = anisotropy_ratio
+    _eff_angle = anisotropy_angle
+    if use_anisotropic_idw:
+        if _eff_ratio is None:
+            _eff_ratio = (_aniso_info or {}).get("anisotropy_ratio", 1.0)
+        if _eff_angle is None:
+            _eff_angle = (_aniso_info or {}).get("acquisition_angle", 0.0)
+
+    # --- Build interpolation keyword args ---
+    _kw_base = dict(x_min=x_min, y_min=y_min, n_x=n_x, n_y=n_y,
+                    resolution=resolution)
+
+    _kw_idw = dict(**_kw_base, radius=radius,
+                   power=idw_power, min_points=min_points)
+
+    _kw_idw_aniso = dict(**_kw_idw,
+                         anisotropy_ratio=_eff_ratio or 1.0,
+                         anisotropy_angle=_eff_angle or 0.0)
+
+    _kw_kriging = dict(**_kw_base,
+                       variogram_model=kriging_model,
+                       nugget=kriging_nugget,
+                       auto_variogram=kriging_auto_variogram)
 
     def _interp(xm, ym, vm):
         if use_kriging:
             return _bin_with_kriging(xm, ym, vm, **_kw_kriging)
+        if use_anisotropic_idw:
+            return _bin_with_idw_anisotropic(xm, ym, vm, **_kw_idw_aniso)
         return _bin_with_idw_kdtree(xm, ym, vm, **_kw_idw)
 
     def _postprocess(grid):
-        """Apply GPR-specific post-processing steps to a single grid."""
         if fill_nodata:
-            grid = _fill_nodata_grid(grid, max_distance=fill_nodata_max_distance)
+            grid = _fill_nodata_grid(grid,
+                                     max_distance=fill_nodata_max_distance)
         if smooth_sigma > 0:
             grid = _smooth_grid_gaussian(grid, sigma=smooth_sigma)
         return grid
