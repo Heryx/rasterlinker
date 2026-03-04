@@ -1,9 +1,15 @@
-"""LAS/LAZ → GeoTIFF slice generator with IDW interpolation.
+"""LAS/LAZ → GeoTIFF slice generator with IDW and Kriging interpolation.
 
 Supports:
   - single-band (any field)
   - 3-band RGB (value_field='rgb') → GeoTIFF + QML sidecar multibandcolor
     with user-chosen R, G, B fields
+
+Interpolation methods:
+  - 'idw'    : Inverse Distance Weighting with configurable power exponent
+               (gather approach via scipy.spatial.cKDTree)
+  - 'kriging': Ordinary Kriging via pykrige (requires: pip install pykrige)
+               Variogram models: exponential, spherical, gaussian, linear
 """
 
 from __future__ import annotations
@@ -13,6 +19,13 @@ import os
 import textwrap
 
 import numpy as np
+
+try:
+    from pykrige.ok import OrdinaryKriging as _OrdinaryKriging
+    _HAS_PYKRIGE = True
+except ImportError:
+    _OrdinaryKriging = None
+    _HAS_PYKRIGE = False
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +218,7 @@ def _read_las_rgb(
 
 
 # ---------------------------------------------------------------------------
-# IDW binning
+# IDW binning — original scatter approach (kept for compatibility)
 # ---------------------------------------------------------------------------
 
 def _bin_with_idw(
@@ -218,8 +231,21 @@ def _bin_with_idw(
     n_y: int,
     resolution: float,
     radius: float,
+    power: float = 2.0,
 ) -> np.ndarray:
-    """IDW-2 binning onto regular grid. Returns float32 (NaN = no data)."""
+    """IDW binning onto regular grid using scatter approach.
+
+    For each source point, distributes its weighted contribution to
+    surrounding grid cells within `radius`. The weight is:
+
+        w = 1 / (dist^power + epsilon)
+
+    where `power` is the smoothing factor (GPRSlice notation: exponent `a`).
+    A lower value weights all points within the radius more equally;
+    a higher value gives stronger preference to closer points.
+
+    Returns float32 grid (NaN = no data).
+    """
     total   = np.zeros((n_y, n_x), dtype=np.float64)
     wsum    = np.zeros((n_y, n_x), dtype=np.float64)
     r_cells = max(0, int(np.ceil(radius / resolution)))
@@ -241,7 +267,7 @@ def _bin_with_idw(
             if not np.any(in_b):
                 continue
 
-            w = 1.0 / (dist[in_b] ** 2 + 1e-9)
+            w = 1.0 / (dist[in_b] ** power + 1e-9)
             np.add.at(total, (yi[in_b], xi[in_b]),
                       w * i_pts[in_b].astype(np.float64))
             np.add.at(wsum, (yi[in_b], xi[in_b]), w)
@@ -250,6 +276,126 @@ def _bin_with_idw(
     hd   = wsum > 0
     grid[hd] = (total[hd] / wsum[hd]).astype(np.float32)
     return grid
+
+
+# ---------------------------------------------------------------------------
+# IDW binning — gather approach with scipy cKDTree (recommended)
+# ---------------------------------------------------------------------------
+
+def _bin_with_idw_kdtree(
+    x_pts: np.ndarray,
+    y_pts: np.ndarray,
+    i_pts: np.ndarray,
+    x_min: float,
+    y_min: float,
+    n_x: int,
+    n_y: int,
+    resolution: float,
+    radius: float,
+    power: float = 2.0,
+) -> np.ndarray:
+    """IDW binning using a gather approach via scipy.spatial.cKDTree.
+
+    For each grid cell, queries all source points within `radius` and
+    computes the inverse-distance-weighted average:
+
+        estimated = sum(wi * zi) / sum(wi)   where  wi = 1 / (hi^power + eps)
+
+    This matches the GPRSlice IDW formula exactly, with `power` as the
+    configurable smoothing factor `a`. Faster and more memory-efficient
+    than the scatter approach on dense point clouds.
+
+    Returns float32 grid (NaN = no data).
+    """
+    from scipy.spatial import cKDTree  # type: ignore
+
+    # Build destination grid
+    gx = x_min + np.arange(n_x) * resolution
+    gy = y_min + np.arange(n_y) * resolution
+    gxx, gyy = np.meshgrid(gx, gy)                          # shape (n_y, n_x)
+    grid_pts = np.column_stack([gxx.ravel(), gyy.ravel()])   # shape (n_y*n_x, 2)
+
+    # Build KD-tree on source points
+    tree    = cKDTree(np.column_stack([x_pts, y_pts]))
+    results = tree.query_ball_point(grid_pts, r=radius, workers=-1)
+
+    i_pts_f64 = i_pts.astype(np.float64)
+    grid      = np.full(n_x * n_y, np.nan, dtype=np.float32)
+
+    for k, idx_list in enumerate(results):
+        if not idx_list:
+            continue
+        idx = np.asarray(idx_list, dtype=np.int64)
+        cx  = grid_pts[k, 0]
+        cy  = grid_pts[k, 1]
+        d   = np.sqrt((x_pts[idx] - cx) ** 2 + (y_pts[idx] - cy) ** 2)
+        w   = 1.0 / (d ** power + 1e-9)
+        ws  = w.sum()
+        if ws > 0:
+            grid[k] = float(np.dot(w, i_pts_f64[idx]) / ws)
+
+    return grid.reshape(n_y, n_x)
+
+
+# ---------------------------------------------------------------------------
+# Kriging interpolation (Ordinary Kriging via pykrige)
+# ---------------------------------------------------------------------------
+
+def _bin_with_kriging(
+    x_pts: np.ndarray,
+    y_pts: np.ndarray,
+    i_pts: np.ndarray,
+    x_min: float,
+    y_min: float,
+    n_x: int,
+    n_y: int,
+    resolution: float,
+    variogram_model: str = "exponential",
+    nugget: float = 0.0,
+) -> np.ndarray:
+    """Ordinary Kriging interpolation onto a regular grid.
+
+    Uses the GPRSlice covariance model:
+
+        cij = c0 + c1          if h == 0
+        cij = c1 * exp(-3h/a)  if h >  0   (exponential variogram)
+
+    where:
+        c0     = nugget effect (discontinuity at the origin)
+        c0+c1  = sill (covariance at large distances)
+        a      = range parameter
+        h      = distance between points
+
+    Variogram model options (pykrige):
+        'exponential' (default, matches GPRSlice formula)
+        'spherical'
+        'gaussian'
+        'linear'
+
+    Requires: pip install pykrige
+
+    Returns float32 grid (NaN = no data).
+    """
+    if not _HAS_PYKRIGE:
+        raise ImportError(
+            "pykrige non e' installato. "
+            "Installare con: pip install pykrige"
+        )
+
+    gx = x_min + np.arange(n_x) * resolution
+    gy = y_min + np.arange(n_y) * resolution
+
+    ok = _OrdinaryKriging(
+        x_pts,
+        y_pts,
+        i_pts.astype(np.float64),
+        variogram_model=variogram_model,
+        variogram_parameters={"nugget": nugget},
+        verbose=False,
+        enable_plotting=False,
+    )
+    z_grid, _variance = ok.execute("grid", gx, gy)
+    return np.asarray(z_grid, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +543,11 @@ SIDECAR_FILENAME = ".las_slicer_params.json"
 
 
 def save_slicer_params(output_dir, params):
+    """Persist slicing parameters to a JSON sidecar file.
+
+    Includes interpolation settings (method, idw_power, kriging_model,
+    kriging_nugget) so that the exact configuration can be reloaded later.
+    """
     path = os.path.join(output_dir, SIDECAR_FILENAME)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(params, f, indent=2, ensure_ascii=True)
@@ -404,6 +555,7 @@ def save_slicer_params(output_dir, params):
 
 
 def load_slicer_params(output_dir):
+    """Load slicing parameters from the JSON sidecar file, or return None."""
     path = os.path.join(output_dir, SIDECAR_FILENAME)
     if not os.path.isfile(path):
         return None
@@ -427,26 +579,61 @@ def slice_las_to_tifs(
     z_max: float | None = None,
     radius: float | None = None,
     epsg: int | None = None,
-    value_field: str = "intensity",  # or 'rgb' for 3-band
+    value_field: str = "intensity",   # or 'rgb' for 3-band
     r_field: str = "red",
     g_field: str = "green",
     b_field: str = "blue",
+    interpolation_method: str = "idw",  # 'idw' | 'kriging'
+    idw_power: float = 2.0,
+    kriging_model: str = "exponential",
+    kriging_nugget: float = 0.0,
 ) -> list[dict]:
     """
     Slice LAS/LAZ into GeoTIFF rasters (one per Z interval).
 
+    Parameters
+    ----------
+    las_path            : path to the input LAS/LAZ file
+    output_dir          : directory where GeoTIFFs are written
+    resolution          : grid cell size in CRS units
+    z_step              : thickness of each Z slice
+    z_min, z_max        : optional Z range override
+    radius              : IDW/search radius (default: resolution * sqrt(2))
+    epsg                : EPSG code for output CRS (None = no projection set)
+    value_field         : LAS field to interpolate, or 'rgb' for 3-band output
+    r_field, g_field, b_field : LAS fields for RGB channels (used when value_field='rgb')
+    interpolation_method: 'idw' (default) or 'kriging'
+    idw_power           : IDW smoothing exponent `a` (GPRSlice notation);
+                          lower = more equal weighting, higher = closer points
+                          dominate. Default 2.0.
+    kriging_model       : variogram model for Kriging
+                          ('exponential', 'spherical', 'gaussian', 'linear')
+                          'exponential' matches the GPRSlice formula:
+                          c1 * exp(-3h/a). Requires pykrige.
+    kriging_nugget      : nugget effect c0 (discontinuity at origin). Default 0.0.
+
+    Returns
+    -------
+    List of dicts with keys: path, z_from, z_to, z_center, index, name.
+
     When value_field == 'rgb':
-      - Reads r_field, g_field, b_field from LAS
       - Creates 3-band GeoTIFF + QML sidecar (multibandcolor)
+      - Kriging is applied independently to each RGB channel
     Otherwise:
-      - Reads value_field from LAS
       - Creates single-band float32 GeoTIFF
     """
     if radius is None:
         radius = resolution * (2 ** 0.5)
 
     os.makedirs(output_dir, exist_ok=True)
-    use_rgb = (value_field == "rgb")
+    use_rgb    = (value_field == "rgb")
+    use_kriging = (interpolation_method == "kriging")
+
+    if use_kriging and not _HAS_PYKRIGE:
+        raise ImportError(
+            "pykrige non e' installato. "
+            "Installare con: pip install pykrige"
+        )
 
     if use_rgb:
         x, y, z, r, g, b = _read_las_rgb(las_path, r_field, g_field, b_field)
@@ -466,6 +653,23 @@ def slice_las_to_tifs(
     n_x = len(np.arange(x_min, x_max + resolution * 0.5, resolution))
     n_y = len(np.arange(y_min, y_max + resolution * 0.5, resolution))
 
+    # Common keyword args for interpolation functions
+    _kw_base = dict(
+        x_min=x_min, y_min=y_min,
+        n_x=n_x, n_y=n_y,
+        resolution=resolution,
+    )
+    _kw_idw     = dict(**_kw_base, radius=radius, power=idw_power)
+    _kw_kriging = dict(**_kw_base,
+                       variogram_model=kriging_model,
+                       nugget=kriging_nugget)
+
+    def _interp(xm, ym, vm):
+        """Dispatch to the selected interpolation method."""
+        if use_kriging:
+            return _bin_with_kriging(xm, ym, vm, **_kw_kriging)
+        return _bin_with_idw_kdtree(xm, ym, vm, **_kw_idw)
+
     z_levels = np.arange(z_min, z_max + z_step * 0.5, z_step)
     results  = []
 
@@ -480,20 +684,17 @@ def slice_las_to_tifs(
         tif_name = f"slice_{iz:04d}_z{z_label}.tif"
         tif_path = os.path.join(output_dir, tif_name)
 
-        kw = dict(x_min=x_min, y_min=y_min, n_x=n_x, n_y=n_y,
-                  resolution=resolution, radius=radius)
-
         if use_rgb:
-            r_grid = _bin_with_idw(x[mask], y[mask], r[mask], **kw)
-            g_grid = _bin_with_idw(x[mask], y[mask], g[mask], **kw)
-            b_grid = _bin_with_idw(x[mask], y[mask], b[mask], **kw)
+            r_grid = _interp(x[mask], y[mask], r[mask])
+            g_grid = _interp(x[mask], y[mask], g[mask])
+            b_grid = _interp(x[mask], y[mask], b[mask])
             ranges = _write_tif_rgb(
                 r_grid, g_grid, b_grid,
                 tif_path, x_min, y_min, y_max, resolution, epsg,
             )
             _write_qml_multiband(tif_path, *ranges)
         else:
-            grid = _bin_with_idw(x[mask], y[mask], values[mask], **kw)
+            grid = _interp(x[mask], y[mask], values[mask])
             _write_tif_singleband(
                 grid, tif_path, x_min, y_min, y_max, resolution, epsg,
             )
