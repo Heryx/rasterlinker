@@ -20,6 +20,12 @@ from .app_runtime_mixin import AppRuntimeMixin
 from .update_checker_mixin import UpdateCheckerMixin
 
 try:
+    from .gpr_profile_viewer import GprProfileViewer
+    _HAS_PROFILE_VIEWER = True
+except Exception:
+    _HAS_PROFILE_VIEWER = False
+
+try:
     from .resources import *  # noqa: F401,F403
     _HAS_QT_RESOURCES = True
 except Exception:
@@ -84,6 +90,9 @@ class GeoSurveyStudioPlugin(
         self.project_manager_dialog = None
         self.pending_vector_storage_mode = None
 
+        # GPR Profile Viewer (finestra indipendente)
+        self._gpr_profile_viewer = None
+
         # Mixin state initialisation – each mixin owns and resets its own attributes.
         self._init_grid_state()
         self._init_ui_layout()
@@ -146,6 +155,18 @@ class GeoSurveyStudioPlugin(
         if pencil_icon is not None and not pencil_icon.isNull():
             self.trace_info_action.setIcon(pencil_icon)
 
+        # --- GPR Profile Viewer ---
+        if _HAS_PROFILE_VIEWER:
+            self.gpr_viewer_action = self.add_action(
+                icon_path,
+                text=self.tr(u'GPR Profile Viewer'),
+                callback=self.open_gpr_profile_viewer,
+                parent=self.iface.mainWindow(),
+            )
+            radar_icon = self._qgis_theme_icon("mIconRasterLayer.svg", "mIconRaster.svg")
+            if radar_icon is not None and not radar_icon.isNull():
+                self.gpr_viewer_action.setIcon(radar_icon)
+
         self.check_updates_action = self.add_action(
             icon_path,
             text=self.tr(u'Check for Updates'),
@@ -157,10 +178,38 @@ class GeoSurveyStudioPlugin(
             self.check_updates_action.setIcon(refresh_icon)
         self.first_start = True
 
+    def open_gpr_profile_viewer(self):
+        """Apre (o porta in primo piano) il GPR Profile Viewer."""
+        if not _HAS_PROFILE_VIEWER:
+            from qgis.PyQt.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "GPR Profile Viewer",
+                "matplotlib non trovato.\n"
+                "Installa con: pip install matplotlib scipy"
+            )
+            return
+        if self._gpr_profile_viewer is None:
+            self._gpr_profile_viewer = GprProfileViewer(
+                iface=self.iface,
+                plugin=self,
+                parent=self.iface.mainWindow(),
+            )
+        self._gpr_profile_viewer.show()
+        self._gpr_profile_viewer.raise_()
+        self._gpr_profile_viewer.activateWindow()
+
     def unload(self):
         """Unload the plugin."""
         if self.dlg is not None:
             self._save_ui_settings()
+        # Chiudi viewer GPR se aperto
+        if self._gpr_profile_viewer is not None:
+            try:
+                self._gpr_profile_viewer.close()
+            except Exception:
+                pass
+            self._gpr_profile_viewer = None
         for action in self.actions:
             self.iface.removePluginMenu(self.tr(u'&GeoSurvey Studio'), action)
             if self.plugin_toolbar is None:
