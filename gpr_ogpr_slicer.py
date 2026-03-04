@@ -54,10 +54,20 @@ def _depth_to_sample_range(
     return max(0, s_lo), min(n_samples, s_hi)
 
 
+def _amplitude_from_window(
+    proc: np.ndarray,
+    s_lo: int,
+    s_hi: int,
+) -> np.ndarray:
+    """Ampiezza media |segnale| nel range [s_lo, s_hi) per ogni traccia."""
+    return np.abs(proc[s_lo:s_hi, :]).mean(axis=0).astype(np.float32)
+
+
 def slice_ogpr_to_tifs(
     profiles: list,
     output_dir: str,
-    channel: int = 0,
+    channel: int = -1,
+    combine_method: str = "mean",
     resolution: float = 0.10,
     z_step: float = 0.05,
     z_min: float | None = None,
@@ -69,29 +79,24 @@ def slice_ogpr_to_tifs(
     """
     Genera GeoTIFF timeslice da una lista di OgprProfile.
 
-    Algoritmo:
-      1. Applica processing pipeline ad ogni profilo (canale 'channel').
-      2. Per ogni finestra di profondita' [z_from, z_to]:
-         - estrae ampiezza media |segnale processato| nel range di campioni
-         - raccoglie tutti i punti (easting, northing, ampiezza) dai profili
-         - IDW su griglia regolare -> GeoTIFF float32
-
     Parametri
     ----------
-    profiles     : lista di OgprProfile gia' letti da read_ogpr()
-    output_dir   : cartella output (viene creata se non esiste)
-    channel      : indice canale da usare (default 0; clampato a n_channels-1)
-    resolution   : passo griglia XY in metri
-    z_step       : spessore di ogni finestra di profondita' in metri
-    z_min/z_max  : range di profondita' (None = auto dai profili)
-    radius       : raggio IDW in metri (None = resolution * sqrt(2))
-    epsg         : EPSG del CRS di output (None = non georef.)
-    pipeline_params : override di DEFAULT_PIPELINE (None = default)
+    profiles        : lista di OgprProfile gia' letti da read_ogpr()
+    output_dir      : cartella output
+    channel         : -1 = tutti i canali combinati (default)
+                       0, 1, ... = canale singolo
+    combine_method  : 'mean' (default) o 'max' -- usato solo se channel == -1
+    resolution      : passo griglia XY in metri
+    z_step          : spessore finestra di profondita' in metri
+    z_min / z_max   : range profondita' (None = auto)
+    radius          : raggio IDW in metri (None = resolution * sqrt(2))
+    epsg            : EPSG del CRS (None = non georiferito)
+    pipeline_params : override DEFAULT_PIPELINE
 
     Ritorna
     -------
     Lista di dict {path, z_from, z_to, z_center, index, name}
-    come slice_las_to_tifs, compatibile con _register_las_slices_in_catalog.
+    compatibile con _register_las_slices_in_catalog.
     """
     from .gpr_processing  import apply_pipeline, DEFAULT_PIPELINE
     from .gpr_las_slicer  import _bin_with_idw, _write_tif_singleband
@@ -106,22 +111,40 @@ def slice_ogpr_to_tifs(
     os.makedirs(output_dir, exist_ok=True)
 
     # ----------------------------------------------------------------
-    # 1. Processa tutti i profili -> (ch, proc_data)
+    # 1. Processa tutti i canali di tutti i profili
+    #    processed: lista di (ch, [proc_ch0, proc_ch1, ...])
+    #    - channel == -1: processa tutti i canali, li combina per traccia
+    #    - channel >= 0:  processa solo il canale richiesto
     # ----------------------------------------------------------------
-    processed = []
+    processed = []   # (ch_ref, easting, northing, ampl_3d)  con ampl_3d (n_s, n_t, n_ch)
+
     for prof in profiles:
-        ch_idx = min(channel, prof.n_channels - 1)
-        ch     = prof.channel(ch_idx)
-        raw    = ch.data.copy()
-        try:
-            proc = apply_pipeline(raw, params, dt_ns=prof.dt_ns)
-        except Exception as exc:
-            print(f"[OGPR slicer] pipeline error on {prof.path}: {exc}")
-            proc = np.abs(raw).astype(np.float32)
-            mx   = proc.max()
-            if mx > 1e-10:
-                proc /= mx
-        processed.append((prof, ch, proc))
+        n_ch   = prof.n_channels
+        ch_ref = prof.channel(0)   # usiamo ch0 per easting/northing (tutti uguale)
+
+        if channel < 0:
+            # tutti i canali
+            ch_list = list(range(n_ch))
+        else:
+            ch_list = [min(channel, n_ch - 1)]
+
+        proc_channels = []
+        for ci in ch_list:
+            ch  = prof.channel(ci)
+            raw = ch.data.copy()
+            try:
+                proc = apply_pipeline(raw, params, dt_ns=prof.dt_ns)
+            except Exception as exc:
+                print(f"[OGPR slicer] pipeline error ch{ci} in {prof.path}: {exc}")
+                proc = np.abs(raw).astype(np.float32)
+                mx   = proc.max()
+                if mx > 1e-10:
+                    proc /= mx
+            proc_channels.append(proc)  # ogni elem (n_s, n_t)
+
+        # stack -> (n_s, n_t, n_ch)
+        ampl_3d = np.stack(proc_channels, axis=2)
+        processed.append((prof, ch_ref, ampl_3d))
 
     # ----------------------------------------------------------------
     # 2. Bounding box globale
@@ -164,14 +187,26 @@ def slice_ogpr_to_tifs(
         pts_n = []
         pts_a = []
 
-        for prof, ch, proc in processed:
-            n_s = proc.shape[0]
-            s_lo, s_hi = _depth_to_sample_range(z_from, z_to,
-                                                 prof.depth_max_m, n_s)
+        for prof, ch, ampl_3d in processed:
+            n_s = ampl_3d.shape[0]
+            s_lo, s_hi = _depth_to_sample_range(
+                z_from, z_to, prof.depth_max_m, n_s
+            )
             if s_lo >= s_hi:
                 continue
-            # ampiezza media del segnale nel range di campioni per ogni traccia
-            ampl = np.abs(proc[s_lo:s_hi, :]).mean(axis=0).astype(np.float32)
+
+            # ampl_3d: (n_s, n_t, n_ch)
+            window = np.abs(ampl_3d[s_lo:s_hi, :, :])  # (win, n_t, n_ch)
+
+            # 1) media lungo l'asse dei campioni (depth window) -> (n_t, n_ch)
+            per_ch = window.mean(axis=0)
+
+            # 2) combina i canali -> (n_t,)
+            if per_ch.shape[1] == 1 or combine_method == "mean":
+                ampl = per_ch.mean(axis=1).astype(np.float32)
+            else:  # 'max'
+                ampl = per_ch.max(axis=1).astype(np.float32)
+
             pts_e.append(ch.easting)
             pts_n.append(ch.northing)
             pts_a.append(ampl)
@@ -197,6 +232,13 @@ def slice_ogpr_to_tifs(
             x_min, y_min, y_max, resolution, epsg,
         )
 
+        n_ch_used = ampl_3d.shape[2]
+        print(
+            f"[OGPR slicer] z={z_lev:.3f}m  pts={len(e_all)}  "
+            f"ch={'all' if channel < 0 else channel}({n_ch_used})  "
+            f"tif={tif_name}"
+        )
+
         results.append({
             "path":     tif_path,
             "z_from":   round(z_from, 6),
@@ -205,7 +247,5 @@ def slice_ogpr_to_tifs(
             "index":    iz,
             "name":     os.path.splitext(tif_name)[0],
         })
-
-        print(f"[OGPR slicer] z={z_lev:.3f}m  pts={len(e_all)}  tif={tif_name}")
 
     return results

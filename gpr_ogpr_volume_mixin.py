@@ -7,7 +7,7 @@ Viene chiamato da GprProfileViewer tramite:
     self.plugin.import_ogpr_as_slices(self._profiles)
 
 Flusso:
-  1. Dialog parametri (canale, z_min/max, z_step, risoluzione, radius, gruppo)
+  1. Dialog parametri (canale/combinazione, z_min/max, z_step, risoluzione, radius, gruppo)
   2. slice_ogpr_to_tifs()  -> lista di dict {path, z_from, z_to, ...}
   3. _register_las_slices_in_catalog()  (riusa GprVolumeMixin)
   4. Aggiorna lista gruppi nel Project Manager
@@ -19,7 +19,7 @@ import os
 
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QDialogButtonBox,
-    QLabel, QDoubleSpinBox, QSpinBox, QLineEdit, QGroupBox,
+    QLabel, QDoubleSpinBox, QComboBox, QLineEdit, QGroupBox,
     QMessageBox,
 )
 from qgis.core import QgsProject
@@ -28,9 +28,9 @@ from qgis.core import QgsProject
 class GprOgprVolumeMixin:
     """
     Aggiungere questa classe alla lista di ereditarieta' del plugin principale
-    (geosurvey_studio.py / GeosurveyStudio) dopo GprVolumeMixin, ad es.:
+    dopo GprVolumeMixin:
 
-        class GeosurveyStudio(
+        class GeoSurveyStudioPlugin(
             ...,
             GprVolumeMixin,
             GprOgprVolumeMixin,
@@ -77,11 +77,12 @@ class GprOgprVolumeMixin:
         # --- finestra ---
         dlg = QDialog(getattr(self, "dlg", None))
         dlg.setWindowTitle("OGPR \u2192 Timeslice")
-        dlg.setMinimumWidth(380)
+        dlg.setMinimumWidth(400)
         root = QVBoxLayout(dlg)
 
         root.addWidget(QLabel(
-            f"Profondita' massima rilevata: <b>{depth_max_m:.3f} m</b>"
+            f"Profondita' massima rilevata: <b>{depth_max_m:.3f} m</b>  —  "
+            f"<b>{n_channels}</b> canal{'e' if n_channels == 1 else 'i'}"
         ))
 
         def _spin(lo, hi, dec, step, val):
@@ -95,10 +96,28 @@ class GprOgprVolumeMixin:
         grp = QGroupBox("Parametri griglia")
         fl  = QFormLayout(grp)
 
-        sp_ch   = QSpinBox()
-        sp_ch.setRange(0, max(0, n_channels - 1))
-        sp_ch.setValue(saved.get("channel", 0) if saved else 0)
-        sp_ch.setToolTip("Canale GPR da usare per l'ampiezza")
+        # --- ComboBox canali ---
+        cb_ch = QComboBox()
+        cb_ch.addItem("\U0001f4e1  Tutti i canali — media (consigliato)",  (-1, "mean"))
+        cb_ch.addItem("\U0001f4e1  Tutti i canali — massimo",              (-1, "max"))
+        for ci in range(n_channels):
+            cb_ch.addItem(f"Solo canale {ci}", (ci, "mean"))
+        cb_ch.setToolTip(
+            "'Tutti — media': combina l'ampiezza di ogni canale con la media.\n"
+            "  Riduce il rumore, risultato piu' stabile.\n"
+            "'Tutti — massimo': prende il canale con ampiezza maggiore per ogni traccia.\n"
+            "  Evidenzia le anomalie piu' forti.\n"
+            "'Solo canale N': un singolo canale (utile per analisi per polarizzazione)."
+        )
+        # ripristina selezione salvata
+        if saved:
+            prev_ch  = saved.get("channel", -1)
+            prev_comb = saved.get("combine_method", "mean")
+            for i in range(cb_ch.count()):
+                d = cb_ch.itemData(i)
+                if d == (prev_ch, prev_comb):
+                    cb_ch.setCurrentIndex(i)
+                    break
 
         sp_zmin   = _spin(0.0,   1000.0, 4, 0.01,   saved.get("z_min",   0.0)         if saved else 0.0)
         sp_zmax   = _spin(0.001, 1000.0, 4, 0.01,   saved.get("z_max",   depth_max_m) if saved else depth_max_m)
@@ -108,7 +127,7 @@ class GprOgprVolumeMixin:
         le_group  = QLineEdit(saved.get("group_name", default_group) if saved else default_group)
         le_group.setPlaceholderText("Nome gruppo catalogo")
 
-        fl.addRow("Canale:",          sp_ch)
+        fl.addRow("Canali:",          cb_ch)
         fl.addRow("Z minimo (m):",    sp_zmin)
         fl.addRow("Z massimo (m):",   sp_zmax)
         fl.addRow("Step Z (m):",      sp_step)
@@ -127,14 +146,17 @@ class GprOgprVolumeMixin:
         if dlg.exec_() != QDialog.Accepted:
             return None
 
+        ch_val, comb_val = cb_ch.currentData()
+
         return {
-            "channel":    sp_ch.value(),
-            "z_min":      sp_zmin.value(),
-            "z_max":      sp_zmax.value(),
-            "z_step":     sp_step.value(),
-            "resolution": sp_res.value(),
-            "radius":     sp_radius.value(),
-            "group_name": le_group.text().strip() or default_group,
+            "channel":        ch_val,
+            "combine_method": comb_val,
+            "z_min":          sp_zmin.value(),
+            "z_max":          sp_zmax.value(),
+            "z_step":         sp_step.value(),
+            "resolution":     sp_res.value(),
+            "radius":         sp_radius.value(),
+            "group_name":     le_group.text().strip() or default_group,
         }
 
     # ------------------------------------------------------------------
@@ -185,9 +207,8 @@ class GprOgprVolumeMixin:
         saved = load_ogpr_slicer_params(candidate_dir)
         is_reslice = saved is not None
 
-        # profondita' massima tra tutti i profili
-        depth_max = max(p.depth_max_m for p in profiles)
-        n_channels = max(p.n_channels for p in profiles)
+        depth_max  = max(p.depth_max_m for p in profiles)
+        n_channels = max(p.n_channels  for p in profiles)
 
         params = self._ask_ogpr_slice_params(
             n_channels  = n_channels,
@@ -204,24 +225,31 @@ class GprOgprVolumeMixin:
 
         epsg = QgsProject.instance().crs().postgisSrid() or None
 
+        ch_label = (
+            f"tutti ({params['combine_method']})"
+            if params["channel"] < 0
+            else f"canale {params['channel']}"
+        )
         if hasattr(self, "_notify_info"):
             self._notify_info(
                 f"Generazione slice OGPR: {len(profiles)} profili, "
+                f"{ch_label}, "
                 f"dz={params['z_step']:.3f}m, res={params['resolution']:.3f}m\u2026",
                 duration=60,
             )
 
         try:
             slices = slice_ogpr_to_tifs(
-                profiles    = profiles,
-                output_dir  = output_dir,
-                channel     = params["channel"],
-                resolution  = params["resolution"],
-                z_step      = params["z_step"],
-                z_min       = params["z_min"],
-                z_max       = params["z_max"],
-                radius      = params["radius"],
-                epsg        = epsg,
+                profiles       = profiles,
+                output_dir     = output_dir,
+                channel        = params["channel"],
+                combine_method = params["combine_method"],
+                resolution     = params["resolution"],
+                z_step         = params["z_step"],
+                z_min          = params["z_min"],
+                z_max          = params["z_max"],
+                radius         = params["radius"],
+                epsg           = epsg,
             )
         except Exception as exc:
             QMessageBox.critical(
@@ -246,6 +274,7 @@ class GprOgprVolumeMixin:
             "source_profiles": [p.path for p in profiles],
             "group_name":      group_name,
             "channel":         params["channel"],
+            "combine_method":  params["combine_method"],
             "z_min":           params["z_min"],
             "z_max":           params["z_max"],
             "z_step":          params["z_step"],
@@ -278,7 +307,7 @@ class GprOgprVolumeMixin:
         msg    = (
             f"{action} completato: '{group_name}', "
             f"{len(slices)} slice, "
-            f"canale {params['channel']}, "
+            f"{ch_label}, "
             f"dz={params['z_step']:.3f}m."
         )
         if hasattr(self, "_notify_info"):
