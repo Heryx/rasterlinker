@@ -76,8 +76,15 @@ def time_zero_correction(data: np.ndarray, method: str = "energy") -> np.ndarray
 
 
 def background_removal(data: np.ndarray) -> np.ndarray:
-    """Sottrae la traccia media (clutter di sfondo orizzontale)."""
-    return (data - data.mean(axis=1, keepdims=True)).astype(np.float32)
+    """Sottrae la traccia media (clutter di sfondo orizzontale).
+
+    Il calcolo avviene in float64 per evitare cancellazione catastrofica:
+    con dati int16 (±32000) in float32, i residui dopo sottrazione della
+    media possono essere inferiori alla precisione float32 (~0.004) e
+    venire azzerati, lasciando meno del 2% di campioni nonzero.
+    """
+    d64 = data.astype(np.float64)
+    return (d64 - d64.mean(axis=1, keepdims=True)).astype(np.float32)
 
 
 def agc_gain(
@@ -87,7 +94,7 @@ def agc_gain(
 ) -> np.ndarray:
     """
     Automatic Gain Control: normalizza per finestre di profondità.
-    window consigliato: 128 campioni (≈30% di una traccia tipica da 50 ns
+    window consigliato: 128 campioni (~30% di una traccia tipica da 50 ns
     a 0.117 ns/campione). Finestre piccole (<32) amplificano il rumore
     profondo producendo un'immagine grigia uniforme senza contrasto.
     """
@@ -158,7 +165,7 @@ def normalize_display(data: np.ndarray, clip_pct: float = 98.0) -> np.ndarray:
 DEFAULT_PIPELINE = {
     "dewow":       True,
     "dewow_win":   16,
-    "timezero":    True,       # allinea l'onda diretta prima del gain
+    "timezero":    False,      # controllato dall'UI viewer, off di default
     "bg_removal":  True,
     "agc":         True,
     "agc_win":     128,        # finestra ampia: preserva il decadimento in profondità

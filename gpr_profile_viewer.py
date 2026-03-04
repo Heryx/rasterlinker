@@ -149,10 +149,19 @@ class GprProfileViewer(QDialog):
         self._chk_dewow  = QCheckBox(); self._chk_dewow.setChecked(True)
         self._spin_dewow = QSpinBox();  self._spin_dewow.setRange(4, 256); self._spin_dewow.setValue(16)
 
+        self._chk_timezero = QCheckBox()
+        self._chk_timezero.setChecked(False)
+        self._chk_timezero.setToolTip(
+            "Allinea ogni traccia all'onda diretta (t=0).\n"
+            "Utile se le tracce hanno ritardi variabili.\n"
+            "ATTENZIONE: può capovolgere il profilo se il dato\n"
+            "è già allineato al t=0."
+        )
+
         self._chk_bg  = QCheckBox(); self._chk_bg.setChecked(True)
 
         self._chk_agc  = QCheckBox(); self._chk_agc.setChecked(True)
-        self._spin_agc = QSpinBox();  self._spin_agc.setRange(8, 512); self._spin_agc.setValue(32)
+        self._spin_agc = QSpinBox();  self._spin_agc.setRange(8, 512); self._spin_agc.setValue(128)
 
         self._chk_bp   = QCheckBox(); self._chk_bp.setChecked(False)
         self._spin_bp_lo = QDoubleSpinBox(); self._spin_bp_lo.setRange(1, 3000); self._spin_bp_lo.setValue(200)
@@ -179,16 +188,17 @@ class GprProfileViewer(QDialog):
             "I valori vengono clippati a [-1, 1] prima del display."
         )
 
-        fl.addRow("Dewow:",       self._chk_dewow)
-        fl.addRow("  finestra:",  self._spin_dewow)
-        fl.addRow("BG removal:",  self._chk_bg)
-        fl.addRow("AGC gain:",    self._chk_agc)
-        fl.addRow("  finestra:",  self._spin_agc)
-        fl.addRow("Bandpass:",    self._chk_bp)
-        fl.addRow("  low (MHz):", self._spin_bp_lo)
-        fl.addRow("  high (MHz):",self._spin_bp_hi)
-        fl.addRow("Clip %:",      self._spin_clip)
-        fl.addRow("Gain display:",self._spin_gain)
+        fl.addRow("Dewow:",        self._chk_dewow)
+        fl.addRow("  finestra:",   self._spin_dewow)
+        fl.addRow("Time-zero:",    self._chk_timezero)
+        fl.addRow("BG removal:",   self._chk_bg)
+        fl.addRow("AGC gain:",     self._chk_agc)
+        fl.addRow("  finestra:",   self._spin_agc)
+        fl.addRow("Bandpass:",     self._chk_bp)
+        fl.addRow("  low (MHz):",  self._spin_bp_lo)
+        fl.addRow("  high (MHz):", self._spin_bp_hi)
+        fl.addRow("Clip %:",       self._spin_clip)
+        fl.addRow("Gain display:", self._spin_gain)
 
         btn_apply = QPushButton("Applica")
         btn_apply.clicked.connect(self._apply_processing)
@@ -287,6 +297,7 @@ class GprProfileViewer(QDialog):
         params = {
             "dewow":       self._chk_dewow.isChecked(),
             "dewow_win":   self._spin_dewow.value(),
+            "timezero":    self._chk_timezero.isChecked(),
             "bg_removal":  self._chk_bg.isChecked(),
             "agc":         self._chk_agc.isChecked(),
             "agc_win":     self._spin_agc.value(),
@@ -342,7 +353,7 @@ class GprProfileViewer(QDialog):
             cmap=cmap,
             vmin=-1, vmax=1,
             extent=[0, dist_max, depth_max, 0],
-            interpolation="nearest",       # nessuna sfocatura
+            interpolation="nearest",
         )
         self._ax.set_xlabel("Distanza (m)")
         self._ax.set_ylabel("Profondit\u00e0 (m)")
