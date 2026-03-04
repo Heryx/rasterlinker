@@ -82,22 +82,24 @@ def background_removal(data: np.ndarray) -> np.ndarray:
 
 def agc_gain(
     data: np.ndarray,
-    window: int = 32,
+    window: int = 128,
     clip_percentile: float = 99.0,
 ) -> np.ndarray:
     """
     Automatic Gain Control: normalizza per finestre di profondità.
-    window minimo: 8 campioni (evita over-normalization su finestre troppo piccole).
+    window consigliato: 128 campioni (≈30% di una traccia tipica da 50 ns
+    a 0.117 ns/campione). Finestre piccole (<32) amplificano il rumore
+    profondo producendo un'immagine grigia uniforme senza contrasto.
     """
     data     = data.astype(np.float32)
     n_s, n_t = data.shape
     out      = np.empty_like(data)
-    half     = max(window, 8) // 2      # minimo 8 campioni
+    half     = max(window, 8) // 2
     for i in range(n_t):
         tr = data[:, i]
         for s in range(n_s):
             lo        = max(0, s - half)
-            hi        = min(n_s, s + half + 1)   # +1: include campione centrale
+            hi        = min(n_s, s + half + 1)
             rms       = np.sqrt(np.mean(tr[lo:hi] ** 2)) + 1e-10
             out[s, i] = tr[s] / rms
     if out.size > 0:
@@ -156,10 +158,10 @@ def normalize_display(data: np.ndarray, clip_pct: float = 98.0) -> np.ndarray:
 DEFAULT_PIPELINE = {
     "dewow":       True,
     "dewow_win":   16,
-    "timezero":    False,
+    "timezero":    True,       # allinea l'onda diretta prima del gain
     "bg_removal":  True,
     "agc":         True,
-    "agc_win":     32,
+    "agc_win":     128,        # finestra ampia: preserva il decadimento in profondità
     "bandpass":    False,
     "bp_low_mhz":  100.0,
     "bp_high_mhz": 1200.0,
