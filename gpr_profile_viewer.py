@@ -7,6 +7,7 @@ QDialog con radargram matplotlib integrato.
   - asse Y (profondita'): cambia timeslice visibile via dial del plugin
   - Gain display: moltiplicatore post-normalize per boost contrasto
   - Clip %: percentile di clipping per normalize_display
+  - Sezione Timeslice: parametri per la generazione slice OGPR
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ from .gpr_ogpr_reader import read_ogpr, OgprProfile, OgprChannel
 from .gpr_processing  import apply_pipeline, DEFAULT_PIPELINE
 
 
-GPR_CMAPS   = ["RdBu_r", "seismic", "gray", "bwr", "Greys_r"]
+GPR_CMAPS    = ["RdBu_r", "seismic", "gray", "bwr", "Greys_r"]
 DEFAULT_CMAP = "RdBu_r"
 
 
@@ -52,14 +53,14 @@ class GprProfileViewer(QDialog):
         self.iface  = iface
         self.plugin = plugin
         self.setWindowTitle("GPR Profile Viewer")
-        self.resize(1200, 650)
+        self.resize(1200, 700)
 
         self._profiles:    list[OgprProfile] = []
         self._prof_idx:    int = 0
         self._ch_idx:      int = 0
         self._raw_data:    Optional[np.ndarray] = None
-        self._proc_data:   Optional[np.ndarray] = None   # dopo pipeline
-        self._disp_data:   Optional[np.ndarray] = None   # dopo gain
+        self._proc_data:   Optional[np.ndarray] = None
+        self._disp_data:   Optional[np.ndarray] = None
         self._cursor_x:    Optional[float] = None
         self._cursor_z:    Optional[float] = None
 
@@ -145,7 +146,7 @@ class GprProfileViewer(QDialog):
         grp = QGroupBox("Processing")
         fl  = QFormLayout(grp)
 
-        # --- Filtri ---
+        # --- Filtri radargram ---
         self._chk_dewow  = QCheckBox(); self._chk_dewow.setChecked(True)
         self._spin_dewow = QSpinBox();  self._spin_dewow.setRange(4, 256); self._spin_dewow.setValue(16)
 
@@ -163,7 +164,7 @@ class GprProfileViewer(QDialog):
         self._chk_agc  = QCheckBox(); self._chk_agc.setChecked(True)
         self._spin_agc = QSpinBox();  self._spin_agc.setRange(8, 512); self._spin_agc.setValue(128)
 
-        self._chk_bp   = QCheckBox(); self._chk_bp.setChecked(False)
+        self._chk_bp     = QCheckBox(); self._chk_bp.setChecked(False)
         self._spin_bp_lo = QDoubleSpinBox(); self._spin_bp_lo.setRange(1, 3000); self._spin_bp_lo.setValue(200)
         self._spin_bp_hi = QDoubleSpinBox(); self._spin_bp_hi.setRange(1, 3000); self._spin_bp_hi.setValue(1200)
 
@@ -204,17 +205,107 @@ class GprProfileViewer(QDialog):
         btn_apply.clicked.connect(self._apply_processing)
         fl.addRow(btn_apply)
 
-        # Gain-only: ricalcola display senza riprocessare
         btn_gain = QPushButton("Aggiorna gain")
         btn_gain.setToolTip("Applica solo Clip% e Gain senza rieseguire i filtri (piu' veloce).")
         btn_gain.clicked.connect(self._apply_gain_only)
         fl.addRow(btn_gain)
 
+        # -----------------------------------------------------------------
+        # Sezione: parametri Timeslice
+        # -----------------------------------------------------------------
+        grp_slice = QGroupBox("Timeslice")
+        fl_slice  = QFormLayout(grp_slice)
+
+        # Normalizzazione inter-canale
+        self._chk_normalize_ch = QCheckBox()
+        self._chk_normalize_ch.setChecked(True)
+        self._chk_normalize_ch.setToolTip(
+            "Bilancia l'ampiezza di ciascun canale rispetto alla media globale.\n"
+            "Elimina le striature verticali causate dalla risposta differenziale\n"
+            "dei canali nell'array multicanale."
+        )
+
+        # Filtro ampiezza
+        self._chk_amplitude_filter = QCheckBox()
+        self._chk_amplitude_filter.setChecked(False)
+        self._chk_amplitude_filter.setToolTip(
+            "Attiva la rimozione degli spike GPR tramite sigma-clipping.\n"
+            "Rimuove punti con ampiezza > N sigma dalla media della slice.\n"
+            "Utile per eliminare artefatti da accoppiamento antenna o oggetti metallici."
+        )
+        self._spin_amplitude_sigma = QDoubleSpinBox()
+        self._spin_amplitude_sigma.setRange(1.0, 10.0)
+        self._spin_amplitude_sigma.setSingleStep(0.5)
+        self._spin_amplitude_sigma.setValue(3.0)
+        self._spin_amplitude_sigma.setEnabled(False)
+        self._spin_amplitude_sigma.setToolTip("Soglia sigma-clipping (tipico: 2.5 – 4.0).")
+        self._chk_amplitude_filter.toggled.connect(self._spin_amplitude_sigma.setEnabled)
+
+        # IDW anisotropo
+        self._chk_anisotropic_idw = QCheckBox()
+        self._chk_anisotropic_idw.setChecked(False)
+        self._chk_anisotropic_idw.setToolTip(
+            "Usa una metrica di distanza ellittica nell'interpolazione IDW.\n"
+            "Compensa la densità anisotropa tipica dei rilievi GPR a linee parallele:\n"
+            "peso maggiore nella direzione along-line, minore nel cross-line.\n"
+            "La direzione viene stimata automaticamente via PCA."
+        )
+
+        # Raggio auto
+        self._chk_auto_radius = QCheckBox()
+        self._chk_auto_radius.setChecked(False)
+        self._chk_auto_radius.setToolTip(
+            "Stima automaticamente il raggio IDW dalla spaziatura inter-linea.\n"
+            "Disabilita per usare il valore di risoluzione * sqrt(2)."
+        )
+
+        # Fill NoData
+        self._chk_fill_nodata = QCheckBox()
+        self._chk_fill_nodata.setChecked(False)
+        self._chk_fill_nodata.setToolTip(
+            "Riempie le bande NaN tra le linee di acquisizione\n"
+            "tramite diffusione nearest-neighbour.\n"
+            "Elimina le strisce trasparenti/nere tra le linee in QGIS."
+        )
+
+        # Smoothing gaussiano
+        self._chk_smooth = QCheckBox()
+        self._chk_smooth.setChecked(False)
+        self._chk_smooth.setToolTip(
+            "Attiva lo smoothing gaussiano post-interpolazione.\n"
+            "Riduce le discontinuità ai bordi e le striature residue."
+        )
+        self._spin_smooth_sigma = QDoubleSpinBox()
+        self._spin_smooth_sigma.setRange(0.5, 10.0)
+        self._spin_smooth_sigma.setSingleStep(0.5)
+        self._spin_smooth_sigma.setValue(1.0)
+        self._spin_smooth_sigma.setEnabled(False)
+        self._spin_smooth_sigma.setToolTip("Sigma smoothing in celle griglia (tipico: 0.5 – 2.0).")
+        self._chk_smooth.toggled.connect(self._spin_smooth_sigma.setEnabled)
+
+        fl_slice.addRow("Normalizza canali:",  self._chk_normalize_ch)
+        fl_slice.addRow("Filtro ampiezza:",    self._chk_amplitude_filter)
+        fl_slice.addRow("  sigma:",            self._spin_amplitude_sigma)
+        fl_slice.addRow("IDW anisotropo:",     self._chk_anisotropic_idw)
+        fl_slice.addRow("  raggio auto:",      self._chk_auto_radius)
+        fl_slice.addRow("Fill NoData:",        self._chk_fill_nodata)
+        fl_slice.addRow("Smooth gaussiano:",   self._chk_smooth)
+        fl_slice.addRow("  sigma:",            self._spin_smooth_sigma)
+
         btn_slice = QPushButton("\U0001f5fa  Crea Timeslice\u2026")
         btn_slice.clicked.connect(self._open_slice_dialog)
-        fl.addRow(btn_slice)
+        fl_slice.addRow(btn_slice)
 
-        return grp
+        # Aggiungi il gruppo timeslice al layout principale del pannello
+        outer = QVBoxLayout()
+        outer.addWidget(grp)
+        outer.addWidget(grp_slice)
+        outer.addStretch()
+
+        container = QGroupBox()
+        container.setFlat(True)
+        container.setLayout(outer)
+        return container
 
     # ------------------------------------------------------------------
     # Import
@@ -291,7 +382,6 @@ class GprProfileViewer(QDialog):
     # ------------------------------------------------------------------
 
     def _apply_processing(self):
-        """Esegue la pipeline completa e ridisegna."""
         if self._raw_data is None:
             return
         params = {
@@ -317,7 +407,6 @@ class GprProfileViewer(QDialog):
         self._apply_gain_only()
 
     def _apply_gain_only(self):
-        """Applica solo il gain display senza riprocessare (piu' veloce)."""
         if self._proc_data is None:
             self._apply_processing()
             return
@@ -507,16 +596,34 @@ class GprProfileViewer(QDialog):
             pass
 
     # ------------------------------------------------------------------
-    # Timeslice
+    # Timeslice — raccoglie parametri dalla GUI e avvia la generazione
     # ------------------------------------------------------------------
+
+    def get_slice_params(self) -> dict:
+        """Ritorna i parametri timeslice correnti dalla GUI."""
+        return {
+            "normalize_channels":    self._chk_normalize_ch.isChecked(),
+            "amplitude_sigma":       (
+                float(self._spin_amplitude_sigma.value())
+                if self._chk_amplitude_filter.isChecked() else None
+            ),
+            "use_anisotropic_idw":   self._chk_anisotropic_idw.isChecked(),
+            "auto_radius":           self._chk_auto_radius.isChecked(),
+            "fill_nodata":           self._chk_fill_nodata.isChecked(),
+            "smooth_sigma":          (
+                float(self._spin_smooth_sigma.value())
+                if self._chk_smooth.isChecked() else 0.0
+            ),
+        }
 
     def _open_slice_dialog(self):
         if not self._profiles:
             QMessageBox.information(self, "Nessun profilo",
                                     "Importa almeno un file .ogpr prima.")
             return
+        slice_params = self.get_slice_params()
         if self.plugin and hasattr(self.plugin, "import_ogpr_as_slices"):
-            self.plugin.import_ogpr_as_slices(self._profiles)
+            self.plugin.import_ogpr_as_slices(self._profiles, slice_params=slice_params)
         else:
             QMessageBox.information(
                 self, "Timeslice",
