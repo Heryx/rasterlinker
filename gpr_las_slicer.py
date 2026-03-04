@@ -10,6 +10,12 @@ Interpolation methods:
                (gather approach via scipy.spatial.cKDTree)
   - 'kriging': Ordinary Kriging via pykrige (requires: pip install pykrige)
                Variogram models: exponential, spherical, gaussian, linear
+
+GPR-specific processing pipeline:
+  1. Amplitude outlier removal  (_remove_amplitude_outliers)
+  2. Interpolation              (IDW kdtree or Kriging)
+  3. Fill NoData gaps           (_fill_nodata_grid)        [optional]
+  4. Gaussian smoothing         (_smooth_grid_gaussian)    [optional]
 """
 
 from __future__ import annotations
@@ -98,11 +104,9 @@ def diagnose_las_fields_detailed(
             except Exception:
                 pass
 
-            # Filter out purely geometric/metadata fields
             value_dims = [d for d in all_dims if d not in _SKIP_FIELDS]
             result["all_field_names"] = value_dims
 
-            # Read first chunk
             sample = None
             try:
                 for chunk in reader.chunk_iterator(n_sample):
@@ -142,7 +146,6 @@ def diagnose_las_fields_detailed(
     except Exception:
         return result
 
-    # Sort: priority fields with data first
     def _key(row):
         n = row["name"]
         p = _PRIORITY_FIELDS.index(n) if n in _PRIORITY_FIELDS else 99
@@ -150,7 +153,6 @@ def diagnose_las_fields_detailed(
 
     result["rows"].sort(key=_key)
 
-    # Auto-suggest R, G, B, single
     has_data_fields = [r["name"] for r in result["rows"] if r["has_data"]]
 
     def _first(candidates):
@@ -218,6 +220,170 @@ def _read_las_rgb(
 
 
 # ---------------------------------------------------------------------------
+# GPR-specific: amplitude outlier removal
+# ---------------------------------------------------------------------------
+
+def _remove_amplitude_outliers(
+    x: np.ndarray,
+    y: np.ndarray,
+    values: np.ndarray,
+    n_sigma: float = 3.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Remove GPR amplitude outliers using a simple sigma-clipping filter.
+
+    GPR-specific outliers (antenna ringing, metallic reflections, surface
+    coupling spikes) appear as amplitude values far from the mean. This
+    filter removes points whose amplitude deviates more than `n_sigma`
+    standard deviations from the slice mean.
+
+    A higher `n_sigma` is more permissive (keeps more points);
+    a lower value is more aggressive. Typical range: 2.5 – 4.0.
+
+    Parameters
+    ----------
+    x, y    : point coordinates
+    values  : radar amplitude/intensity values
+    n_sigma : clipping threshold in standard deviations (default 3.0)
+
+    Returns
+    -------
+    Filtered (x, y, values) arrays.
+    """
+    if values.size == 0:
+        return x, y, values
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return x, y, values
+    mean = float(finite.mean())
+    std  = float(finite.std())
+    if std == 0.0:
+        return x, y, values
+    mask = np.abs(values - mean) <= n_sigma * std
+    return x[mask], y[mask], values[mask]
+
+
+# ---------------------------------------------------------------------------
+# GPR-specific: adaptive radius from inter-line spacing
+# ---------------------------------------------------------------------------
+
+def _estimate_interline_radius(
+    x: np.ndarray,
+    y: np.ndarray,
+    percentile: float = 95.0,
+    multiplier: float = 1.5,
+) -> float:
+    """Estimate search radius from the inter-line spacing of GPR data.
+
+    GPR datasets consist of parallel acquisition lines. The optimal IDW
+    search radius should cover at least the gap between adjacent lines.
+    This function estimates that gap by computing the distance to the
+    nearest neighbour for each point and taking the given percentile
+    (capturing the widest gaps, i.e. the inter-line spacing) then
+    multiplying by `multiplier` to ensure full coverage.
+
+    Parameters
+    ----------
+    x, y        : point coordinates
+    percentile  : percentile of nearest-neighbour distances to use (default 95)
+    multiplier  : safety factor applied to the estimated spacing (default 1.5)
+
+    Returns
+    -------
+    Estimated search radius in CRS units.
+    """
+    from scipy.spatial import cKDTree  # type: ignore
+
+    if x.size < 2:
+        return 1.0
+    tree   = cKDTree(np.column_stack([x, y]))
+    dists, _ = tree.query(np.column_stack([x, y]), k=2)
+    nn_dists = dists[:, 1]  # distance to nearest neighbour
+    radius   = float(np.percentile(nn_dists, percentile)) * multiplier
+    return max(radius, 1e-6)
+
+
+# ---------------------------------------------------------------------------
+# GPR-specific: fill NoData gaps between acquisition lines
+# ---------------------------------------------------------------------------
+
+def _fill_nodata_grid(grid: np.ndarray, max_distance: int = 5) -> np.ndarray:
+    """Fill NaN cells in the interpolated grid using nearest-neighbour diffusion.
+
+    GPR acquisition lines leave systematic NaN bands between lines after
+    interpolation. This function fills those gaps by propagating valid
+    values outward up to `max_distance` cells, using
+    scipy.ndimage.distance_transform_edt for efficiency.
+
+    Parameters
+    ----------
+    grid         : 2-D float32 array with NaN where no data
+    max_distance : maximum fill distance in grid cells (default 5)
+
+    Returns
+    -------
+    Filled float32 grid (remaining NaN only where fill distance exceeded).
+    """
+    from scipy.ndimage import distance_transform_edt  # type: ignore
+
+    nan_mask  = np.isnan(grid)
+    if not nan_mask.any():
+        return grid
+
+    valid_mask = ~nan_mask
+    # For each NaN cell, find the index of the nearest valid cell
+    dist, (row_idx, col_idx) = distance_transform_edt(
+        nan_mask,
+        return_distances=True,
+        return_indices=True,
+    )
+    filled = grid.copy()
+    # Fill only within max_distance cells
+    fill_where = nan_mask & (dist <= max_distance)
+    filled[fill_where] = grid[row_idx[fill_where], col_idx[fill_where]]
+    return filled
+
+
+# ---------------------------------------------------------------------------
+# GPR-specific: post-interpolation Gaussian smoothing
+# ---------------------------------------------------------------------------
+
+def _smooth_grid_gaussian(grid: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+    """Apply Gaussian smoothing to the interpolated grid.
+
+    Reduces inter-line interpolation artefacts and high-frequency noise
+    in GPR time-slice maps. NaN cells are handled by normalised convolution
+    (ignoring NaN in both numerator and denominator) so that valid data
+    near NaN boundaries is not contaminated.
+
+    Parameters
+    ----------
+    grid  : 2-D float32 array (NaN = no data)
+    sigma : Gaussian standard deviation in grid cells (default 1.0)
+            Typical values: 0.5 (light) – 2.0 (heavy)
+
+    Returns
+    -------
+    Smoothed float32 grid (NaN preserved where no valid neighbours exist).
+    """
+    from scipy.ndimage import gaussian_filter  # type: ignore
+
+    if sigma <= 0:
+        return grid
+
+    nan_mask   = np.isnan(grid)
+    filled     = np.where(nan_mask, 0.0, grid.astype(np.float64))
+    weight     = np.where(nan_mask, 0.0, 1.0)
+
+    smooth_num = gaussian_filter(filled, sigma=sigma)
+    smooth_den = gaussian_filter(weight, sigma=sigma)
+
+    result = np.full_like(grid, np.nan, dtype=np.float32)
+    valid  = smooth_den > 1e-9
+    result[valid] = (smooth_num[valid] / smooth_den[valid]).astype(np.float32)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # IDW binning — original scatter approach (kept for compatibility)
 # ---------------------------------------------------------------------------
 
@@ -233,18 +399,11 @@ def _bin_with_idw(
     radius: float,
     power: float = 2.0,
 ) -> np.ndarray:
-    """IDW binning onto regular grid using scatter approach.
+    """IDW binning onto regular grid using scatter approach (legacy).
 
-    For each source point, distributes its weighted contribution to
-    surrounding grid cells within `radius`. The weight is:
+    Kept for backward compatibility. For new code prefer _bin_with_idw_kdtree.
 
-        w = 1 / (dist^power + epsilon)
-
-    where `power` is the smoothing factor (GPRSlice notation: exponent `a`).
-    A lower value weights all points within the radius more equally;
-    a higher value gives stronger preference to closer points.
-
-    Returns float32 grid (NaN = no data).
+    weight:  w = 1 / (dist^power + epsilon)
     """
     total   = np.zeros((n_y, n_x), dtype=np.float64)
     wsum    = np.zeros((n_y, n_x), dtype=np.float64)
@@ -293,6 +452,7 @@ def _bin_with_idw_kdtree(
     resolution: float,
     radius: float,
     power: float = 2.0,
+    min_points: int = 3,
 ) -> np.ndarray:
     """IDW binning using a gather approach via scipy.spatial.cKDTree.
 
@@ -301,21 +461,22 @@ def _bin_with_idw_kdtree(
 
         estimated = sum(wi * zi) / sum(wi)   where  wi = 1 / (hi^power + eps)
 
-    This matches the GPRSlice IDW formula exactly, with `power` as the
-    configurable smoothing factor `a`. Faster and more memory-efficient
-    than the scatter approach on dense point clouds.
+    GPR note: `min_points` prevents unstable estimates in the gaps between
+    acquisition lines, where only 1-2 isolated points from adjacent lines
+    might fall within the search radius.
 
-    Returns float32 grid (NaN = no data).
+    Parameters
+    ----------
+    min_points : minimum number of source points required to estimate a cell.
+                 Cells with fewer neighbours are left as NaN. Default 3.
     """
     from scipy.spatial import cKDTree  # type: ignore
 
-    # Build destination grid
     gx = x_min + np.arange(n_x) * resolution
     gy = y_min + np.arange(n_y) * resolution
-    gxx, gyy = np.meshgrid(gx, gy)                          # shape (n_y, n_x)
-    grid_pts = np.column_stack([gxx.ravel(), gyy.ravel()])   # shape (n_y*n_x, 2)
+    gxx, gyy  = np.meshgrid(gx, gy)
+    grid_pts  = np.column_stack([gxx.ravel(), gyy.ravel()])
 
-    # Build KD-tree on source points
     tree    = cKDTree(np.column_stack([x_pts, y_pts]))
     results = tree.query_ball_point(grid_pts, r=radius, workers=-1)
 
@@ -323,7 +484,7 @@ def _bin_with_idw_kdtree(
     grid      = np.full(n_x * n_y, np.nan, dtype=np.float32)
 
     for k, idx_list in enumerate(results):
-        if not idx_list:
+        if len(idx_list) < min_points:
             continue
         idx = np.asarray(idx_list, dtype=np.int64)
         cx  = grid_pts[k, 0]
@@ -360,21 +521,8 @@ def _bin_with_kriging(
         cij = c0 + c1          if h == 0
         cij = c1 * exp(-3h/a)  if h >  0   (exponential variogram)
 
-    where:
-        c0     = nugget effect (discontinuity at the origin)
-        c0+c1  = sill (covariance at large distances)
-        a      = range parameter
-        h      = distance between points
-
-    Variogram model options (pykrige):
-        'exponential' (default, matches GPRSlice formula)
-        'spherical'
-        'gaussian'
-        'linear'
-
+    Variogram models: 'exponential' (default), 'spherical', 'gaussian', 'linear'.
     Requires: pip install pykrige
-
-    Returns float32 grid (NaN = no data).
     """
     if not _HAS_PYKRIGE:
         raise ImportError(
@@ -545,8 +693,8 @@ SIDECAR_FILENAME = ".las_slicer_params.json"
 def save_slicer_params(output_dir, params):
     """Persist slicing parameters to a JSON sidecar file.
 
-    Includes interpolation settings (method, idw_power, kriging_model,
-    kriging_nugget) so that the exact configuration can be reloaded later.
+    Includes all interpolation and GPR-specific post-processing settings
+    so that the exact configuration can be reloaded and reapplied later.
     """
     path = os.path.join(output_dir, SIDECAR_FILENAME)
     with open(path, "w", encoding="utf-8") as f:
@@ -579,54 +727,76 @@ def slice_las_to_tifs(
     z_max: float | None = None,
     radius: float | None = None,
     epsg: int | None = None,
-    value_field: str = "intensity",   # or 'rgb' for 3-band
+    value_field: str = "intensity",
     r_field: str = "red",
     g_field: str = "green",
     b_field: str = "blue",
-    interpolation_method: str = "idw",  # 'idw' | 'kriging'
+    # --- interpolation ---
+    interpolation_method: str = "idw",
     idw_power: float = 2.0,
+    min_points: int = 3,
     kriging_model: str = "exponential",
     kriging_nugget: float = 0.0,
+    # --- GPR-specific filters ---
+    auto_radius: bool = False,
+    amplitude_sigma: float | None = None,
+    fill_nodata: bool = False,
+    fill_nodata_max_distance: int = 5,
+    smooth_sigma: float = 0.0,
 ) -> list[dict]:
     """
-    Slice LAS/LAZ into GeoTIFF rasters (one per Z interval).
+    Slice LAS/LAZ GPR data into GeoTIFF rasters (one per Z interval).
+
+    Processing pipeline per slice
+    -----------------------------
+    1. [optional] Amplitude outlier removal  (amplitude_sigma)
+    2. Interpolation onto regular grid       (IDW kdtree or Kriging)
+    3. [optional] Fill NaN inter-line gaps   (fill_nodata)
+    4. [optional] Gaussian smoothing         (smooth_sigma > 0)
 
     Parameters
     ----------
-    las_path            : path to the input LAS/LAZ file
-    output_dir          : directory where GeoTIFFs are written
-    resolution          : grid cell size in CRS units
-    z_step              : thickness of each Z slice
-    z_min, z_max        : optional Z range override
-    radius              : IDW/search radius (default: resolution * sqrt(2))
-    epsg                : EPSG code for output CRS (None = no projection set)
-    value_field         : LAS field to interpolate, or 'rgb' for 3-band output
-    r_field, g_field, b_field : LAS fields for RGB channels (used when value_field='rgb')
-    interpolation_method: 'idw' (default) or 'kriging'
-    idw_power           : IDW smoothing exponent `a` (GPRSlice notation);
-                          lower = more equal weighting, higher = closer points
-                          dominate. Default 2.0.
-    kriging_model       : variogram model for Kriging
-                          ('exponential', 'spherical', 'gaussian', 'linear')
-                          'exponential' matches the GPRSlice formula:
-                          c1 * exp(-3h/a). Requires pykrige.
-    kriging_nugget      : nugget effect c0 (discontinuity at origin). Default 0.0.
+    las_path             : path to input LAS/LAZ file
+    output_dir           : output directory for GeoTIFFs
+    resolution           : grid cell size in CRS units
+    z_step               : Z slice thickness
+    z_min, z_max         : optional Z range override
+    radius               : IDW search radius (default: resolution * sqrt(2)).
+                           Overridden by auto_radius if True.
+    epsg                 : output EPSG code (None = no CRS set)
+    value_field          : LAS field to interpolate, or 'rgb' for 3-band
+    r_field, g_field, b_field : LAS fields for RGB mode
+
+    interpolation_method : 'idw' (default) or 'kriging'
+    idw_power            : IDW smoothing exponent a (GPRSlice notation).
+                           Default 2.0.
+    min_points           : minimum neighbours required to estimate a cell.
+                           Cells with fewer points left as NaN. Default 3.
+    kriging_model        : variogram model ('exponential', 'spherical',
+                           'gaussian', 'linear'). Default 'exponential'.
+    kriging_nugget       : nugget effect c0. Default 0.0.
+
+    auto_radius          : if True, estimate search radius automatically from
+                           the inter-line spacing of the dataset. Default False.
+    amplitude_sigma      : if set, remove GPR amplitude outliers beyond
+                           this many standard deviations before interpolating.
+                           Recommended: 3.0. Default None (disabled).
+    fill_nodata          : if True, fill NaN gaps between acquisition lines
+                           using nearest-neighbour diffusion. Default False.
+    fill_nodata_max_distance : maximum fill distance in grid cells. Default 5.
+    smooth_sigma         : Gaussian smoothing sigma in grid cells applied
+                           after interpolation. 0 = disabled (default).
+                           Typical values: 0.5 (light) to 2.0 (heavy).
 
     Returns
     -------
-    List of dicts with keys: path, z_from, z_to, z_center, index, name.
-
-    When value_field == 'rgb':
-      - Creates 3-band GeoTIFF + QML sidecar (multibandcolor)
-      - Kriging is applied independently to each RGB channel
-    Otherwise:
-      - Creates single-band float32 GeoTIFF
+    List of dicts: path, z_from, z_to, z_center, index, name.
     """
     if radius is None:
         radius = resolution * (2 ** 0.5)
 
     os.makedirs(output_dir, exist_ok=True)
-    use_rgb    = (value_field == "rgb")
+    use_rgb     = (value_field == "rgb")
     use_kriging = (interpolation_method == "kriging")
 
     if use_kriging and not _HAS_PYKRIGE:
@@ -653,22 +823,29 @@ def slice_las_to_tifs(
     n_x = len(np.arange(x_min, x_max + resolution * 0.5, resolution))
     n_y = len(np.arange(y_min, y_max + resolution * 0.5, resolution))
 
-    # Common keyword args for interpolation functions
-    _kw_base = dict(
-        x_min=x_min, y_min=y_min,
-        n_x=n_x, n_y=n_y,
-        resolution=resolution,
-    )
-    _kw_idw     = dict(**_kw_base, radius=radius, power=idw_power)
-    _kw_kriging = dict(**_kw_base,
-                       variogram_model=kriging_model,
+    # Auto-estimate search radius from inter-line spacing
+    if auto_radius:
+        radius = _estimate_interline_radius(x, y)
+
+    _kw_base    = dict(x_min=x_min, y_min=y_min, n_x=n_x, n_y=n_y,
+                       resolution=resolution)
+    _kw_idw     = dict(**_kw_base, radius=radius,
+                       power=idw_power, min_points=min_points)
+    _kw_kriging = dict(**_kw_base, variogram_model=kriging_model,
                        nugget=kriging_nugget)
 
     def _interp(xm, ym, vm):
-        """Dispatch to the selected interpolation method."""
         if use_kriging:
             return _bin_with_kriging(xm, ym, vm, **_kw_kriging)
         return _bin_with_idw_kdtree(xm, ym, vm, **_kw_idw)
+
+    def _postprocess(grid):
+        """Apply GPR-specific post-processing steps to a single grid."""
+        if fill_nodata:
+            grid = _fill_nodata_grid(grid, max_distance=fill_nodata_max_distance)
+        if smooth_sigma > 0:
+            grid = _smooth_grid_gaussian(grid, sigma=smooth_sigma)
+        return grid
 
     z_levels = np.arange(z_min, z_max + z_step * 0.5, z_step)
     results  = []
@@ -685,16 +862,27 @@ def slice_las_to_tifs(
         tif_path = os.path.join(output_dir, tif_name)
 
         if use_rgb:
-            r_grid = _interp(x[mask], y[mask], r[mask])
-            g_grid = _interp(x[mask], y[mask], g[mask])
-            b_grid = _interp(x[mask], y[mask], b[mask])
+            def _interp_channel(ch):
+                xm, ym, vm = x[mask], y[mask], ch[mask]
+                if amplitude_sigma is not None:
+                    xm, ym, vm = _remove_amplitude_outliers(
+                        xm, ym, vm, n_sigma=amplitude_sigma)
+                return _postprocess(_interp(xm, ym, vm))
+
+            r_grid = _interp_channel(r)
+            g_grid = _interp_channel(g)
+            b_grid = _interp_channel(b)
             ranges = _write_tif_rgb(
                 r_grid, g_grid, b_grid,
                 tif_path, x_min, y_min, y_max, resolution, epsg,
             )
             _write_qml_multiband(tif_path, *ranges)
         else:
-            grid = _interp(x[mask], y[mask], values[mask])
+            xm, ym, vm = x[mask], y[mask], values[mask]
+            if amplitude_sigma is not None:
+                xm, ym, vm = _remove_amplitude_outliers(
+                    xm, ym, vm, n_sigma=amplitude_sigma)
+            grid = _postprocess(_interp(xm, ym, vm))
             _write_tif_singleband(
                 grid, tif_path, x_min, y_min, y_max, resolution, epsg,
             )
