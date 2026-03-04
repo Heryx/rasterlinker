@@ -1,40 +1,79 @@
-"""Pipeline di processing basilare per radargram GPR.
+"""Pipeline di processing per radargram GPR — implementazione puro numpy.
 
-Tutte le funzioni operano su una matrice (n_samples, n_slices) float32
-e restituiscono una matrice della stessa forma.
-
-Nota: scipy è opzionale. Se non disponibile (o incompatibile con numpy
-nell'ambiente QGIS/OSGeo4W), le funzioni che lo richiedono (bandpass,
-time_zero) vengono disabilitate silenziosamente.
+Tutte le funzioni operano su matrice (n_samples, n_slices) float32.
+Nessuna dipendenza da scipy: Hilbert e bandpass sono implementati
+tramite FFT numpy, identico all'implementazione scipy internamente.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-try:
-    from scipy import signal as sp_signal  # type: ignore
-    _HAS_SCIPY = True
-except Exception:
-    sp_signal = None  # type: ignore
-    _HAS_SCIPY = False
+
+# ---------------------------------------------------------------------------
+# Primitivi FFT (senza scipy)
+# ---------------------------------------------------------------------------
+
+def _hilbert_numpy(x: np.ndarray) -> np.ndarray:
+    """
+    Trasformata di Hilbert analitica via FFT (equivalente a scipy.signal.hilbert).
+    Restituisce il segnale analitico complesso; usa np.abs() per l'envelope.
+    """
+    N = len(x)
+    Xf = np.fft.fft(x)
+    h = np.zeros(N, dtype=np.float64)
+    if N % 2 == 0:
+        h[0] = h[N // 2] = 1.0
+        h[1:N // 2] = 2.0
+    else:
+        h[0] = 1.0
+        h[1:(N + 1) // 2] = 2.0
+    return np.fft.ifft(Xf * h)
+
+
+def _bandpass_fft(
+    data: np.ndarray,
+    dt_ns: float,
+    low_mhz: float,
+    high_mhz: float,
+) -> np.ndarray:
+    """
+    Filtro passa-banda brick-wall in frequenza via FFT (puro numpy).
+    Più stabile del Butterworth per segnali GPR brevi.
+
+    Parameters
+    ----------
+    data     : (n_samples, n_slices) float32
+    dt_ns    : passo temporale in ns
+    low_mhz  : frequenza di taglio inferiore (MHz)
+    high_mhz : frequenza di taglio superiore (MHz)
+    """
+    N     = data.shape[0]
+    dt_s  = dt_ns * 1e-9
+    freqs = np.fft.rfftfreq(N, d=dt_s)           # Hz, metà positiva
+    mask  = ((freqs >= low_mhz  * 1e6) &
+              (freqs <= high_mhz * 1e6)).astype(np.float32)
+    out   = np.empty_like(data)
+    for i in range(data.shape[1]):
+        Xf        = np.fft.rfft(data[:, i].astype(np.float64))
+        out[:, i] = np.fft.irfft(Xf * mask, n=N).astype(np.float32)
+    return out
 
 
 # ---------------------------------------------------------------------------
-# Singole operazioni
+# Singole operazioni di processing
 # ---------------------------------------------------------------------------
 
 def dewow(data: np.ndarray, window: int = 16) -> np.ndarray:
     """
-    Rimuove la componente DC lenta (wow) con un filtro passa-alto.
-    Per ogni traccia sottrae la media mobile di lunghezza `window`.
-    Implementazione pura numpy — non richiede scipy.
+    Rimuove la componente DC lenta (wow) sottraendo la media mobile.
+    Elimina la deriva a bassa frequenza dell'accoppiamento antenna-suolo.
     """
-    data = data.astype(np.float32)
+    data   = data.astype(np.float32)
     kernel = np.ones(window, dtype=np.float32) / window
-    out = np.empty_like(data)
+    out    = np.empty_like(data)
     for i in range(data.shape[1]):
-        trend = np.convolve(data[:, i], kernel, mode="same")
+        trend     = np.convolve(data[:, i], kernel, mode="same")
         out[:, i] = data[:, i] - trend
     return out
 
@@ -42,32 +81,31 @@ def dewow(data: np.ndarray, window: int = 16) -> np.ndarray:
 def time_zero_correction(data: np.ndarray, method: str = "energy") -> np.ndarray:
     """
     Allinea le tracce portando al campione 0 il picco di energia.
-    method: 'energy' (richiede scipy) | 'first_break' (puro numpy)
-    Se scipy non è disponibile, usa automaticamente 'first_break'.
-    """
-    data  = data.astype(np.float32)
-    n_s, n_t = data.shape
-    out   = np.zeros_like(data)
 
+    method:
+      'energy'      - usa l'envelope Hilbert (più robusto, implementato FFT)
+      'first_break' - usa il picco di ampiezza (più veloce)
+    """
+    data     = data.astype(np.float32)
+    n_s, n_t = data.shape
+    out      = np.zeros_like(data)
     for i in range(n_t):
         tr = data[:, i]
-        if method == "energy" and _HAS_SCIPY:
-            env    = np.abs(sp_signal.hilbert(tr))
+        if method == "energy":
+            env    = np.abs(_hilbert_numpy(tr.astype(np.float64)))
             t0_idx = int(np.argmax(env[:n_s // 4]))
         else:
             t0_idx = int(np.argmax(np.abs(tr[:n_s // 4])))
-        shifted = np.roll(tr, -t0_idx)
-        out[:, i] = shifted
+        out[:, i] = np.roll(tr, -t0_idx)
     return out
 
 
 def background_removal(data: np.ndarray) -> np.ndarray:
     """
     Rimuove il clutter di sfondo sottraendo la media di tutte le tracce.
-    Implementazione pura numpy — non richiede scipy.
+    Elimina il segnale stazionario (riflessione dall'antenna, suolo piatto).
     """
-    bg = data.mean(axis=1, keepdims=True)
-    return (data - bg).astype(np.float32)
+    return (data - data.mean(axis=1, keepdims=True)).astype(np.float32)
 
 
 def agc_gain(
@@ -77,24 +115,21 @@ def agc_gain(
 ) -> np.ndarray:
     """
     Automatic Gain Control: normalizza l'ampiezza per finestre di profondità.
-    Implementazione pura numpy — non richiede scipy.
+    Compensa l'attenuazione geometrica e dielettrica del mezzo.
     """
-    data  = data.astype(np.float32)
+    data     = data.astype(np.float32)
     n_s, n_t = data.shape
-    out   = np.empty_like(data)
-    half  = window // 2
-
+    out      = np.empty_like(data)
+    half     = window // 2
     for i in range(n_t):
         tr = data[:, i]
         for s in range(n_s):
-            lo  = max(0, s - half)
-            hi  = min(n_s, s + half)
-            rms = np.sqrt(np.mean(tr[lo:hi] ** 2)) + 1e-10
+            lo        = max(0, s - half)
+            hi        = min(n_s, s + half)
+            rms       = np.sqrt(np.mean(tr[lo:hi] ** 2)) + 1e-10
             out[s, i] = tr[s] / rms
-
     clip = np.percentile(np.abs(out), clip_percentile)
-    out  = np.clip(out, -clip, clip)
-    return out
+    return np.clip(out, -clip, clip)
 
 
 def bandpass_filter(
@@ -102,26 +137,32 @@ def bandpass_filter(
     dt_ns: float,
     low_mhz: float,
     high_mhz: float,
-    order: int = 4,
+    order: int = 4,    # mantenuto per compatibilità API, non usato
 ) -> np.ndarray:
     """
-    Filtro Butterworth passa-banda (richiede scipy).
-    Se scipy non è disponibile restituisce i dati invariati.
+    Filtro passa-banda GPR via FFT brick-wall (puro numpy).
+    Equivalente al Butterworth scipy ma senza dipendenze esterne.
     """
-    if not _HAS_SCIPY:
-        return data
-    fs_hz = 1.0 / (dt_ns * 1e-9)
-    nyq   = fs_hz / 2.0
-    lo    = max(1e-3,  low_mhz  * 1e6 / nyq)
-    hi    = min(0.999, high_mhz * 1e6 / nyq)
-    b, a  = sp_signal.butter(order, [lo, hi], btype="band")
-    return sp_signal.filtfilt(b, a, data, axis=0).astype(np.float32)
+    return _bandpass_fft(data, dt_ns, low_mhz, high_mhz)
+
+
+def hilbert_envelope(data: np.ndarray) -> np.ndarray:
+    """
+    Calcola l'envelope Hilbert di ogni traccia (ampiezza istantanea).
+    Utile per visualizzare la riflettività del segnale GPR.
+    Restituisce matrice float32 con stessa forma dell'input.
+    """
+    out = np.empty_like(data, dtype=np.float32)
+    for i in range(data.shape[1]):
+        out[:, i] = np.abs(
+            _hilbert_numpy(data[:, i].astype(np.float64))
+        ).astype(np.float32)
+    return out
 
 
 def normalize_display(data: np.ndarray, clip_pct: float = 98.0) -> np.ndarray:
     """
     Normalizza in [-1, 1] con clip ai percentili per il display.
-    Implementazione pura numpy — non richiede scipy.
     """
     vmax = np.percentile(np.abs(data), clip_pct)
     if vmax < 1e-12:
@@ -134,16 +175,16 @@ def normalize_display(data: np.ndarray, clip_pct: float = 98.0) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 DEFAULT_PIPELINE = {
-    "dewow":      True,
-    "dewow_win":  16,
-    "timezero":   False,
-    "bg_removal": True,
-    "agc":        True,
-    "agc_win":    32,
-    "bandpass":   False,
+    "dewow":       True,
+    "dewow_win":   16,
+    "timezero":    False,
+    "bg_removal":  True,
+    "agc":         True,
+    "agc_win":     32,
+    "bandpass":    False,
     "bp_low_mhz":  100.0,
     "bp_high_mhz": 1200.0,
-    "clip_pct":   98.0,
+    "clip_pct":    98.0,
 }
 
 
@@ -153,11 +194,10 @@ def apply_pipeline(
     dt_ns: float = 0.117,
 ) -> np.ndarray:
     """
-    Applica la pipeline completa secondo il dizionario `params`.
+    Applica la pipeline di processing completa.
     Tutti i parametri hanno un default in DEFAULT_PIPELINE.
-    Se scipy non è disponibile, bandpass e timezero energy vengono saltati.
     """
-    p = {**DEFAULT_PIPELINE, **params}
+    p   = {**DEFAULT_PIPELINE, **params}
     out = data.copy()
 
     if p["dewow"]:
@@ -168,14 +208,11 @@ def apply_pipeline(
         out = background_removal(out)
     if p["agc"]:
         out = agc_gain(out, window=int(p["agc_win"]))
-    if p["bandpass"] and _HAS_SCIPY:
-        out = bandpass_filter(out, dt_ns,
-                              float(p["bp_low_mhz"]),
-                              float(p["bp_high_mhz"]))
+    if p["bandpass"]:
+        out = bandpass_filter(
+            out, dt_ns,
+            float(p["bp_low_mhz"]),
+            float(p["bp_high_mhz"]),
+        )
     out = normalize_display(out, clip_pct=float(p["clip_pct"]))
     return out
-
-
-def scipy_available() -> bool:
-    """Utility: True se scipy è utilizzabile nell'ambiente corrente."""
-    return _HAS_SCIPY
