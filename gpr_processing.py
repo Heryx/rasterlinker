@@ -97,7 +97,6 @@ def _detect_t0_single(
 
     thr_abs = threshold * pk
 
-    # Indice della prima breach
     breach_idx = 0
     for s in range(search_end):
         if abs(tr[s]) >= thr_abs:
@@ -108,7 +107,6 @@ def _detect_t0_single(
         t0 = breach_idx
 
     elif method == "peak":
-        # Cerca il primo picco locale dopo breach_idx
         t0 = breach_idx
         for s in range(breach_idx + 1, search_end - 1):
             if abs(tr[s]) > abs(tr[s - 1]) and abs(tr[s]) > abs(tr[s + 1]):
@@ -116,7 +114,6 @@ def _detect_t0_single(
                 break
 
     elif method == "zero_crossing":
-        # Prima picco dopo breach, poi primo zero-crossing
         peak_idx = breach_idx
         for s in range(breach_idx + 1, search_end - 1):
             if abs(tr[s]) > abs(tr[s - 1]) and abs(tr[s]) > abs(tr[s + 1]):
@@ -124,7 +121,7 @@ def _detect_t0_single(
                 break
         t0 = peak_idx
         for s in range(peak_idx + 1, search_end - 1):
-            if tr[s] * tr[s + 1] <= 0.0:   # cambio di segno
+            if tr[s] * tr[s + 1] <= 0.0:
                 t0 = s
                 break
     else:
@@ -159,39 +156,30 @@ def time_zero_correction(
     mode : str
         Modalita' operativa:
         - 'scan_by_scan' : rileva t=0 per ogni traccia individualmente.
-                           Corregge il drift elettronico traccia per traccia.
         - 'line_by_line' : usa la mediana di t0 sull'intera linea.
-                           Piu' robusto su dati rumorosi (consigliato dal manuale
-                           GPR-SLICE quando t0 non varia significativamente
-                           all'interno del profilo).
     threshold : float
         Frazione del picco massimo per la breach (default 0.2 = 20%).
     backup_nsamp : int
         Campioni da arretrare rispetto al punto rilevato (default 4).
     search_fraction : float
-        Frazione di n_samples entro cui cercare il t=0 (default 0.25 = primo 25%).
+        Frazione di n_samples entro cui cercare il t=0 (default 0.25).
 
     Ritorna
     -------
     ndarray (n_samples - t0_max, n_traces) float32
-        Radargram troncato: i campioni pre-t=0 sono rimossi fisicamente.
-        n_samples_out = n_samples - max(t0_idx per tutte le tracce)
-        (comportamento identico a GPR-SLICE 'Scan-by-Scan + Truncate')
     """
     data     = data.astype(np.float32)
     n_s, n_t = data.shape
     search_end = max(4, int(n_s * search_fraction))
 
-    # --- Rilevamento t0 per ogni traccia ---
     t0_indices = np.zeros(n_t, dtype=np.int64)
     for i in range(n_t):
         t0_indices[i] = _detect_t0_single(
             data[:, i], method, threshold, backup_nsamp, search_end
         )
 
-    # --- Mode: line_by_line usa mediana ---
     if mode == "line_by_line":
-        t0_median   = int(np.median(t0_indices))
+        t0_median     = int(np.median(t0_indices))
         t0_indices[:] = t0_median
 
     t0_max = int(t0_indices.max())
@@ -205,43 +193,129 @@ def time_zero_correction(
     if t0_max <= 0:
         return data
 
-    # --- Truncation reale ---
-    # Ogni traccia viene allineata al proprio t0 e troncata a n_s - t0_max campioni.
-    # Le tracce con t0 < t0_max vengono scalate di (t0_max - t0_i) campioni in piu':
-    # la parte extra iniziale viene zero-paddata per mantenere la matrice rettangolare
-    # (identico a GPR-SLICE che allinea tutte le tracce alla stessa lunghezza finale).
     n_out = n_s - t0_max
     out   = np.zeros((n_out, n_t), dtype=np.float32)
 
     for i in range(n_t):
-        t0_i    = int(t0_indices[i])
-        src     = data[t0_i:, i]       # campioni validi da t0 in poi
-        n_copy  = min(len(src), n_out)
+        t0_i   = int(t0_indices[i])
+        src    = data[t0_i:, i]
+        n_copy = min(len(src), n_out)
         out[:n_copy, i] = src[:n_copy]
 
     return out
 
 
-def background_removal(data: np.ndarray) -> np.ndarray:
-    """Sottrae la traccia media (clutter di sfondo orizzontale).
+def background_removal(
+    data: np.ndarray,
+    mode: str = "line_by_line",
+    window: int = 0,
+    reference_trace: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Background removal (GPR-SLICE §Background Removal, pag. 166).
 
-    Calcolo in float64 per evitare cancellazione catastrofica in float32
-    (con dati int16 in float32, residui reali possono essere < ULP e azzerarsi).
+    Sottrae una traccia di riferimento (il "clutter" orizzontale costante)
+    da ogni traccia del radargram.
 
-    Diagnostico: stampa la deviazione standard inter-traccia prima della
-    sottrazione per verificare se il dato ha variazione laterale reale.
-    Se mean_std ~ 0 e rows_zero_std ~ n_samples, il dato non ha variazione
-    laterale e l'azzeramento dopo bg_removal e' corretto (non un bug).
+    Modalita'
+    ---------
+    'line_by_line'
+        La traccia media viene calcolata all'interno del singolo radargram
+        e sottratta da ogni scan.
+
+        window = 0  (AUTO, consigliato)
+            Media globale sull'intero profilo.  Equivale al checkbox
+            'Auto Set' di GPR-SLICE (filter_length = 99000).
+            Garantisce che la stessa traccia media venga sottratta da ogni
+            scan, rimuovendo il banding costante.
+
+        window > 0  (media locale scorrevole)
+            Per ogni traccia i, sottrae la media delle `window` tracce
+            centrate in i.  Utile in mapping 2D per rimuovere background
+            locale preservando strutture laterali.
+            ATTENZIONE (nota manuale GPR-SLICE): con window piccolo
+            si rischia di rimuovere anche riflessi reali lineari
+            paralleli al profilo (es. tubazioni parallele all'antenna).
+
+    'grid_by_grid'
+        Sottrae `reference_trace` (traccia media pre-calcolata sull'intero
+        grid, cioe' su tutti i radargram del progetto).  Il chiamante deve
+        fornirla; se None, viene calcolata dalla media del dato corrente
+        (equivalente a line_by_line auto).
+
+    Diagnostico
+    -----------
+    Stampa su console la deviazione standard inter-traccia per verificare
+    che il dato abbia variazione laterale reale prima della sottrazione.
+
+    Parametri
+    ----------
+    data             : (n_samples, n_traces) float32
+    mode             : 'line_by_line' | 'grid_by_grid'
+    window           : int — lunghezza filtro in tracce (0 = auto)
+    reference_trace  : (n_samples,) float64 | None — solo per grid_by_grid
     """
     d64      = data.astype(np.float64)
-    row_std  = d64.std(axis=1)
-    n_zero   = int(np.count_nonzero(row_std == 0.0))
+    n_s, n_t = d64.shape
+
+    # Diagnostico inter-traccia
+    row_std = d64.std(axis=1)
+    n_zero  = int(np.count_nonzero(row_std == 0.0))
     print(
-        f"[GPR] bg_diag: mean_inter-trace_std={row_std.mean():.6g}  "
+        f"[GPR] bg_diag: mode={mode} window={window if window > 0 else 'auto'}  "
+        f"mean_inter-trace_std={row_std.mean():.6g}  "
         f"max={row_std.max():.6g}  "
         f"rows_with_zero_std={n_zero}/{len(row_std)}"
     )
-    return (d64 - d64.mean(axis=1, keepdims=True)).astype(np.float32)
+
+    # ---------------------------------------------------------------
+    # grid_by_grid: traccia di riferimento esterna
+    # ---------------------------------------------------------------
+    if mode == "grid_by_grid":
+        if reference_trace is not None:
+            ref = np.asarray(reference_trace, dtype=np.float64)
+            if ref.shape[0] != n_s:
+                print(
+                    f"[GPR] bg_removal: reference_trace shape {ref.shape} != n_samples {n_s}; "
+                    "fallback a line_by_line auto."
+                )
+                ref = d64.mean(axis=1)
+        else:
+            print("[GPR] bg_removal: grid_by_grid ma reference_trace=None; fallback a line_by_line auto.")
+            ref = d64.mean(axis=1)
+        return (d64 - ref.reshape(-1, 1)).astype(np.float32)
+
+    # ---------------------------------------------------------------
+    # line_by_line — auto (window = 0): media globale
+    # ---------------------------------------------------------------
+    if window <= 0 or window >= n_t:
+        mean_trace = d64.mean(axis=1, keepdims=True)   # (n_s, 1)
+        print(f"[GPR] bg_removal: global mean subtracted  n_t={n_t}")
+        return (d64 - mean_trace).astype(np.float32)
+
+    # ---------------------------------------------------------------
+    # line_by_line — finestra scorrevole lungo l'asse tracce
+    # ---------------------------------------------------------------
+    half = window // 2
+    idx  = np.arange(n_t)
+    hi   = np.minimum(n_t - 1, idx + half)    # (n_t,)
+    lo   = np.maximum(0,       idx - half)    # (n_t,)
+
+    cs      = np.cumsum(d64, axis=1)           # (n_s, n_t)
+    sum_hi  = cs[:, hi]                        # (n_s, n_t)
+    lo_prev = np.maximum(0, lo - 1)
+    sum_lo  = cs[:, lo_prev]
+    # annulla contributo quando lo == 0 (non c'e' prefisso da sottrarre)
+    sum_lo[:, lo == 0] = 0.0
+
+    win_len    = (hi - lo + 1).reshape(1, -1)  # (1, n_t)
+    local_mean = (sum_hi - sum_lo) / win_len   # (n_s, n_t)
+
+    print(
+        f"[GPR] bg_removal: sliding window={window} (half={half})  "
+        f"effective_window range=[{(hi-lo+1).min()}, {(hi-lo+1).max()}]"
+    )
+    return (d64 - local_mean).astype(np.float32)
 
 
 def agc_gain(
@@ -349,6 +423,8 @@ DEFAULT_PIPELINE = {
     "tz_threshold":     0.2,
     "tz_backup_nsamp":  4,
     "bg_removal":       True,
+    "bg_mode":          "line_by_line",   # 'line_by_line' | 'grid_by_grid'
+    "bg_window":        0,                # 0 = auto (media globale, equiv. GPR-SLICE Auto Set)
     "agc":              True,
     "agc_win":          128,
     "bandpass":         False,
@@ -362,11 +438,20 @@ def apply_pipeline(
     data: np.ndarray,
     params: dict,
     dt_ns: float = 0.117,
+    bg_reference_trace: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Applica la pipeline di processing completa.
     Stampa su console (QGIS Python Console) il range del dato
     in ogni stadio per facilitare il debug.
+
+    Parametri
+    ----------
+    data                : (n_samples, n_traces) float32
+    params              : dict con chiavi da DEFAULT_PIPELINE
+    dt_ns               : intervallo di campionamento in nanosecondi
+    bg_reference_trace  : (n_samples,) traccia media dell'intero grid
+                          (richiesta solo se bg_mode='grid_by_grid')
     """
     p   = {**DEFAULT_PIPELINE, **params}
     out = data.copy()
@@ -375,7 +460,7 @@ def apply_pipeline(
         mn = float(arr.min())
         mx = float(arr.max())
         nz = int(np.count_nonzero(arr))
-        print(f"[GPR] {tag:30s}  min={mn:.4g}  max={mx:.4g}  "
+        print(f"[GPR] {tag:35s}  min={mn:.4g}  max={mx:.4g}  "
               f"nonzero={nz}/{arr.size}  shape={arr.shape}")
 
     _log("raw", out)
@@ -387,16 +472,24 @@ def apply_pipeline(
     if p["timezero"]:
         out = time_zero_correction(
             out,
-            method          = str(p.get("tz_method",       "peak")),
-            mode            = str(p.get("tz_mode",         "line_by_line")),
-            threshold       = float(p.get("tz_threshold",   0.2)),
-            backup_nsamp    = int(p.get("tz_backup_nsamp",  4)),
+            method       = str(p.get("tz_method",       "peak")),
+            mode         = str(p.get("tz_mode",         "line_by_line")),
+            threshold    = float(p.get("tz_threshold",   0.2)),
+            backup_nsamp = int(p.get("tz_backup_nsamp",  4)),
         )
         _log("timezero", out)
 
     if p["bg_removal"]:
-        out = background_removal(out)
-        _log("bg_removal", out)
+        bg_mode   = str(p.get("bg_mode",   "line_by_line"))
+        bg_window = int(p.get("bg_window",  0))
+        out = background_removal(
+            out,
+            mode            = bg_mode,
+            window          = bg_window,
+            reference_trace = bg_reference_trace,
+        )
+        win_label = "auto" if bg_window <= 0 else str(bg_window)
+        _log(f"bg_removal(mode={bg_mode} win={win_label})", out)
 
     if p["agc"]:
         out = agc_gain(out, window=int(p["agc_win"]))

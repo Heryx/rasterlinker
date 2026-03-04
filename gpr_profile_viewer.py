@@ -164,7 +164,6 @@ class GprProfileViewer(QDialog):
             "NON usa shift circolare: il radargram viene fisicamente troncato."
         )
 
-        # Metodo rilevamento t0
         self._cb_tz_method = QComboBox()
         self._cb_tz_method.addItems(["peak", "threshold", "zero_crossing"])
         self._cb_tz_method.setCurrentText("peak")
@@ -175,20 +174,15 @@ class GprProfileViewer(QDialog):
             "zero_crossing : primo zero-crossing dopo il picco          [GPR-SLICE metodo 3]"
         )
 
-        # Modalita' operativa
         self._cb_tz_mode = QComboBox()
         self._cb_tz_mode.addItems(["line_by_line", "scan_by_scan"])
         self._cb_tz_mode.setCurrentText("line_by_line")
         self._cb_tz_mode.setEnabled(False)
         self._cb_tz_mode.setToolTip(
             "line_by_line : usa la mediana di t0 sull'intera linea.\n"
-            "               Piu' robusto su dati rumorosi (raccomandato GPR-SLICE\n"
-            "               se t0 non varia significativamente nel profilo).\n"
-            "scan_by_scan : corregge t0 traccia per traccia.\n"
-            "               Necessario se c'e' drift elettronico durante l'acquisizione."
+            "scan_by_scan : corregge t0 traccia per traccia."
         )
 
-        # Soglia
         self._spin_tz_threshold = QDoubleSpinBox()
         self._spin_tz_threshold.setRange(0.05, 0.95)
         self._spin_tz_threshold.setSingleStep(0.05)
@@ -199,7 +193,6 @@ class GprProfileViewer(QDialog):
             "Corrisponde al parametro 'threshold' di GPR-SLICE."
         )
 
-        # Backup N campioni
         self._spin_tz_backup = QSpinBox()
         self._spin_tz_backup.setRange(0, 32)
         self._spin_tz_backup.setValue(4)
@@ -209,17 +202,80 @@ class GprProfileViewer(QDialog):
             "Corrisponde al parametro 'Backup Nsamp' di GPR-SLICE."
         )
 
-        # Abilita/disabilita i sotto-controlli time-zero insieme alla checkbox
         def _toggle_tz(checked):
             for w in (self._cb_tz_method, self._cb_tz_mode,
                       self._spin_tz_threshold, self._spin_tz_backup):
                 w.setEnabled(checked)
         self._chk_timezero.toggled.connect(_toggle_tz)
 
+        # ------------------------------------------------------------------
         # BG removal
-        self._chk_bg = QCheckBox(); self._chk_bg.setChecked(True)
+        # ------------------------------------------------------------------
+        self._chk_bg = QCheckBox()
+        self._chk_bg.setChecked(True)
+        self._chk_bg.setToolTip(
+            "Background Removal (GPR-SLICE §Background Removal, pag. 166).\n"
+            "Sottrae la traccia media per eliminare banding orizzontale.\n\n"
+            "ATTENZIONE: rimuove anche riflessi reali paralleli al profilo\n"
+            "(es. tubazioni parallele all'antenna). Usare con consapevolezza."
+        )
 
+        # Modo: line_by_line / grid_by_grid
+        self._cb_bg_mode = QComboBox()
+        self._cb_bg_mode.addItem("line_by_line",  "line_by_line")
+        self._cb_bg_mode.addItem("grid_by_grid",  "grid_by_grid")
+        self._cb_bg_mode.setCurrentIndex(0)
+        self._cb_bg_mode.setEnabled(False)
+        self._cb_bg_mode.setToolTip(
+            "line_by_line : media calcolata su ogni singolo radargram.\n"
+            "               Corrisponde a 'Line-by-Line Background' di GPR-SLICE.\n"
+            "grid_by_grid : media calcolata su tutti i radargram del grid.\n"
+            "               Corrisponde a 'Grid-by-Grid Background' di GPR-SLICE.\n"
+            "               (Richiede traccia di riferimento esterna; in modalita'\n"
+            "                viewer fa fallback a line_by_line.)"
+        )
+
+        # Auto checkbox (equivalente a GPR-SLICE 'Auto Set' filter_length=99000)
+        self._chk_bg_auto = QCheckBox("Auto")
+        self._chk_bg_auto.setChecked(True)
+        self._chk_bg_auto.setEnabled(False)
+        self._chk_bg_auto.setToolTip(
+            "Auto (consigliato): sottrae la media dell'intero profilo.\n"
+            "Equivale al checkbox 'Auto Set' di GPR-SLICE (filter_length = 99000).\n\n"
+            "Disabilita per impostare una finestra personalizzata (media locale scorrevole).\n"
+            "Utile in mapping 2D per rimuovere background locale."
+        )
+
+        # Finestra personalizzata (abilitata solo se auto e' OFF)
+        self._spin_bg_window = QSpinBox()
+        self._spin_bg_window.setRange(8, 99000)
+        self._spin_bg_window.setValue(200)
+        self._spin_bg_window.setEnabled(False)
+        self._spin_bg_window.setToolTip(
+            "Lunghezza del filtro in numero di tracce.\n"
+            "Valori alti (> n_tracce): identico ad Auto, sottrae la media globale.\n"
+            "Valori bassi (es. 50-200): rimuove il background locale.\n"
+            "NOTA manuale GPR-SLICE: valori bassi possono eliminare\n"
+            "anche riflessi reali lineari paralleli al profilo."
+        )
+
+        def _toggle_bg_auto(auto_checked):
+            self._spin_bg_window.setEnabled(not auto_checked)
+
+        def _toggle_bg(bg_checked):
+            self._cb_bg_mode.setEnabled(bg_checked)
+            self._chk_bg_auto.setEnabled(bg_checked)
+            if bg_checked:
+                _toggle_bg_auto(self._chk_bg_auto.isChecked())
+            else:
+                self._spin_bg_window.setEnabled(False)
+
+        self._chk_bg.toggled.connect(_toggle_bg)
+        self._chk_bg_auto.toggled.connect(_toggle_bg_auto)
+
+        # ------------------------------------------------------------------
         # AGC
+        # ------------------------------------------------------------------
         self._chk_agc  = QCheckBox(); self._chk_agc.setChecked(True)
         self._spin_agc = QSpinBox();  self._spin_agc.setRange(8, 512); self._spin_agc.setValue(128)
 
@@ -257,6 +313,9 @@ class GprProfileViewer(QDialog):
         fl.addRow("  soglia:",       self._spin_tz_threshold)
         fl.addRow("  backup N:",     self._spin_tz_backup)
         fl.addRow("BG removal:",     self._chk_bg)
+        fl.addRow("  modo:",         self._cb_bg_mode)
+        fl.addRow("  auto:",         self._chk_bg_auto)
+        fl.addRow("  finestra:",     self._spin_bg_window)
         fl.addRow("AGC gain:",       self._chk_agc)
         fl.addRow("  finestra:",     self._spin_agc)
         fl.addRow("Bandpass:",       self._chk_bp)
@@ -441,6 +500,9 @@ class GprProfileViewer(QDialog):
     def _apply_processing(self):
         if self._raw_data is None:
             return
+        bg_auto   = self._chk_bg_auto.isChecked()
+        bg_window = 0 if bg_auto else int(self._spin_bg_window.value())
+
         params = {
             "dewow":           self._chk_dewow.isChecked(),
             "dewow_win":       self._spin_dewow.value(),
@@ -450,6 +512,8 @@ class GprProfileViewer(QDialog):
             "tz_threshold":    self._spin_tz_threshold.value(),
             "tz_backup_nsamp": self._spin_tz_backup.value(),
             "bg_removal":      self._chk_bg.isChecked(),
+            "bg_mode":         self._cb_bg_mode.currentData() or "line_by_line",
+            "bg_window":       bg_window,
             "agc":             self._chk_agc.isChecked(),
             "agc_win":         self._spin_agc.value(),
             "bandpass":        self._chk_bp.isChecked(),
@@ -494,7 +558,6 @@ class GprProfileViewer(QDialog):
         cmap = self._cb_cmap.currentText()
 
         dist_max  = float(ch.distances[-1]) if len(ch.distances) else 1.0
-        # Profondita' aggiornata: se time-zero e' attivo, n_samples e' ridotto
         n_out     = self._disp_data.shape[0]
         n_orig    = prof.n_samples
         depth_max = prof.depth_max_m * (n_out / n_orig) if n_orig > 0 else prof.depth_max_m
