@@ -1,19 +1,20 @@
 """Parser per il formato OGPR (v1.0 int16 / v2.0 float32).
 
 Struttura file:
-  b'ogpr\r\n' | b'ogpr\n'  (magic, 5-6 byte, sia Unix che Windows EOL)
-  MD5 + EOL                 (32 byte hex + EOL)
-  NNNNNNNN + EOL            (lunghezza JSON, decimale + EOL)
-  { ... JSON ... }          (NNNNNNNN byte)
-  --- Radar Volume ---       (float32 o int16)
-  --- Sample Geolocations -- layout flessibile per slice:
+  b'ogpr\r\n' | b'ogpr\n'  (magic, 5-6 byte)
+  MD5 + EOL
+  NNNNNNNN + EOL            (lunghezza JSON)
+  { ... JSON ... }
+  --- Radar Volume ---
+  --- Sample Geolocations ---
 
-      Per ogni slice:
-        n_channels x 8 x float64  (easting, northing, altitude, heading,
-                                   pitch, roll, spare, spare)
-        [0..N extra float64]       (es. timestamp/odometro — ignorati)
+  Layout per slice (auto-rilevato):
+    [extra0..N]  n_channels x [east, north, alt, head, pitch, roll, sp, sp]
+    oppure
+    n_channels x [east, north, alt, head, pitch, roll, sp, sp]  [extra0..N]
 
-      Il numero di double extra per slice viene auto-rilevato da byteSize.
+  La posizione degli extra double (inizio o fine) è auto-rilevata
+  verificando se l'easting risultante è plausibile (> 1000 m).
 """
 
 from __future__ import annotations
@@ -25,18 +26,15 @@ from pathlib import Path
 
 import numpy as np
 
-GEO_DOUBLES_PER_CHANNEL = 8   # easting, northing, altitude, heading, pitch, roll, spare x2
+GEO_DOUBLES_PER_CHANNEL = 8   # east, north, alt, heading, pitch, roll, spare x2
+_UTM_MIN = 1_000.0            # soglia minima plausibile per coordinate proiettate (m)
 
 
 # ---------------------------------------------------------------------------
-# Helper: legge la prossima riga terminata da \r\n o \n
+# Helper: legge la prossima riga con EOL Unix o Windows
 # ---------------------------------------------------------------------------
 
 def _read_line(raw: bytes, pos: int) -> tuple[bytes, int]:
-    """
-    Legge bytes da `pos` fino al prossimo \r\n o \n (incluso).
-    Restituisce (contenuto_senza_eol, nuova_posizione).
-    """
     end = pos
     while end < len(raw) and raw[end] not in (ord('\r'), ord('\n')):
         end += 1
@@ -54,19 +52,17 @@ def _read_line(raw: bytes, pos: int) -> tuple[bytes, int]:
 
 @dataclass
 class OgprChannel:
-    """Un singolo canale (antenna) con i propri dati e posizioni."""
     channel_idx:  int
-    data:         np.ndarray   # shape (n_samples, n_slices)  float32
-    easting:      np.ndarray   # shape (n_slices,)            float64
-    northing:     np.ndarray   # shape (n_slices,)            float64
-    altitude:     np.ndarray   # shape (n_slices,)            float64
-    heading:      np.ndarray   # shape (n_slices,)            float64
-    distances:    np.ndarray   # shape (n_slices,)  distanza cumulativa (m)
+    data:         np.ndarray   # (n_samples, n_slices)  float32
+    easting:      np.ndarray   # (n_slices,)  float64
+    northing:     np.ndarray   # (n_slices,)  float64
+    altitude:     np.ndarray   # (n_slices,)  float64
+    heading:      np.ndarray   # (n_slices,)  float64
+    distances:    np.ndarray   # (n_slices,)  distanza cumulativa (m)
 
 
 @dataclass
 class OgprProfile:
-    """Profilo GPR completo letto da un file .ogpr."""
     path:              str
     version_major:     int
     version_minor:     int
@@ -82,7 +78,7 @@ class OgprProfile:
     frequency_mhz:     float
     polarization:      str
     epsg:              int
-    value_type:        str       # 'float' | 'int16'
+    value_type:        str
     channels:          list
     header_raw:        dict
 
@@ -104,49 +100,74 @@ class OgprProfile:
         return self.channels[idx]
 
 
-# ---------------------------------------------------------------------------
-# Eccezione
-# ---------------------------------------------------------------------------
-
 class OgprReadError(Exception):
     pass
 
 
 # ---------------------------------------------------------------------------
-# Helper: auto-rileva il layout geolocations
+# Helper: layout geolocations
 # ---------------------------------------------------------------------------
 
 def _parse_geo_layout(g_bytesize: int, n_slices: int, n_channels: int) -> int:
-    """
-    Calcola il numero di double extra per slice nel blocco geolocations.
-
-    Layout atteso per slice:
-      n_channels x GEO_DOUBLES_PER_CHANNEL x float64  (dati canali)
-      extra_doubles x float64                          (es. timestamp)
-
-    Restituisce extra_doubles (0 = formato standard, 1+ = campi extra).
-    Lancia OgprReadError se il byteSize non è compatibile con nessun layout.
-    """
+    """Ritorna numero di double extra per slice (0 = formato standard)."""
     if n_slices == 0:
         return 0
     if g_bytesize % n_slices != 0:
         raise OgprReadError(
             f"Geo byteSize={g_bytesize} non divisibile per n_slices={n_slices}"
         )
-    bytes_per_slice = g_bytesize // n_slices
-    if bytes_per_slice % 8 != 0:
-        raise OgprReadError(
-            f"Geo bytes/slice={bytes_per_slice} non multiplo di 8 (float64)"
-        )
-    doubles_per_slice  = bytes_per_slice // 8
-    channel_doubles    = n_channels * GEO_DOUBLES_PER_CHANNEL
-    extra              = doubles_per_slice - channel_doubles
+    bps = g_bytesize // n_slices
+    if bps % 8 != 0:
+        raise OgprReadError(f"Geo bytes/slice={bps} non multiplo di 8")
+    extra = bps // 8 - n_channels * GEO_DOUBLES_PER_CHANNEL
     if extra < 0:
         raise OgprReadError(
-            f"Geo block troppo piccolo: servono {channel_doubles} double/slice, "
-            f"trovati {doubles_per_slice}"
+            f"Geo block troppo piccolo: servono "
+            f"{n_channels * GEO_DOUBLES_PER_CHANNEL} double/slice, trovati {bps // 8}"
         )
     return extra
+
+
+def _extract_geo_channels(
+    geo_array: np.ndarray,
+    n_slices: int,
+    n_channels: int,
+    extra_doubles: int,
+) -> np.ndarray:
+    """
+    Estrae la matrice canali (n_slices, n_channels, 8) dal blocco geo.
+
+    Strategia:
+      1. Prova extra all'INIZIO  (offset = extra_doubles)
+      2. Prova extra alla FINE   (offset = 0)
+      Sceglie la versione in cui l'easting del canale 0 è plausibile (> _UTM_MIN).
+      Se nessuna delle due è plausibile usa offset=0 come fallback silenzioso.
+    """
+    ch_len = n_channels * GEO_DOUBLES_PER_CHANNEL
+
+    def _try(offset: int) -> np.ndarray:
+        return geo_array[:, offset:offset + ch_len].reshape(
+            (n_slices, n_channels, GEO_DOUBLES_PER_CHANNEL)
+        )
+
+    if extra_doubles == 0:
+        return _try(0)
+
+    # Testa offset=extra (extra all'inizio)
+    geo_extra_start = _try(extra_doubles)
+    east_start = np.abs(geo_extra_start[:, 0, 0]).mean()
+
+    # Testa offset=0 (extra alla fine)
+    geo_extra_end = _try(0)
+    east_end = np.abs(geo_extra_end[:, 0, 0]).mean()
+
+    # Scegli la versione con easting più plausibile
+    if east_start >= _UTM_MIN and east_start > east_end:
+        return geo_extra_start
+    if east_end >= _UTM_MIN:
+        return geo_extra_end
+    # Fallback: extra all'inizio (il più comune dai file testati)
+    return geo_extra_start
 
 
 # ---------------------------------------------------------------------------
@@ -155,12 +176,8 @@ def _parse_geo_layout(g_bytesize: int, n_slices: int, n_channels: int) -> int:
 
 def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
     """
-    Legge un file .ogpr (v1.0 o v2.0) e restituisce un OgprProfile.
-
-    - Accetta line ending Unix (\n) e Windows (\r\n).
-    - Gestisce automaticamente 0 o più double extra per slice nel blocco
-      geolocations (es. timestamp, odometro).
-    - Compatibile con file prodotti da sistemi diversi (Linux, Windows, Mac).
+    Legge un file .ogpr (v1.0 o v2.0).
+    Gestisce Unix/Windows EOL e extra-doubles nel blocco geolocations.
     """
     p = Path(path)
     if not p.exists():
@@ -169,39 +186,28 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
     with open(p, "rb") as f:
         raw = f.read()
 
-    # --- Magic: accetta ogpr\r\n o ogpr\n ---
+    # Magic
     if raw[:6] == b"ogpr\r\n":
         pos = 6
     elif raw[:5] == b"ogpr\n":
         pos = 5
     else:
-        raise OgprReadError(
-            f"Magic non valido: {raw[:8]!r}  "
-            f"(atteso b'ogpr\\n' o b'ogpr\\r\\n')"
-        )
+        raise OgprReadError(f"Magic non valido: {raw[:8]!r}")
 
-    # --- MD5 ---
-    md5_line, pos = _read_line(raw, pos)
-    md5_stored    = md5_line.decode("ascii").strip()
+    md5_line, pos  = _read_line(raw, pos)
+    md5_stored     = md5_line.decode("ascii").strip()
+    len_line, pos  = _read_line(raw, pos)
+    json_len       = int(len_line.decode("ascii").strip())
+    json_bytes     = raw[pos: pos + json_len]
+    hdr            = json.loads(json_bytes.decode("utf-8"))
+    pos           += json_len
 
-    # --- JSON length ---
-    len_line, pos = _read_line(raw, pos)
-    json_len      = int(len_line.decode("ascii").strip())
-
-    # --- JSON header ---
-    json_bytes = raw[pos: pos + json_len]
-    hdr        = json.loads(json_bytes.decode("utf-8"))
-    pos       += json_len
-
-    # --- MD5 opzionale ---
     if verify_md5:
         computed = hashlib.md5(raw[pos:]).hexdigest()
         if computed != md5_stored:
-            raise OgprReadError(
-                f"MD5 non valido (stored={md5_stored}, computed={computed})"
-            )
+            raise OgprReadError(f"MD5 non valido (stored={md5_stored}, computed={computed})")
 
-    # --- Metadati header ---
+    # Metadati
     md         = hdr["mainDescriptor"]
     n_samples  = int(md["samplesCount"])
     n_channels = int(md["channelsCount"])
@@ -212,20 +218,15 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
     v_major    = int(hdr["version"]["major"])
     v_minor    = int(hdr["version"]["minor"])
 
-    # --- Data block descriptors ---
     radar_desc = None
     geo_desc   = None
     for blk in hdr.get("dataBlockDescriptors", []):
         t = blk.get("type", "")
-        if t == "Radar Volume":
-            radar_desc = blk
-        elif t == "Sample Geolocations":
-            geo_desc = blk
+        if t == "Radar Volume":         radar_desc = blk
+        elif t == "Sample Geolocations": geo_desc   = blk
 
-    if radar_desc is None:
-        raise OgprReadError("dataBlock 'Radar Volume' non trovato")
-    if geo_desc is None:
-        raise OgprReadError("dataBlock 'Sample Geolocations' non trovato")
+    if radar_desc is None: raise OgprReadError("'Radar Volume' non trovato")
+    if geo_desc   is None: raise OgprReadError("'Sample Geolocations' non trovato")
 
     radar_info    = radar_desc["radar"]
     sampling_step = float(radar_info["samplingStep_m"])
@@ -237,45 +238,34 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
     value_type    = str(radar_desc.get("valueType", "int16"))
     epsg          = int(geo_desc.get("srs", {}).get("value", 32633))
 
-    # --- Radar Volume ---
+    # Radar Volume
     r_offset   = int(radar_desc["byteOffset"])
     r_bytesize = int(radar_desc["byteSize"])
     radar_raw  = raw[r_offset: r_offset + r_bytesize]
 
-    expected_floats = n_samples * n_channels * n_slices
+    exp = n_samples * n_channels * n_slices
     if value_type == "float":
         radar_flat = np.frombuffer(radar_raw, dtype="<f4")
     else:
         radar_flat = np.frombuffer(radar_raw, dtype="<i2").astype(np.float32)
 
-    if radar_flat.size != expected_floats:
+    if radar_flat.size != exp:
         raise OgprReadError(
-            f"Dimensione dati radar inattesa: "
-            f"attesi {expected_floats}, trovati {radar_flat.size}"
+            f"Radar: attesi {exp} valori, trovati {radar_flat.size}"
         )
-
-    # Layout: (n_slices, n_channels, n_samples) -> per canale: (n_samples, n_slices)
     radar_3d = radar_flat.reshape((n_slices, n_channels, n_samples))
 
-    # --- Sample Geolocations ---
-    g_offset   = int(geo_desc["byteOffset"])
-    g_bytesize = int(geo_desc["byteSize"])
-    geo_raw    = raw[g_offset: g_offset + g_bytesize]
-
-    # Auto-rileva double extra per slice (es. timestamp, odometro)
+    # Sample Geolocations
+    g_offset      = int(geo_desc["byteOffset"])
+    g_bytesize    = int(geo_desc["byteSize"])
+    geo_raw       = raw[g_offset: g_offset + g_bytesize]
     extra_doubles = _parse_geo_layout(g_bytesize, n_slices, n_channels)
-    doubles_per_slice = n_channels * GEO_DOUBLES_PER_CHANNEL + extra_doubles
+    dps           = n_channels * GEO_DOUBLES_PER_CHANNEL + extra_doubles
 
-    geo_array = np.frombuffer(geo_raw, dtype="<f8").reshape(
-        (n_slices, doubles_per_slice)
-    )
-    # Estrai solo i dati per canale (i primi n_channels*8 doubles per slice)
-    # Layout: [ch0_d0..d7, ch1_d0..d7, ..., extra0, extra1, ...]
-    geo_ch = geo_array[:, :n_channels * GEO_DOUBLES_PER_CHANNEL].reshape(
-        (n_slices, n_channels, GEO_DOUBLES_PER_CHANNEL)
-    )
+    geo_array = np.frombuffer(geo_raw, dtype="<f8").reshape((n_slices, dps))
+    geo_ch    = _extract_geo_channels(geo_array, n_slices, n_channels, extra_doubles)
 
-    # --- Costruisci canali ---
+    # Costruisci canali
     channels = []
     for ch_i in range(n_channels):
         data_ch  = radar_3d[:, ch_i, :].T.copy()   # (n_samples, n_slices)
@@ -287,6 +277,10 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
         dx   = np.diff(east_ch,  prepend=east_ch[0])
         dy   = np.diff(north_ch, prepend=north_ch[0])
         dist = np.cumsum(np.sqrt(dx ** 2 + dy ** 2))
+
+        # Fallback: se le coordinate sono zero o costanti usa sampling_step_m
+        if dist[-1] < 1e-3:
+            dist = np.arange(n_slices, dtype=np.float64) * sampling_step
 
         channels.append(OgprChannel(
             channel_idx = ch_i,
