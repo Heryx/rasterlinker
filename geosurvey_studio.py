@@ -14,6 +14,7 @@ from .trace_build3d_mixin import TraceBuild3DMixin
 from .catalog_group_mixin import CatalogGroupMixin
 from .catalog_tools_mixin import CatalogToolsMixin
 from .gpr_volume_mixin import GprVolumeMixin
+from .gpr_ogpr_volume_mixin import GprOgprVolumeMixin
 from .grid_workflow_mixin import GridWorkflowMixin
 from .ui_layout_mixin import UiLayoutMixin
 from .app_runtime_mixin import AppRuntimeMixin
@@ -38,6 +39,7 @@ class GeoSurveyStudioPlugin(
     CatalogGroupMixin,
     CatalogToolsMixin,
     GprVolumeMixin,
+    GprOgprVolumeMixin,
     GridWorkflowMixin,
     UiLayoutMixin,
     TraceInfoMixin,
@@ -53,12 +55,13 @@ class GeoSurveyStudioPlugin(
     3. CatalogGroupMixin
     4. CatalogToolsMixin
     5. GprVolumeMixin
-    6. GridWorkflowMixin
-    7. UiLayoutMixin
-    8. TraceInfoMixin
-    9. TraceCaptureMixin
-    10. TraceBuild3DMixin
-    11. TraceToolsMixin
+    6. GprOgprVolumeMixin
+    7. GridWorkflowMixin
+    8. UiLayoutMixin
+    9. TraceInfoMixin
+    10. TraceCaptureMixin
+    11. TraceBuild3DMixin
+    12. TraceToolsMixin
 
     Potential method-name conflicts to watch:
     - `_safe_float`: defined in `CatalogToolsMixin` and in the TraceCapture branch
