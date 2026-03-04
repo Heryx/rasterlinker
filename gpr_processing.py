@@ -78,12 +78,22 @@ def time_zero_correction(data: np.ndarray, method: str = "energy") -> np.ndarray
 def background_removal(data: np.ndarray) -> np.ndarray:
     """Sottrae la traccia media (clutter di sfondo orizzontale).
 
-    Il calcolo avviene in float64 per evitare cancellazione catastrofica:
-    con dati int16 (±32000) in float32, i residui dopo sottrazione della
-    media possono essere inferiori alla precisione float32 (~0.004) e
-    venire azzerati, lasciando meno del 2% di campioni nonzero.
+    Calcolo in float64 per evitare cancellazione catastrofica in float32
+    (con dati int16 in float32, residui reali possono essere < ULP e azzerarsi).
+
+    Diagnostico: stampa la deviazione standard inter-traccia prima della
+    sottrazione per verificare se il dato ha variazione laterale reale.
+    Se mean_std ~ 0 e rows_zero_std ~ n_samples, il dato non ha variazione
+    laterale e l'azzeramento dopo bg_removal e' corretto (non un bug).
     """
-    d64 = data.astype(np.float64)
+    d64      = data.astype(np.float64)
+    row_std  = d64.std(axis=1)           # std across n_slices per ogni sample
+    n_zero   = int(np.count_nonzero(row_std == 0.0))
+    print(
+        f"[GPR] bg_diag: mean_inter-trace_std={row_std.mean():.6g}  "
+        f"max={row_std.max():.6g}  "
+        f"rows_with_zero_std={n_zero}/{len(row_std)}"
+    )
     return (d64 - d64.mean(axis=1, keepdims=True)).astype(np.float32)
 
 
