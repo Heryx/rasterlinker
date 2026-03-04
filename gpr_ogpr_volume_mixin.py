@@ -2,9 +2,9 @@
 """
 GprOgprVolumeMixin
 ==================
-Fornisce il metodo import_ogpr_as_slices(profiles) al plugin principale.
+Fornisce il metodo import_ogpr_as_slices(profiles, slice_params) al plugin principale.
 Viene chiamato da GprProfileViewer tramite:
-    self.plugin.import_ogpr_as_slices(self._profiles)
+    self.plugin.import_ogpr_as_slices(self._profiles, slice_params=...)
 
 Flusso:
   1. Dialog parametri (canale/combinazione, z_min/max, z_step, risoluzione, radius, gruppo)
@@ -81,7 +81,7 @@ class GprOgprVolumeMixin:
         root = QVBoxLayout(dlg)
 
         root.addWidget(QLabel(
-            f"Profondita' massima rilevata: <b>{depth_max_m:.3f} m</b>  —  "
+            f"Profondita' massima rilevata: <b>{depth_max_m:.3f} m</b>  \u2014  "
             f"<b>{n_channels}</b> canal{'e' if n_channels == 1 else 'i'}"
         ))
 
@@ -98,20 +98,19 @@ class GprOgprVolumeMixin:
 
         # --- ComboBox canali ---
         cb_ch = QComboBox()
-        cb_ch.addItem("\U0001f4e1  Tutti i canali — media (consigliato)",  (-1, "mean"))
-        cb_ch.addItem("\U0001f4e1  Tutti i canali — massimo",              (-1, "max"))
+        cb_ch.addItem("\U0001f4e1  Tutti i canali \u2014 media (consigliato)",  (-1, "mean"))
+        cb_ch.addItem("\U0001f4e1  Tutti i canali \u2014 massimo",              (-1, "max"))
         for ci in range(n_channels):
             cb_ch.addItem(f"Solo canale {ci}", (ci, "mean"))
         cb_ch.setToolTip(
-            "'Tutti — media': combina l'ampiezza di ogni canale con la media.\n"
+            "'Tutti \u2014 media': combina l'ampiezza di ogni canale con la media.\n"
             "  Riduce il rumore, risultato piu' stabile.\n"
-            "'Tutti — massimo': prende il canale con ampiezza maggiore per ogni traccia.\n"
+            "'Tutti \u2014 massimo': prende il canale con ampiezza maggiore per ogni traccia.\n"
             "  Evidenzia le anomalie piu' forti.\n"
             "'Solo canale N': un singolo canale (utile per analisi per polarizzazione)."
         )
-        # ripristina selezione salvata
         if saved:
-            prev_ch  = saved.get("channel", -1)
+            prev_ch   = saved.get("channel", -1)
             prev_comb = saved.get("combine_method", "mean")
             for i in range(cb_ch.count()):
                 d = cb_ch.itemData(i)
@@ -163,11 +162,28 @@ class GprOgprVolumeMixin:
     # Entry point pubblico
     # ------------------------------------------------------------------
 
-    def import_ogpr_as_slices(self, profiles: list) -> None:
+    def import_ogpr_as_slices(
+        self,
+        profiles: list,
+        slice_params: dict | None = None,
+    ) -> None:
         """
         Punto di ingresso chiamato da GprProfileViewer._open_slice_dialog().
 
-        profiles: lista di OgprProfile gia' letti da read_ogpr()
+        Parameters
+        ----------
+        profiles : list[OgprProfile]
+            Lista di profili gia' letti da read_ogpr().
+        slice_params : dict | None
+            Parametri opzionali di filtraggio/interpolazione provenienti dalla
+            sezione "Timeslice" del GPR Profile Viewer:
+                normalize_channels   : bool
+                amplitude_sigma      : float | None   (None = disabilitato)
+                use_anisotropic_idw  : bool
+                auto_radius          : bool
+                fill_nodata          : bool
+                smooth_sigma         : float          (0.0 = disabilitato)
+            Se None, vengono usati i default di slice_ogpr_to_tifs().
         """
         from .gpr_ogpr_slicer import (
             slice_ogpr_to_tifs,
@@ -204,17 +220,17 @@ class GprOgprVolumeMixin:
         candidate_dir = os.path.join(
             project_root, "timeslices_2d", default_group
         )
-        saved = load_ogpr_slicer_params(candidate_dir)
+        saved      = load_ogpr_slicer_params(candidate_dir)
         is_reslice = saved is not None
 
         depth_max  = max(p.depth_max_m for p in profiles)
         n_channels = max(p.n_channels  for p in profiles)
 
         params = self._ask_ogpr_slice_params(
-            n_channels  = n_channels,
-            depth_max_m = depth_max,
+            n_channels    = n_channels,
+            depth_max_m   = depth_max,
             default_group = default_group,
-            saved = saved,
+            saved         = saved,
         )
         if params is None:
             return
@@ -238,19 +254,37 @@ class GprOgprVolumeMixin:
                 duration=60,
             )
 
+        # --- costruisci kwargs per slice_ogpr_to_tifs ---
+        sp = slice_params or {}
+        slicer_kwargs = dict(
+            profiles       = profiles,
+            output_dir     = output_dir,
+            channel        = params["channel"],
+            combine_method = params["combine_method"],
+            resolution     = params["resolution"],
+            z_step         = params["z_step"],
+            z_min          = params["z_min"],
+            z_max          = params["z_max"],
+            radius         = params["radius"],
+            epsg           = epsg,
+        )
+        # Parametri opzionali dalla sezione Timeslice del viewer
+        # (passati solo se la chiave esiste nel dizionario, per non
+        # rompere versioni future di slice_ogpr_to_tifs con firme diverse)
+        _optional_keys = (
+            "normalize_channels",
+            "amplitude_sigma",
+            "use_anisotropic_idw",
+            "auto_radius",
+            "fill_nodata",
+            "smooth_sigma",
+        )
+        for k in _optional_keys:
+            if k in sp:
+                slicer_kwargs[k] = sp[k]
+
         try:
-            slices = slice_ogpr_to_tifs(
-                profiles       = profiles,
-                output_dir     = output_dir,
-                channel        = params["channel"],
-                combine_method = params["combine_method"],
-                resolution     = params["resolution"],
-                z_step         = params["z_step"],
-                z_min          = params["z_min"],
-                z_max          = params["z_max"],
-                radius         = params["radius"],
-                epsg           = epsg,
-            )
+            slices = slice_ogpr_to_tifs(**slicer_kwargs)
         except Exception as exc:
             QMessageBox.critical(
                 getattr(self, "dlg", None),
@@ -271,17 +305,19 @@ class GprOgprVolumeMixin:
 
         # --- salva parametri sidecar ---
         save_ogpr_slicer_params(output_dir, {
-            "source_profiles": [p.path for p in profiles],
-            "group_name":      group_name,
-            "channel":         params["channel"],
-            "combine_method":  params["combine_method"],
-            "z_min":           params["z_min"],
-            "z_max":           params["z_max"],
-            "z_step":          params["z_step"],
-            "resolution":      params["resolution"],
-            "radius":          params["radius"],
-            "epsg":            epsg,
-            "n_slices":        len(slices),
+            "source_profiles":  [p.path for p in profiles],
+            "group_name":       group_name,
+            "channel":          params["channel"],
+            "combine_method":   params["combine_method"],
+            "z_min":            params["z_min"],
+            "z_max":            params["z_max"],
+            "z_step":           params["z_step"],
+            "resolution":       params["resolution"],
+            "radius":           params["radius"],
+            "epsg":             epsg,
+            "n_slices":         len(slices),
+            # slice_params (per eventuale re-slice con stessi parametri GUI)
+            "slice_params":     sp,
         })
 
         # --- registra nel catalogo (riusa GprVolumeMixin) ---
