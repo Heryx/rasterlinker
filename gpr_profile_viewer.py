@@ -3,10 +3,6 @@
 GPR Profile Viewer
 ==================
 QDialog con radargram matplotlib integrato.
-  - asse X (distanza): mostra RubberBand posizione sul canvas
-  - asse Y (profondita'): cambia timeslice visibile via dial del plugin
-  - Gain display: moltiplicatore post-normalize per boost contrasto
-  - Clip %: percentile di clipping per normalize_display
 """
 
 from __future__ import annotations
@@ -41,7 +37,7 @@ from .gpr_ogpr_reader import read_ogpr, OgprProfile, OgprChannel
 from .gpr_processing  import apply_pipeline, DEFAULT_PIPELINE
 
 
-GPR_CMAPS   = ["RdBu_r", "seismic", "gray", "bwr", "Greys_r"]
+GPR_CMAPS    = ["RdBu_r", "seismic", "gray", "bwr", "Greys_r"]
 DEFAULT_CMAP = "RdBu_r"
 
 
@@ -52,14 +48,14 @@ class GprProfileViewer(QDialog):
         self.iface  = iface
         self.plugin = plugin
         self.setWindowTitle("GPR Profile Viewer")
-        self.resize(1200, 650)
+        self.resize(1200, 750)
 
         self._profiles:    list[OgprProfile] = []
         self._prof_idx:    int = 0
         self._ch_idx:      int = 0
         self._raw_data:    Optional[np.ndarray] = None
-        self._proc_data:   Optional[np.ndarray] = None   # dopo pipeline
-        self._disp_data:   Optional[np.ndarray] = None   # dopo gain
+        self._proc_data:   Optional[np.ndarray] = None
+        self._disp_data:   Optional[np.ndarray] = None
         self._cursor_x:    Optional[float] = None
         self._cursor_z:    Optional[float] = None
 
@@ -80,7 +76,6 @@ class GprProfileViewer(QDialog):
     def _build_ui(self):
         root = QVBoxLayout(self)
 
-        # Toolbar
         tb = QToolBar()
         act_open = QAction("\U0001f4c2  Importa .ogpr", self)
         act_open.triggered.connect(self.import_files)
@@ -141,80 +136,219 @@ class GprProfileViewer(QDialog):
         self._lbl_status = QLabel("Importa un file .ogpr per iniziare.")
         root.addWidget(self._lbl_status)
 
-    def _build_processing_panel(self) -> QGroupBox:
+    def _build_processing_panel(self):
         grp = QGroupBox("Processing")
         fl  = QFormLayout(grp)
 
-        # --- Filtri ---
+        # Dewow
         self._chk_dewow  = QCheckBox(); self._chk_dewow.setChecked(True)
         self._spin_dewow = QSpinBox();  self._spin_dewow.setRange(4, 256); self._spin_dewow.setValue(16)
 
+        # Time-zero
         self._chk_timezero = QCheckBox()
         self._chk_timezero.setChecked(False)
         self._chk_timezero.setToolTip(
-            "Allinea ogni traccia all'onda diretta (t=0).\n"
-            "Utile se le tracce hanno ritardi variabili.\n"
-            "ATTENZIONE: può capovolgere il profilo se il dato\n"
-            "è già allineato al t=0."
+            "Tronca i campioni pre-onda diretta scan-by-scan o line-by-line.\n"
+            "NON usa shift circolare: il radargram viene fisicamente troncato."
+        )
+        self._cb_tz_method = QComboBox()
+        self._cb_tz_method.addItems(["peak", "threshold", "zero_crossing"])
+        self._cb_tz_method.setCurrentText("peak")
+        self._cb_tz_method.setEnabled(False)
+        self._cb_tz_mode = QComboBox()
+        self._cb_tz_mode.addItems(["line_by_line", "scan_by_scan"])
+        self._cb_tz_mode.setCurrentText("line_by_line")
+        self._cb_tz_mode.setEnabled(False)
+        self._spin_tz_threshold = QDoubleSpinBox()
+        self._spin_tz_threshold.setRange(0.05, 0.95); self._spin_tz_threshold.setSingleStep(0.05)
+        self._spin_tz_threshold.setValue(0.20); self._spin_tz_threshold.setEnabled(False)
+        self._spin_tz_backup = QSpinBox()
+        self._spin_tz_backup.setRange(0, 32); self._spin_tz_backup.setValue(4)
+        self._spin_tz_backup.setEnabled(False)
+
+        def _toggle_tz(checked):
+            for w in (self._cb_tz_method, self._cb_tz_mode,
+                      self._spin_tz_threshold, self._spin_tz_backup):
+                w.setEnabled(checked)
+        self._chk_timezero.toggled.connect(_toggle_tz)
+
+        # ------------------------------------------------------------------
+        # BG removal
+        # ------------------------------------------------------------------
+        self._chk_bg = QCheckBox()
+        self._chk_bg.setChecked(True)
+        self._chk_bg.setToolTip(
+            "Background Removal (GPR-SLICE §Background Removal, pag. 166).\n"
+            "Sottrae la traccia media per eliminare banding orizzontale.\n\n"
+            "ATTENZIONE: rimuove anche riflessi reali paralleli al profilo."
         )
 
-        self._chk_bg  = QCheckBox(); self._chk_bg.setChecked(True)
+        self._cb_bg_mode = QComboBox()
+        self._cb_bg_mode.addItem("line_by_line", "line_by_line")
+        self._cb_bg_mode.addItem("grid_by_grid", "grid_by_grid")
+        self._cb_bg_mode.setCurrentIndex(0)
+        self._cb_bg_mode.setEnabled(False)
+        self._cb_bg_mode.setToolTip(
+            "line_by_line : media calcolata su ogni singolo radargram.\n"
+            "grid_by_grid : media calcolata su tutti i radargram del grid\n"
+            "               (due passate: pre-BG + sottrazione globale)."
+        )
 
+        self._chk_bg_auto = QCheckBox("Auto")
+        self._chk_bg_auto.setChecked(True)
+        self._chk_bg_auto.setEnabled(False)
+        self._chk_bg_auto.setToolTip(
+            "Auto: sottrae la media dell'intero profilo (filter_length=99000).\n"
+            "Disabilita per usare una finestra scorrevole personalizzata."
+        )
+
+        self._spin_bg_window = QSpinBox()
+        self._spin_bg_window.setRange(8, 99000)
+        self._spin_bg_window.setValue(200)
+        self._spin_bg_window.setEnabled(False)
+        self._spin_bg_window.setToolTip(
+            "Lunghezza del filtro in tracce (media scorrevole).\n"
+            "Attivo solo se Auto e' disabilitato."
+        )
+
+        # Finestra temporale
+        self._spin_bg_sample_start = QSpinBox()
+        self._spin_bg_sample_start.setRange(0, 9999)
+        self._spin_bg_sample_start.setValue(0)
+        self._spin_bg_sample_start.setEnabled(False)
+        self._spin_bg_sample_start.setToolTip(
+            "Primo campione incluso nel BG removal (0 = dall'inizio).\n\n"
+            "Imposta > 0 per ESCLUDERE i primi N campioni dalla sottrazione.\n"
+            "Effetto: preserva il ground coupling / onda diretta nei primi\n"
+            "campioni, permettendo all'AGC di amplificarli correttamente.\n"
+            "Esempio: per 600 MHz con dt=0.117 ns, 0.5 m ≈ 28 campioni."
+        )
+
+        self._spin_bg_sample_end = QSpinBox()
+        self._spin_bg_sample_end.setRange(0, 9999)
+        self._spin_bg_sample_end.setValue(0)
+        self._spin_bg_sample_end.setEnabled(False)
+        self._spin_bg_sample_end.setToolTip(
+            "Ultimo campione escluso dal BG removal (0 = fine traccia).\n"
+            "Usare per limitare la rimozione a una zona di profondita' specifica."
+        )
+
+        def _toggle_bg_auto(auto_checked):
+            self._spin_bg_window.setEnabled(not auto_checked)
+
+        def _toggle_bg(bg_checked):
+            self._cb_bg_mode.setEnabled(bg_checked)
+            self._chk_bg_auto.setEnabled(bg_checked)
+            self._spin_bg_sample_start.setEnabled(bg_checked)
+            self._spin_bg_sample_end.setEnabled(bg_checked)
+            if bg_checked:
+                _toggle_bg_auto(self._chk_bg_auto.isChecked())
+            else:
+                self._spin_bg_window.setEnabled(False)
+
+        self._chk_bg.toggled.connect(_toggle_bg)
+        self._chk_bg_auto.toggled.connect(_toggle_bg_auto)
+
+        # AGC
         self._chk_agc  = QCheckBox(); self._chk_agc.setChecked(True)
         self._spin_agc = QSpinBox();  self._spin_agc.setRange(8, 512); self._spin_agc.setValue(128)
 
-        self._chk_bp   = QCheckBox(); self._chk_bp.setChecked(False)
+        # Bandpass
+        self._chk_bp     = QCheckBox(); self._chk_bp.setChecked(False)
         self._spin_bp_lo = QDoubleSpinBox(); self._spin_bp_lo.setRange(1, 3000); self._spin_bp_lo.setValue(200)
         self._spin_bp_hi = QDoubleSpinBox(); self._spin_bp_hi.setRange(1, 3000); self._spin_bp_hi.setValue(1200)
 
-        # --- Display ---
+        # Display
         self._spin_clip = QDoubleSpinBox()
-        self._spin_clip.setRange(50.0, 99.9)
-        self._spin_clip.setSingleStep(1.0)
+        self._spin_clip.setRange(50.0, 99.9); self._spin_clip.setSingleStep(1.0)
         self._spin_clip.setValue(95.0)
-        self._spin_clip.setToolTip(
-            "Percentile di clip in normalize_display.\n"
-            "Valori bassi (es. 80%) = piu' contrasto sulle riflessioni deboli.\n"
-            "Valori alti (es. 99%) = gamma piu' lineare."
-        )
+        self._spin_clip.setToolTip("Percentile di clip in normalize_display.")
 
         self._spin_gain = QDoubleSpinBox()
-        self._spin_gain.setRange(0.1, 20.0)
-        self._spin_gain.setSingleStep(0.5)
+        self._spin_gain.setRange(0.1, 20.0); self._spin_gain.setSingleStep(0.5)
         self._spin_gain.setValue(2.0)
-        self._spin_gain.setToolTip(
-            "Moltiplicatore display post-normalize.\n"
-            "Aumenta per far emergere le iperboli deboli.\n"
-            "I valori vengono clippati a [-1, 1] prima del display."
-        )
+        self._spin_gain.setToolTip("Moltiplicatore display post-normalize.")
 
-        fl.addRow("Dewow:",        self._chk_dewow)
-        fl.addRow("  finestra:",   self._spin_dewow)
-        fl.addRow("Time-zero:",    self._chk_timezero)
-        fl.addRow("BG removal:",   self._chk_bg)
-        fl.addRow("AGC gain:",     self._chk_agc)
-        fl.addRow("  finestra:",   self._spin_agc)
-        fl.addRow("Bandpass:",     self._chk_bp)
-        fl.addRow("  low (MHz):",  self._spin_bp_lo)
-        fl.addRow("  high (MHz):", self._spin_bp_hi)
-        fl.addRow("Clip %:",       self._spin_clip)
-        fl.addRow("Gain display:", self._spin_gain)
+        fl.addRow("Dewow:",              self._chk_dewow)
+        fl.addRow("  finestra:",         self._spin_dewow)
+        fl.addRow("Time-zero:",          self._chk_timezero)
+        fl.addRow("  metodo:",           self._cb_tz_method)
+        fl.addRow("  mode:",             self._cb_tz_mode)
+        fl.addRow("  soglia:",           self._spin_tz_threshold)
+        fl.addRow("  backup N:",         self._spin_tz_backup)
+        fl.addRow("BG removal:",         self._chk_bg)
+        fl.addRow("  modo:",             self._cb_bg_mode)
+        fl.addRow("  auto:",             self._chk_bg_auto)
+        fl.addRow("  finestra:",         self._spin_bg_window)
+        fl.addRow("  da campione:",      self._spin_bg_sample_start)
+        fl.addRow("  a campione:",       self._spin_bg_sample_end)
+        fl.addRow("AGC gain:",           self._chk_agc)
+        fl.addRow("  finestra:",         self._spin_agc)
+        fl.addRow("Bandpass:",           self._chk_bp)
+        fl.addRow("  low (MHz):",        self._spin_bp_lo)
+        fl.addRow("  high (MHz):",       self._spin_bp_hi)
+        fl.addRow("Clip %:",             self._spin_clip)
+        fl.addRow("Gain display:",       self._spin_gain)
 
         btn_apply = QPushButton("Applica")
         btn_apply.clicked.connect(self._apply_processing)
         fl.addRow(btn_apply)
 
-        # Gain-only: ricalcola display senza riprocessare
         btn_gain = QPushButton("Aggiorna gain")
-        btn_gain.setToolTip("Applica solo Clip% e Gain senza rieseguire i filtri (piu' veloce).")
+        btn_gain.setToolTip("Applica solo Clip% e Gain senza rieseguire i filtri.")
         btn_gain.clicked.connect(self._apply_gain_only)
         fl.addRow(btn_gain)
 
+        # Timeslice
+        grp_slice = QGroupBox("Timeslice")
+        fl_slice  = QFormLayout(grp_slice)
+
+        self._chk_normalize_ch = QCheckBox(); self._chk_normalize_ch.setChecked(True)
+        self._chk_normalize_ch.setToolTip("Bilancia ampiezza inter-canale.")
+
+        self._chk_amplitude_filter = QCheckBox(); self._chk_amplitude_filter.setChecked(False)
+        self._spin_amplitude_sigma = QDoubleSpinBox()
+        self._spin_amplitude_sigma.setRange(1.0, 10.0); self._spin_amplitude_sigma.setSingleStep(0.5)
+        self._spin_amplitude_sigma.setValue(3.0); self._spin_amplitude_sigma.setEnabled(False)
+        self._chk_amplitude_filter.toggled.connect(self._spin_amplitude_sigma.setEnabled)
+
+        self._chk_anisotropic_idw = QCheckBox(); self._chk_anisotropic_idw.setChecked(False)
+        self._chk_auto_radius     = QCheckBox(); self._chk_auto_radius.setChecked(False)
+        self._chk_fill_nodata     = QCheckBox(); self._chk_fill_nodata.setChecked(False)
+
+        self._chk_smooth = QCheckBox(); self._chk_smooth.setChecked(False)
+        self._spin_smooth_sigma = QDoubleSpinBox()
+        self._spin_smooth_sigma.setRange(0.5, 10.0); self._spin_smooth_sigma.setSingleStep(0.5)
+        self._spin_smooth_sigma.setValue(1.0); self._spin_smooth_sigma.setEnabled(False)
+        self._chk_smooth.toggled.connect(self._spin_smooth_sigma.setEnabled)
+
+        fl_slice.addRow("Normalizza canali:",  self._chk_normalize_ch)
+        fl_slice.addRow("Filtro ampiezza:",    self._chk_amplitude_filter)
+        fl_slice.addRow("  sigma:",            self._spin_amplitude_sigma)
+        fl_slice.addRow("IDW anisotropo:",     self._chk_anisotropic_idw)
+        fl_slice.addRow("  raggio auto:",      self._chk_auto_radius)
+        fl_slice.addRow("Fill NoData:",        self._chk_fill_nodata)
+        fl_slice.addRow("Smooth gaussiano:",   self._chk_smooth)
+        fl_slice.addRow("  sigma:",            self._spin_smooth_sigma)
+
         btn_slice = QPushButton("\U0001f5fa  Crea Timeslice\u2026")
         btn_slice.clicked.connect(self._open_slice_dialog)
-        fl.addRow(btn_slice)
+        fl_slice.addRow(btn_slice)
 
-        return grp
+        from qgis.PyQt.QtWidgets import QScrollArea, QWidget
+        scroll_content = QWidget()
+        scroll_layout  = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.addWidget(grp)
+        scroll_layout.addWidget(grp_slice)
+        scroll_layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(scroll_content)
+        scroll.setMinimumWidth(230)
+        scroll.setMaximumWidth(300)
+        return scroll
 
     # ------------------------------------------------------------------
     # Import
@@ -291,20 +425,30 @@ class GprProfileViewer(QDialog):
     # ------------------------------------------------------------------
 
     def _apply_processing(self):
-        """Esegue la pipeline completa e ridisegna."""
         if self._raw_data is None:
             return
+        bg_auto   = self._chk_bg_auto.isChecked()
+        bg_window = 0 if bg_auto else int(self._spin_bg_window.value())
+
         params = {
-            "dewow":       self._chk_dewow.isChecked(),
-            "dewow_win":   self._spin_dewow.value(),
-            "timezero":    self._chk_timezero.isChecked(),
-            "bg_removal":  self._chk_bg.isChecked(),
-            "agc":         self._chk_agc.isChecked(),
-            "agc_win":     self._spin_agc.value(),
-            "bandpass":    self._chk_bp.isChecked(),
-            "bp_low_mhz":  self._spin_bp_lo.value(),
-            "bp_high_mhz": self._spin_bp_hi.value(),
-            "clip_pct":    self._spin_clip.value(),
+            "dewow":            self._chk_dewow.isChecked(),
+            "dewow_win":        self._spin_dewow.value(),
+            "timezero":         self._chk_timezero.isChecked(),
+            "tz_method":        self._cb_tz_method.currentText(),
+            "tz_mode":          self._cb_tz_mode.currentText(),
+            "tz_threshold":     self._spin_tz_threshold.value(),
+            "tz_backup_nsamp":  self._spin_tz_backup.value(),
+            "bg_removal":       self._chk_bg.isChecked(),
+            "bg_mode":          self._cb_bg_mode.currentData() or "line_by_line",
+            "bg_window":        bg_window,
+            "bg_sample_start":  self._spin_bg_sample_start.value(),
+            "bg_sample_end":    self._spin_bg_sample_end.value(),
+            "agc":              self._chk_agc.isChecked(),
+            "agc_win":          self._spin_agc.value(),
+            "bandpass":         self._chk_bp.isChecked(),
+            "bp_low_mhz":       self._spin_bp_lo.value(),
+            "bp_high_mhz":      self._spin_bp_hi.value(),
+            "clip_pct":         self._spin_clip.value(),
         }
         prof = self._profiles[self._prof_idx]
         try:
@@ -317,7 +461,6 @@ class GprProfileViewer(QDialog):
         self._apply_gain_only()
 
     def _apply_gain_only(self):
-        """Applica solo il gain display senza riprocessare (piu' veloce)."""
         if self._proc_data is None:
             self._apply_processing()
             return
@@ -344,7 +487,9 @@ class GprProfileViewer(QDialog):
         cmap = self._cb_cmap.currentText()
 
         dist_max  = float(ch.distances[-1]) if len(ch.distances) else 1.0
-        depth_max = prof.depth_max_m
+        n_out     = self._disp_data.shape[0]
+        n_orig    = prof.n_samples
+        depth_max = prof.depth_max_m * (n_out / n_orig) if n_orig > 0 else prof.depth_max_m
 
         self._ax.clear()
         self._im = self._ax.imshow(
@@ -419,7 +564,7 @@ class GprProfileViewer(QDialog):
         )
 
     # ------------------------------------------------------------------
-    # Bridge QGIS canvas
+    # Bridge QGIS
     # ------------------------------------------------------------------
 
     def _flush_canvas_update(self):
@@ -510,13 +655,30 @@ class GprProfileViewer(QDialog):
     # Timeslice
     # ------------------------------------------------------------------
 
+    def get_slice_params(self) -> dict:
+        return {
+            "normalize_channels":  self._chk_normalize_ch.isChecked(),
+            "amplitude_sigma":     (
+                float(self._spin_amplitude_sigma.value())
+                if self._chk_amplitude_filter.isChecked() else None
+            ),
+            "use_anisotropic_idw": self._chk_anisotropic_idw.isChecked(),
+            "auto_radius":         self._chk_auto_radius.isChecked(),
+            "fill_nodata":         self._chk_fill_nodata.isChecked(),
+            "smooth_sigma":        (
+                float(self._spin_smooth_sigma.value())
+                if self._chk_smooth.isChecked() else 0.0
+            ),
+        }
+
     def _open_slice_dialog(self):
         if not self._profiles:
             QMessageBox.information(self, "Nessun profilo",
                                     "Importa almeno un file .ogpr prima.")
             return
+        slice_params = self.get_slice_params()
         if self.plugin and hasattr(self.plugin, "import_ogpr_as_slices"):
-            self.plugin.import_ogpr_as_slices(self._profiles)
+            self.plugin.import_ogpr_as_slices(self._profiles, slice_params=slice_params)
         else:
             QMessageBox.information(
                 self, "Timeslice",
