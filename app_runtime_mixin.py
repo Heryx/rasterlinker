@@ -128,6 +128,7 @@ class AppRuntimeMixin:
             self.dlg.createGroupButton.clicked.connect(self.create_group)
             #self.dlg.groupListWidget.itemClicked.connect(self.on_group_selected)
             self.dlg.groupListWidget.itemSelectionChanged.connect(self.on_group_selection_changed)
+            self.dlg.groupListWidget.currentItemChanged.connect(self._sync_raster_lock_flag_for_current_group)
             self.dlg.selectGridPointsButton.clicked.connect(self.activate_grid_selection_tool)
 
             self.dlg.createGridButton.clicked.connect(self.create_grid_from_polygon_layer)
@@ -194,6 +195,11 @@ class AppRuntimeMixin:
                 self.internal_grid_checkbox.setChecked(bool(self.grid_internal_enabled))
             self._build_grid_options_controls()
             self._swap_drawing_and_navigation_sections()
+            if getattr(self, "raster_lock_flag_checkbox", None) is not None:
+                self.raster_lock_flag_checkbox.setToolTip(
+                    "Lock current raster for the active group while the dial keeps browsing other selected groups."
+                )
+                self.raster_lock_flag_checkbox.toggled.connect(self._on_raster_lock_flag_toggled)
             self._sync_grid_options_from_controls()
             self._connect_persistent_fields()
             if hasattr(self, "_restore_group_selection_from_settings"):
@@ -211,6 +217,7 @@ class AppRuntimeMixin:
                     pass
             self._sync_depth_mode_on_plugin_start()
             self.refresh_trace_info_table()
+            self._sync_raster_lock_flag_for_current_group()
 
             # Collega il dial alla funzione di aggiornamento
             self.dlg.Dial.valueChanged.connect(self.update_visibility_with_dial)
@@ -227,6 +234,7 @@ class AppRuntimeMixin:
             self._apply_responsive_main_layout(self.dlg.width())
         if self.dlg is not None:
             self._apply_button_icons()
+            self._sync_raster_lock_flag_for_current_group()
             if hasattr(self, "_bootstrap_trace_layer_from_project"):
                 try:
                     self._bootstrap_trace_layer_from_project()

@@ -161,9 +161,14 @@ class TimesliceGroupManagerDialog(QDialog):
         delete_group_btn.clicked.connect(self._delete_group)
         grp_actions.addWidget(delete_group_btn)
 
+        toggle_lock_btn = QPushButton("Toggle Lock")
+        toggle_lock_btn.clicked.connect(self._toggle_group_lock)
+        grp_actions.addWidget(toggle_lock_btn)
+
         grp_refresh_btn = QPushButton("Refresh")
         grp_refresh_btn.clicked.connect(self._refresh)
         grp_actions.addWidget(grp_refresh_btn)
+
         verify_unassigned_btn = QPushButton("Verify Unassigned")
         verify_unassigned_btn.clicked.connect(self._verify_unassigned_clicked)
         grp_actions.addWidget(verify_unassigned_btn)
@@ -375,12 +380,14 @@ class TimesliceGroupManagerDialog(QDialog):
             name = g.get("name") or ""
             count = len(g.get("timeslice_ids", []))
             system_flag = "Yes" if bool(g.get("system", False)) else ""
+            lock_flag = "Locked" if g.get("locked", False) else "Unlocked"
             model_rows.append(
                 {
                     "id": str(gid),
                     "name": str(name),
                     "timeslice_count": count,
                     "system": system_flag,
+                    "lock_status": lock_flag,
                 }
             )
 
@@ -998,6 +1005,21 @@ class TimesliceGroupManagerDialog(QDialog):
         moved = list(dict.fromkeys((imported.get("timeslice_ids") or []) + (rec.get("timeslice_ids") or [])))
         imported["timeslice_ids"] = moved
         self._catalog["raster_groups"] = [g for g in self._catalog.get("raster_groups", []) if g.get("id") != gid]
+        self._save_and_refresh()
+
+    def _toggle_group_lock(self):
+        gid = self._selected_group_id()
+        if not gid:
+            QMessageBox.information(self, "Toggle Group Lock", "Select one group in the Groups tab.")
+            return
+
+        rec = self._group_record_by_id(gid)
+        if rec is None:
+            QMessageBox.warning(self, "Toggle Group Lock", "Selected group not found.")
+            return
+
+        # Flip persistent group lock flag used by plugin visibility workflows.
+        rec["locked"] = not bool(rec.get("locked", False))
         self._save_and_refresh()
 
     def _sync_filter_from_group_selection(self):

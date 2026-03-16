@@ -1,13 +1,13 @@
 import os
 
 from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QFileDialog,
     QInputDialog,
-        QListWidgetItem,
+    QListWidgetItem,
     QMessageBox,
-        QPushButton,
     QProgressDialog,
 )
 from qgis.core import (
@@ -39,7 +39,8 @@ class CatalogGroupMixin:
         Keep QGIS group tree visibility aligned with Group list selection.
         - Single selection: only that group is visible.
         - Multi selection: only selected groups are visible.
-        - No selection: all plugin groups are hidden.
+        - Locked groups remain visible even when not selected.
+        - No selection: only locked groups (if any) remain visible.
         """
         if self.dlg is None or not hasattr(self.dlg, "groupListWidget"):
             return
@@ -49,9 +50,20 @@ class CatalogGroupMixin:
             for item in self.dlg.groupListWidget.selectedItems()
             if str(item.text() or "").strip()
         }
+        lock_map = self._group_raster_lock_map()
+        locked_names = set()
+        for gid, locked_source in lock_map.items():
+            if not str(locked_source or "").strip():
+                continue
+            item = self._group_list_item_by_id(gid)
+            if item is None:
+                continue
+            name = str(item.data(Qt.UserRole + 1) or item.text() or "").strip()
+            if name:
+                locked_names.add(name)
 
         # Ensure selected groups exist in layer tree before visibility sync.
-        for name in selected_names:
+        for name in set(selected_names).union(locked_names):
             try:
                 self._get_or_create_plugin_qgis_group(name)
             except Exception:
@@ -70,7 +82,10 @@ class CatalogGroupMixin:
                     # Keep technical/drawing groups visible while working.
                     child.setItemVisibilityChecked(True)
                 else:
-                    child.setItemVisibilityChecked(bool(selected_names) and child_name in selected_names)
+                    child.setItemVisibilityChecked(
+                        (bool(selected_names) and child_name in selected_names)
+                        or child_name in locked_names
+                    )
             except Exception:
                 pass
 
@@ -138,30 +153,26 @@ class CatalogGroupMixin:
                 group = by_name.get(group_name)
                 if not group or not group.get("timeslice_ids"):
                     continue
-                item = QListWidgetItem()
-                item.setText(group_name)
+                item = QListWidgetItem(group_name)
+                # Force a regular (non-bold) item font regardless of inherited styles.
+                item_font = QFont()
+                item_font.setBold(False)
+                item_font.setPointSize(9)
+                item.setFont(item_font)
                 item.setData(Qt.UserRole, group.get("id"))
                 item.setData(Qt.UserRole + 1, group_name)
                 self.dlg.groupListWidget.addItem(item)
-                # build composite widget with pin button if mixin provides builder
+                # Build custom row widget when available.
                 try:
-                    pinned = False
-                    if hasattr(self, "_is_group_pinned_in_catalog"):
-                        pinned = bool(self._is_group_pinned_in_catalog(group.get("id")))
                     if hasattr(self, "_build_group_list_item"):
-                        widget = self._build_group_list_item(group_name, group.get("id"), pinned=pinned)
+                        widget = self._build_group_list_item(group_name, group.get("id"))
                         self.dlg.groupListWidget.setItemWidget(item, widget)
-                        # wire pin button
-                        try:
-                            pin_btn = widget.findChild(QPushButton, "pinButton")
-                            if pin_btn is not None:
-                                pin_btn.toggled.connect(lambda checked, gid=group.get("id"): self._on_group_pin_toggled(gid, checked))
-                        except Exception:
-                            pass
                 except Exception:
-                    # fall back to simple text-only item
+                    # Fall back to simple text-only item.
                     pass
+            self._prune_group_raster_locks()
             self._restore_group_selection_from_settings(trigger_update=True)
+            self._sync_raster_lock_flag_for_current_group()
         except Exception as e:
             QMessageBox.critical(self.dlg, "Error", f"Error while loading plugin groups: {e}")
 
@@ -274,10 +285,15 @@ class CatalogGroupMixin:
             return
         selected_items = self.dlg.groupListWidget.selectedItems()
         if not selected_items:
+            has_locked_groups = bool(self._group_raster_lock_map())
             self.dlg.rasterListWidget.clear()
-            self._set_name_raster_label(None)
+            if not has_locked_groups:
+                self._set_name_raster_label(None)
             self._update_navigation_controls(0)
             self._sync_qgis_group_visibility_with_selection()
+            if has_locked_groups:
+                self.update_visibility_with_dial(int(self.dlg.Dial.value()))
+            self._sync_raster_lock_flag_for_current_group()
             if hasattr(self, "_save_ui_settings"):
                 self._save_ui_settings()
             return
@@ -291,6 +307,140 @@ class CatalogGroupMixin:
         self.load_raster(show_message=False)
         self._sync_qgis_group_visibility_with_selection()
         self.update_visibility_with_dial(nav_value)
+        self._sync_raster_lock_flag_for_current_group()
+        if hasattr(self, "_save_ui_settings"):
+            self._save_ui_settings()
+
+    def _group_raster_lock_map(self):
+        lock_map = getattr(self, "_locked_group_raster_sources", None)
+        if not isinstance(lock_map, dict):
+            lock_map = {}
+            self._locked_group_raster_sources = lock_map
+        return lock_map
+
+    def _group_list_item_by_id(self, group_id):
+        gid = str(group_id or "").strip()
+        if not gid or self.dlg is None or not hasattr(self.dlg, "groupListWidget"):
+            return None
+        for idx in range(self.dlg.groupListWidget.count()):
+            item = self.dlg.groupListWidget.item(idx)
+            if item is None:
+                continue
+            if str(item.data(Qt.UserRole) or "").strip() == gid:
+                return item
+        return None
+
+    def _prune_group_raster_locks(self):
+        if self.dlg is None or not hasattr(self.dlg, "groupListWidget"):
+            return
+        lock_map = self._group_raster_lock_map()
+        valid_group_ids = set()
+        for idx in range(self.dlg.groupListWidget.count()):
+            item = self.dlg.groupListWidget.item(idx)
+            gid = str(item.data(Qt.UserRole) or "").strip() if item is not None else ""
+            if gid:
+                valid_group_ids.add(gid)
+        for gid in list(lock_map.keys()):
+            if gid not in valid_group_ids:
+                lock_map.pop(gid, None)
+
+    def _set_raster_lock_checkbox_state(self, enabled, checked):
+        checkbox = getattr(self, "raster_lock_flag_checkbox", None)
+        if checkbox is None:
+            return
+        checkbox.blockSignals(True)
+        checkbox.setEnabled(bool(enabled))
+        checkbox.setChecked(bool(checked))
+        checkbox.blockSignals(False)
+
+    def _sync_raster_lock_flag_for_current_group(self, *_args):
+        checkbox = getattr(self, "raster_lock_flag_checkbox", None)
+        if checkbox is None:
+            return
+        if self.dlg is None or not hasattr(self.dlg, "groupListWidget"):
+            self._set_raster_lock_checkbox_state(False, False)
+            return
+
+        current_item = self.dlg.groupListWidget.currentItem()
+        if current_item is None or not current_item.isSelected():
+            self._set_raster_lock_checkbox_state(False, False)
+            return
+
+        group_id = str(current_item.data(Qt.UserRole) or "").strip()
+        if not group_id:
+            self._set_raster_lock_checkbox_state(False, False)
+            return
+
+        lock_map = self._group_raster_lock_map()
+        is_locked = bool(str(lock_map.get(group_id) or "").strip())
+        self._set_raster_lock_checkbox_state(True, is_locked)
+
+    def _selected_group_raster_nodes(self, group_name):
+        group = self._get_or_create_plugin_qgis_group(group_name)
+        return [
+            child for child in group.children()
+            if isinstance(child, QgsLayerTreeLayer) and isinstance(child.layer(), QgsRasterLayer)
+        ]
+
+    def _current_visible_raster_source_for_group_item(self, group_item):
+        if group_item is None or self.dlg is None:
+            return ""
+        group_name = str(group_item.text() or "").strip()
+        if not group_name:
+            return ""
+
+        raster_nodes = self._selected_group_raster_nodes(group_name)
+        if not raster_nodes:
+            return ""
+
+        visible_index = None
+        for idx, node in enumerate(raster_nodes):
+            try:
+                if bool(node.itemVisibilityChecked()):
+                    visible_index = idx
+                    break
+            except Exception:
+                continue
+
+        if visible_index is None:
+            dial_value = int(self.dlg.Dial.value()) if hasattr(self.dlg, "Dial") else 0
+            visible_index = max(0, min(dial_value, len(raster_nodes) - 1))
+
+        layer = raster_nodes[visible_index].layer()
+        if layer is None:
+            return ""
+        return str(layer.source() or "").strip()
+
+    def _on_raster_lock_flag_toggled(self, checked):
+        if self.dlg is None or not hasattr(self.dlg, "groupListWidget"):
+            return
+        current_item = self.dlg.groupListWidget.currentItem()
+        if current_item is None or not current_item.isSelected():
+            self._set_raster_lock_checkbox_state(False, False)
+            return
+
+        group_id = str(current_item.data(Qt.UserRole) or "").strip()
+        if not group_id:
+            self._set_raster_lock_checkbox_state(False, False)
+            return
+
+        lock_map = self._group_raster_lock_map()
+        if checked:
+            source = self._current_visible_raster_source_for_group_item(current_item)
+            if not source:
+                self._set_raster_lock_checkbox_state(True, False)
+                QMessageBox.warning(
+                    self.dlg,
+                    "Lock raster",
+                    "No visible raster found for the active group.",
+                )
+                return
+            lock_map[group_id] = source
+        else:
+            lock_map.pop(group_id, None)
+
+        self.update_visibility_with_dial(int(self.dlg.Dial.value()))
+        self._sync_raster_lock_flag_for_current_group()
         if hasattr(self, "_save_ui_settings"):
             self._save_ui_settings()
 
@@ -395,48 +545,74 @@ class CatalogGroupMixin:
             return
         # ─────────────────────────────────────────────────────────────────
 
-        selected_group_items = self.dlg.groupListWidget.selectedItems()
-        if not selected_group_items:
+        selected_group_items = list(self.dlg.groupListWidget.selectedItems())
+        self._prune_group_raster_locks()
+        lock_map = self._group_raster_lock_map()
+        target_group_items = list(selected_group_items)
+        seen_group_ids = {
+            str(item.data(Qt.UserRole) or "").strip()
+            for item in selected_group_items
+            if item is not None
+        }
+        for gid, locked_source in lock_map.items():
+            if not str(locked_source or "").strip():
+                continue
+            item = self._group_list_item_by_id(gid)
+            if item is None:
+                continue
+            gid_txt = str(item.data(Qt.UserRole) or "").strip()
+            if gid_txt in seen_group_ids:
+                continue
+            target_group_items.append(item)
+            seen_group_ids.add(gid_txt)
+
+        if not target_group_items:
+            if lock_map:
+                self._render_name_raster_lines([])
+                return
             QMessageBox.warning(self.dlg, "Error", "Select at least one group before using the dial.")
             return
-
-        # Ensure pinned groups remain visible and are not toggled by the dial
-        try:
-            pinned = set(self._pinned_group_names()) if hasattr(self, "_pinned_group_names") else set()
-            for pname in pinned:
-                # if pinned group is currently selected, leave it to the dial logic
-                if any((it.text() or "").strip() == pname for it in selected_group_items):
-                    continue
-                group_node = self._get_or_create_plugin_qgis_group(pname)
-                for child in group_node.children():
-                    if isinstance(child, QgsLayerTreeLayer):
-                        child.setItemVisibilityChecked(True)
-        except Exception:
-            pass
 
         self._sync_qgis_group_visibility_with_selection()
         self._update_navigation_controls(value)
         value = self.dlg.Dial.value()
 
+        stale_lock_found = False
         parts_for_label = []
-        for group_item in selected_group_items:
+        for group_item in target_group_items:
+            group_id = str(group_item.data(Qt.UserRole) or "").strip()
             group_name = group_item.text().strip()
-            group = self._get_or_create_plugin_qgis_group(group_name)
-            raster_nodes = [
-                child for child in group.children()
-                if isinstance(child, QgsLayerTreeLayer) and isinstance(child.layer(), QgsRasterLayer)
-            ]
+            raster_nodes = self._selected_group_raster_nodes(group_name)
             if not raster_nodes:
                 continue
 
             index = min(value, len(raster_nodes) - 1)
+            lock_label_suffix = ""
+            locked_source = str(lock_map.get(group_id) or "").strip() if group_id else ""
+            if locked_source:
+                locked_index = -1
+                for idx, node in enumerate(raster_nodes):
+                    layer = node.layer()
+                    if layer is not None and str(layer.source() or "").strip() == locked_source:
+                        locked_index = idx
+                        break
+                if locked_index >= 0:
+                    index = locked_index
+                    lock_label_suffix = " [LOCK]"
+                else:
+                    if group_id:
+                        lock_map.pop(group_id, None)
+                    stale_lock_found = True
+
             for i, node in enumerate(raster_nodes):
                 node.setItemVisibilityChecked(i == index)
 
             visible_raster_name = raster_nodes[index].layer().name()
-            parts_for_label.append(f"[{group_name}] {visible_raster_name}")
+            parts_for_label.append(f"[{group_name}] {visible_raster_name}{lock_label_suffix}")
 
         self._render_name_raster_lines(parts_for_label)
+        if stale_lock_found:
+            self._sync_raster_lock_flag_for_current_group()
 
     def zoom_to_selected_groups(self):
         selected_group_items = self.dlg.groupListWidget.selectedItems()

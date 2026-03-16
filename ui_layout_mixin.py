@@ -16,6 +16,7 @@ from qgis.PyQt.QtWidgets import (
     QRadioButton,
     QSpinBox,
     QButtonGroup,
+    QCheckBox,
 )
 from qgis.core import QgsApplication, QgsLayerTreeLayer, QgsRasterLayer
 
@@ -33,6 +34,8 @@ class UiLayoutMixin:
         self.tools_panel_layout = None
         self.bottom_controls_widget = None
         self.left_nav_widget = None
+        self.raster_lock_flag_checkbox = None
+        self._locked_group_raster_sources = {}
         self.group_tools_label = None
         self.image_tools_label = None
         self.load_groups_button = None
@@ -612,6 +615,11 @@ class UiLayoutMixin:
             nav_layout.setSpacing(6)
             nav_layout.addWidget(self.dlg.dial2, 0, Qt.AlignHCenter)
             nav_layout.addWidget(self.dlg.Dial)
+            if self.raster_lock_flag_checkbox is None:
+                self.raster_lock_flag_checkbox = QCheckBox("Lock current raster", nav_widget)
+                self.raster_lock_flag_checkbox.setChecked(False)
+                self.raster_lock_flag_checkbox.setEnabled(False)
+            nav_layout.addWidget(self.raster_lock_flag_checkbox, 0, Qt.AlignHCenter)
             self.left_nav_widget = nav_widget
 
         if hasattr(self.dlg, "verticalLayout_3"):
@@ -833,9 +841,11 @@ class UiLayoutMixin:
             self.dlg.widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
         if self.left_nav_widget is not None:
-            self.left_nav_widget.setMinimumHeight(116)
-            self.left_nav_widget.setMaximumHeight(136)
+            self.left_nav_widget.setMinimumHeight(134)
+            self.left_nav_widget.setMaximumHeight(168)
             self.left_nav_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        if self.raster_lock_flag_checkbox is not None:
+            self.raster_lock_flag_checkbox.setStyleSheet(label_style)
 
         if hasattr(self.dlg, "line"):
             self.dlg.line.setFixedWidth(2)
