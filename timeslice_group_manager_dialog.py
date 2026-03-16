@@ -27,6 +27,7 @@ from qgis.core import QgsCoordinateReferenceSystem
 
 from .project_catalog import load_catalog, save_catalog, sanitize_filename, create_raster_group
 from .timeslice_group_table_models import TimesliceTableModel, GroupTableModel
+from .unassigned_timeslices_dialog import UnassignedTimeslicesDialog
 
 
 class TimesliceGroupManagerDialog(QDialog):
@@ -1019,3 +1020,35 @@ class TimesliceGroupManagerDialog(QDialog):
                 "Time-slice Manager",
                 f"Unable to open 3D/Radargram Editor:\n{e}",
             )
+
+    def _verify_unassigned_clicked(self):
+        # Collect candidate unassigned / no-CRS time-slices and show the management dialog
+        catalog = self._catalog or load_catalog(self.project_root)
+        membership = self._timeslice_membership_map()
+
+        tids = set()
+        # Include explicit built-in groups if present
+        imported = next((g for g in catalog.get("raster_groups", []) if g.get("id") == "grp_imported"), None)
+        no_crs = next((g for g in catalog.get("raster_groups", []) if g.get("id") == "grp_no_crs"), None)
+        if imported:
+            tids.update(imported.get("timeslice_ids", []))
+        if no_crs:
+            tids.update(no_crs.get("timeslice_ids", []))
+
+        # Add timeslices that have no group membership
+        for rec in catalog.get("timeslices", []):
+            tid = rec.get("id")
+            grp_names = membership.get(tid, [])
+            if not grp_names:
+                tids.add(tid)
+            # also include timeslices missing a CRS
+            if not rec.get("crs"):
+                tids.add(tid)
+
+        rows = [self._timeslice_record_by_id(tid) for tid in tids if self._timeslice_record_by_id(tid) is not None]
+        if not rows:
+            QMessageBox.information(self, "Verify Unassigned", "No unassigned or no-CRS time-slices found.")
+            return
+
+        dlg = UnassignedTimeslicesDialog(self.project_root, rows, parent=self)
+        dlg.exec_()

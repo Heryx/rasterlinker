@@ -19,7 +19,8 @@ PROJECT_FOLDERS = (
     "exports",
     "metadata",
 )
-CATALOG_VERSION = 4
+# Bump to 5 to enable v4->v5 migration (Unassigned / grp_no_crs / system flags)
+CATALOG_VERSION = 5
 # Legacy alias kept for backward compatibility with older code/sidecars.
 CATALOG_SCHEMA_VERSION = CATALOG_VERSION
 SURFER_GRID_EXTENSIONS = (".grd", ".gsag", ".gsbg")
