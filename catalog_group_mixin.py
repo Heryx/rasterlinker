@@ -5,8 +5,9 @@ from qgis.PyQt.QtWidgets import (
     QApplication,
     QFileDialog,
     QInputDialog,
-    QListWidgetItem,
+        QListWidgetItem,
     QMessageBox,
+        QPushButton,
     QProgressDialog,
 )
 from qgis.core import (
@@ -137,9 +138,29 @@ class CatalogGroupMixin:
                 group = by_name.get(group_name)
                 if not group or not group.get("timeslice_ids"):
                     continue
-                item = QListWidgetItem(group_name)
+                item = QListWidgetItem()
+                item.setText(group_name)
                 item.setData(Qt.UserRole, group.get("id"))
+                item.setData(Qt.UserRole + 1, group_name)
                 self.dlg.groupListWidget.addItem(item)
+                # build composite widget with pin button if mixin provides builder
+                try:
+                    pinned = False
+                    if hasattr(self, "_is_group_pinned_in_catalog"):
+                        pinned = bool(self._is_group_pinned_in_catalog(group.get("id")))
+                    if hasattr(self, "_build_group_list_item"):
+                        widget = self._build_group_list_item(group_name, group.get("id"), pinned=pinned)
+                        self.dlg.groupListWidget.setItemWidget(item, widget)
+                        # wire pin button
+                        try:
+                            pin_btn = widget.findChild(QPushButton, "pinButton")
+                            if pin_btn is not None:
+                                pin_btn.toggled.connect(lambda checked, gid=group.get("id"): self._on_group_pin_toggled(gid, checked))
+                        except Exception:
+                            pass
+                except Exception:
+                    # fall back to simple text-only item
+                    pass
             self._restore_group_selection_from_settings(trigger_update=True)
         except Exception as e:
             QMessageBox.critical(self.dlg, "Error", f"Error while loading plugin groups: {e}")
@@ -378,6 +399,20 @@ class CatalogGroupMixin:
         if not selected_group_items:
             QMessageBox.warning(self.dlg, "Error", "Select at least one group before using the dial.")
             return
+
+        # Ensure pinned groups remain visible and are not toggled by the dial
+        try:
+            pinned = set(self._pinned_group_names()) if hasattr(self, "_pinned_group_names") else set()
+            for pname in pinned:
+                # if pinned group is currently selected, leave it to the dial logic
+                if any((it.text() or "").strip() == pname for it in selected_group_items):
+                    continue
+                group_node = self._get_or_create_plugin_qgis_group(pname)
+                for child in group_node.children():
+                    if isinstance(child, QgsLayerTreeLayer):
+                        child.setItemVisibilityChecked(True)
+        except Exception:
+            pass
 
         self._sync_qgis_group_visibility_with_selection()
         self._update_navigation_controls(value)

@@ -674,6 +674,7 @@ def normalize_raster_group_record(rec):
     rec.setdefault("name", "Group")
     rec.setdefault("radargram_ids", [])
     rec.setdefault("timeslice_ids", [])
+    rec.setdefault("pinned", False)
     rec.setdefault("style_qml_path", "")
     rec["radargram_ids"] = [v for v in rec.get("radargram_ids", []) if v]
     rec["timeslice_ids"] = [v for v in rec.get("timeslice_ids", []) if v]

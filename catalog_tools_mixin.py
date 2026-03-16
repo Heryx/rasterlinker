@@ -5,7 +5,7 @@ import tempfile
 
 from qgis.PyQt.QtCore import Qt, QVariant, QSizeF
 from qgis.PyQt.QtGui import QColor, QFont, QImage, QPainter, QPdfWriter
-from qgis.PyQt.QtWidgets import QFileDialog, QInputDialog, QMessageBox
+from qgis.PyQt.QtWidgets import QFileDialog, QInputDialog, QMessageBox, QWidget, QHBoxLayout, QLabel, QPushButton, QSize
 from qgis.core import (
     QgsContrastEnhancement,
     QgsCoordinateTransform,
@@ -1248,8 +1248,10 @@ class CatalogToolsMixin:
         by_name = self._catalog_groups_by_name(project_root)
         selected = [name for name in group_names if name in by_name]
 
+        # Respect pinned groups: do not remove pinned groups when deselected
+        pinned = set(self._pinned_group_names())
         for existing in self._visible_plugin_group_names():
-            if existing not in selected:
+            if existing not in selected and existing not in pinned:
                 self._remove_plugin_qgis_group(existing)
 
         for name in selected:
@@ -1259,6 +1261,118 @@ class CatalogToolsMixin:
         if self.dlg.groupListWidget.count() > 0:
             self.dlg.groupListWidget.setCurrentRow(0)
         self.load_raster(show_message=False)
+
+    def _is_group_pinned_in_catalog(self, group_id):
+        project_root = self._require_project_root()
+        if not project_root:
+            return False
+        catalog = load_catalog(project_root)
+        for grp in catalog.get("raster_groups", []) or []:
+            if grp.get("id") == group_id:
+                return bool(grp.get("pinned", False))
+        return False
+
+    def _pinned_group_names(self):
+        """Return group names that are pinned according to the UI widgets (or catalog fallback)."""
+        if self.dlg is None or not hasattr(self.dlg, "groupListWidget"):
+            return []
+        result = []
+        lw = self.dlg.groupListWidget
+        for i in range(lw.count()):
+            item = lw.item(i)
+            if item is None:
+                continue
+            widget = lw.itemWidget(item)
+            if widget is None:
+                # fallback to catalog-stored flag
+                gid = str(item.data(Qt.UserRole) or "").strip()
+                if gid and self._is_group_pinned_in_catalog(gid):
+                    result.append(str(item.data(Qt.UserRole + 1) or "").strip())
+                continue
+            pin_btn = widget.findChild(QPushButton, "pinButton")
+            if pin_btn is not None and getattr(pin_btn, "isChecked", lambda: False)():
+                name = str(item.data(Qt.UserRole + 1) or "").strip()
+                if name:
+                    result.append(name)
+        return result
+
+    def _build_group_list_item(self, group_name, group_id, pinned=False):
+        item_widget = QWidget()
+        row_layout = QHBoxLayout(item_widget)
+        row_layout.setContentsMargins(4, 1, 4, 1)
+        row_layout.setSpacing(4)
+
+        name_label = QLabel(group_name)
+        name_label.setStyleSheet("font-size: 9pt;")
+        row_layout.addWidget(name_label, 1)
+
+        pin_btn = QPushButton("📌")
+        pin_btn.setObjectName("pinButton")
+        pin_btn.setCheckable(True)
+        pin_btn.setChecked(bool(pinned))
+        pin_btn.setFixedSize(22, 22)
+        pin_btn.setToolTip("Keep this group always visible (not controlled by dial or selection)")
+        pin_btn.setStyleSheet(
+            "QPushButton { border: none; background: transparent; font-size: 11pt; }"
+            "QPushButton:checked { color: #e87f00; }"
+            "QPushButton:unchecked { color: #aaaaaa; }"
+        )
+        # connect will be done from populate_group_list to capture correct group_id context
+        row_layout.addWidget(pin_btn)
+
+        item_widget.setProperty("group_name", group_name)
+        return item_widget
+
+    def _on_group_pin_toggled(self, group_id, is_pinned):
+        project_root = self._require_project_root()
+        if not project_root:
+            return
+        try:
+            update_raster_group(project_root, group_id, {"pinned": bool(is_pinned)})
+        except Exception:
+            # fallback: load and save catalog
+            catalog = load_catalog(project_root)
+            for grp in catalog.get("raster_groups", []) or []:
+                if grp.get("id") == group_id:
+                    grp["pinned"] = bool(is_pinned)
+            from .project_catalog import save_catalog
+            try:
+                save_catalog(project_root, catalog)
+            except Exception:
+                pass
+
+        # visible behavior
+        if is_pinned:
+            try:
+                name = None
+                # try to find an item with this id to get name
+                if self.dlg is not None and hasattr(self.dlg, "groupListWidget"):
+                    for i in range(self.dlg.groupListWidget.count()):
+                        it = self.dlg.groupListWidget.item(i)
+                        if it is not None and str(it.data(Qt.UserRole) or "") == str(group_id):
+                            name = str(it.data(Qt.UserRole + 1) or "").strip() or str(it.text() or "").strip()
+                            break
+                if name:
+                    self._get_or_create_plugin_qgis_group(name)
+                    self.load_raster(show_message=False)
+            except Exception:
+                pass
+        else:
+            try:
+                # if not selected, remove group from layer tree
+                sel = set(self._selected_group_names())
+                # find name by id
+                name = None
+                if self.dlg is not None and hasattr(self.dlg, "groupListWidget"):
+                    for i in range(self.dlg.groupListWidget.count()):
+                        it = self.dlg.groupListWidget.item(i)
+                        if it is not None and str(it.data(Qt.UserRole) or "") == str(group_id):
+                            name = str(it.data(Qt.UserRole + 1) or "").strip() or str(it.text() or "").strip()
+                            break
+                if name and name not in sel:
+                    self._remove_plugin_qgis_group(name)
+            except Exception:
+                pass
 
     def open_group_import_dialog(self):
         project_root = self._require_project_root()
