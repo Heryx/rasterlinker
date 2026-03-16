@@ -1504,11 +1504,14 @@ class CatalogToolsMixin:
             return False
         if float(maximum) <= float(minimum):
             return False
+        if contrast_algorithm is None:
+            contrast_algorithm = QgsContrastEnhancement.StretchToMinimumMaximum
 
         renderer = layer.renderer()
         if renderer is None:
             return False
         applied = False
+        provider = layer.dataProvider()
         try:
             if hasattr(renderer, "setClassificationMin"):
                 renderer.setClassificationMin(float(minimum))
@@ -1517,16 +1520,63 @@ class CatalogToolsMixin:
                 renderer.setClassificationMax(float(maximum))
                 applied = True
             if hasattr(renderer, "contrastEnhancement"):
-                    ce = renderer.contrastEnhancement()
-                    if ce is not None:
-                        ce.setMinimumValue(float(minimum))
-                        ce.setMaximumValue(float(maximum))
-                        ce.setContrastEnhancementAlgorithm(contrast_algorithm, True)
-                        applied = True
+                ce = renderer.contrastEnhancement()
+                if ce is not None:
+                    ce.setMinimumValue(float(minimum))
+                    ce.setMaximumValue(float(maximum))
+                    ce.setContrastEnhancementAlgorithm(contrast_algorithm, True)
+                    applied = True
+
+            # Multiband RGB renderers often keep separate contrast enhancements.
+            rgb_defs = (
+                ("redBand", "redContrastEnhancement", "setRedContrastEnhancement"),
+                ("greenBand", "greenContrastEnhancement", "setGreenContrastEnhancement"),
+                ("blueBand", "blueContrastEnhancement", "setBlueContrastEnhancement"),
+            )
+            for band_getter_name, ce_getter_name, ce_setter_name in rgb_defs:
+                if not hasattr(renderer, band_getter_name) or not hasattr(renderer, ce_getter_name):
+                    continue
+                try:
+                    band_idx = int(getattr(renderer, band_getter_name)())
+                except Exception:
+                    continue
+                if band_idx <= 0:
+                    continue
+
+                mn_band = float(minimum)
+                mx_band = float(maximum)
+                if provider is not None:
+                    try:
+                        stats = provider.bandStatistics(
+                            band_idx,
+                            QgsRasterBandStats.Min | QgsRasterBandStats.Max,
+                        )
+                        if float(stats.maximumValue) > float(stats.minimumValue):
+                            mn_band = float(stats.minimumValue)
+                            mx_band = float(stats.maximumValue)
+                    except Exception:
+                        pass
+
+                ce = getattr(renderer, ce_getter_name)()
+                if ce is None:
+                    continue
+                ce.setMinimumValue(mn_band)
+                ce.setMaximumValue(mx_band)
+                ce.setContrastEnhancementAlgorithm(contrast_algorithm, True)
+                setter = getattr(renderer, ce_setter_name, None)
+                if callable(setter):
+                    setter(ce)
+                applied = True
+
             if applied:
                 layer.triggerRepaint()
             return applied
-        except Exception:
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"_apply_value_range_to_layer error on {layer.name() if layer is not None else 'Unknown'}: {e}",
+                "GeoSurvey Studio",
+                level=Qgis.Warning,
+            )
             return False
 
     def _range_contains_zero(self, rng):
@@ -1592,7 +1642,7 @@ class CatalogToolsMixin:
 
     def enhance_batch_options(self):
         # Legge il tipo di enhancement dalla combo UI
-        mode_combo = getattr(self, "enhance_contrast_mode_combo", None)
+        mode_combo = getattr(self, "enhance_contrast_mode_combo", None) or getattr(self, "enhance_contrast_combo", None)
         mode = str(mode_combo.currentText()).strip() if mode_combo is not None else "Stretch to Min/Max"
 
         # Legge il radio attivo per determinare i valori di Min/Max
@@ -1601,12 +1651,18 @@ class CatalogToolsMixin:
         radio_stddev = getattr(self, "enhance_radio_stddev", None)
 
         accuracy_combo = getattr(self, "enhance_accuracy_combo", None)
-        use_estimated = True
-        if accuracy_combo is not None:
-            use_estimated = str(accuracy_combo.currentText()).lower().startswith("estimated")
+        accuracy_label = str(accuracy_combo.currentText()).strip().lower() if accuracy_combo is not None else "estimated"
+        sample_size = 0 if "actual" in accuracy_label else 25000
+        extent_combo = getattr(self, "enhance_extent_combo", None)
+        extent_label = str(extent_combo.currentText()).strip().lower() if extent_combo is not None else "whole raster"
+        use_canvas_extent = "current canvas" in extent_label or "updated canvas" in extent_label
+        canvas_extent = None
+        if use_canvas_extent and self.iface is not None and self.iface.mapCanvas() is not None:
+            try:
+                canvas_extent = self.iface.mapCanvas().extent()
+            except Exception:
+                canvas_extent = None
 
-        # Legge il tipo di enhancement dal QGIS enum corretto
-        from qgis.core import QgsContrastEnhancement, QgsRasterMinMaxOrigin
         enhancement_algorithm_map = {
             "Stretch to Min/Max": QgsContrastEnhancement.StretchToMinimumMaximum,
             "Stretch and Clip to Min/Max": QgsContrastEnhancement.StretchAndClipToMinimumMaximum,
@@ -1614,6 +1670,51 @@ class CatalogToolsMixin:
             "No Enhancement": QgsContrastEnhancement.NoEnhancement,
         }
         enhancement_algorithm = enhancement_algorithm_map.get(mode, QgsContrastEnhancement.StretchToMinimumMaximum)
+
+        def _read_stats(provider, flags):
+            extent = canvas_extent if canvas_extent is not None else QgsRectangle()
+            try:
+                return provider.bandStatistics(1, flags, extent, sample_size)
+            except TypeError:
+                try:
+                    return provider.bandStatistics(1, flags, extent)
+                except TypeError:
+                    return provider.bandStatistics(1, flags)
+            except Exception:
+                return None
+
+        def _apply_algorithm_only(layer):
+            renderer = layer.renderer()
+            if renderer is None:
+                return False
+            changed = False
+            try:
+                if hasattr(renderer, "contrastEnhancement"):
+                    ce = renderer.contrastEnhancement()
+                    if ce is not None:
+                        ce.setContrastEnhancementAlgorithm(enhancement_algorithm, True)
+                        changed = True
+                rgb_defs = (
+                    ("redContrastEnhancement", "setRedContrastEnhancement"),
+                    ("greenContrastEnhancement", "setGreenContrastEnhancement"),
+                    ("blueContrastEnhancement", "setBlueContrastEnhancement"),
+                )
+                for getter_name, setter_name in rgb_defs:
+                    if not hasattr(renderer, getter_name):
+                        continue
+                    ce = getattr(renderer, getter_name)()
+                    if ce is None:
+                        continue
+                    ce.setContrastEnhancementAlgorithm(enhancement_algorithm, True)
+                    setter = getattr(renderer, setter_name, None)
+                    if callable(setter):
+                        setter(ce)
+                    changed = True
+            except Exception:
+                return False
+            if changed:
+                layer.triggerRepaint()
+            return changed
 
         nodata_options = ["Keep current NoData", "Disable NoData=0"]
         nodata_mode, nodata_ok = QInputDialog.getItem(
@@ -1643,7 +1744,13 @@ class CatalogToolsMixin:
             if provider is None:
                 continue
 
-            if enhancement_algorithm != QgsContrastEnhancement.NoEnhancement:
+            if enhancement_algorithm == QgsContrastEnhancement.NoEnhancement:
+                try:
+                    if _apply_algorithm_only(layer):
+                        enhanced += 1
+                except Exception:
+                    pass
+            else:
                 try:
                     # Calcola mn/mx in base al radio selezionato
                     if radio_user is not None and radio_user.isChecked():
@@ -1652,41 +1759,34 @@ class CatalogToolsMixin:
                     elif radio_cumul is not None and radio_cumul.isChecked():
                         pct_lo = float(self.enhance_cumulative_min_spin.value()) / 100.0
                         pct_hi = float(self.enhance_cumulative_max_spin.value()) / 100.0
-                        stats = provider.bandStatistics(
-                            1, QgsRasterBandStats.Min | QgsRasterBandStats.Max
-                        )
+                        stats = _read_stats(provider, QgsRasterBandStats.Min | QgsRasterBandStats.Max)
+                        if stats is None:
+                            continue
                         span = float(stats.maximumValue) - float(stats.minimumValue)
                         mn = float(stats.minimumValue) + pct_lo * span
                         mx = float(stats.minimumValue) + pct_hi * span
                     elif radio_stddev is not None and radio_stddev.isChecked():
                         factor = float(self.enhance_stddev_factor_spin.value())
-                        stats = provider.bandStatistics(
-                            1, QgsRasterBandStats.Mean | QgsRasterBandStats.StdDev
-                        )
+                        stats = _read_stats(provider, QgsRasterBandStats.Mean | QgsRasterBandStats.StdDev)
+                        if stats is None:
+                            continue
                         mn = float(stats.mean) - factor * float(stats.stdDev)
                         mx = float(stats.mean) + factor * float(stats.stdDev)
                     else:
                         # Default: Min/Max reale
-                        stats = provider.bandStatistics(
-                            1, QgsRasterBandStats.Min | QgsRasterBandStats.Max
-                        )
+                        stats = _read_stats(provider, QgsRasterBandStats.Min | QgsRasterBandStats.Max)
+                        if stats is None:
+                            continue
                         mn = float(stats.minimumValue)
                         mx = float(stats.maximumValue)
 
-                    if mx > mn:
-                        renderer = layer.renderer()
-                        if renderer is not None:
-                            ce = renderer.contrastEnhancement() if hasattr(renderer, "contrastEnhancement") else None
-                            if ce is not None:
-                                ce.setMinimumValue(mn)
-                                ce.setMaximumValue(mx)
-                                ce.setContrastEnhancementAlgorithm(enhancement_algorithm, True)
-                            if hasattr(renderer, "setClassificationMin"):
-                                renderer.setClassificationMin(mn)
-                            if hasattr(renderer, "setClassificationMax"):
-                                renderer.setClassificationMax(mx)
-                            layer.triggerRepaint()
-                            enhanced += 1
+                    if self._apply_value_range_to_layer(
+                        layer,
+                        mn,
+                        mx,
+                        contrast_algorithm=enhancement_algorithm,
+                    ):
+                        enhanced += 1
                 except Exception:
                     pass
 
