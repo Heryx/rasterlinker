@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+tmp_proj_*/
+tmp_test_project/
 
 # Auto-generated Qt resources - regenerate with: make resources
 resources.py
