@@ -315,6 +315,15 @@ class UiLayoutMixin:
         self.enhance_stddev_factor_spin.setValue(2.0)
         settings_layout.addWidget(self.enhance_stddev_factor_spin, 3, 1, 1, 1)
 
+        self.enhance_radio_button_group = QButtonGroup(self.enhance_minmax_settings_group)
+        self.enhance_radio_button_group.setExclusive(True)
+        self.enhance_radio_button_group.addButton(self.enhance_radio_user_defined, 0)
+        self.enhance_radio_button_group.addButton(self.enhance_radio_cumulative, 1)
+        self.enhance_radio_button_group.addButton(self.enhance_radio_minmax, 2)
+        self.enhance_radio_button_group.addButton(self.enhance_radio_stddev, 3)
+        self.enhance_radio_button_group.buttonClicked.connect(self._on_enhance_radio_changed)
+        self._on_enhance_radio_changed(self.enhance_radio_minmax)
+
         # Extent Statistics
         settings_layout.addWidget(QLabel("Statistics Extent", self.enhance_minmax_settings_group), 4, 0, 1, 1)
         self.enhance_extent_combo = QComboBox(self.enhance_minmax_settings_group)
@@ -493,8 +502,9 @@ class UiLayoutMixin:
             if w is not None:
                 w.setEnabled(radio_id == 1)
         # StdDev (3): enable stddev spin
-        if self.enhance_stddev_spin is not None:
-            self.enhance_stddev_spin.setEnabled(radio_id == 3)
+        std_spin = getattr(self, "enhance_stddev_factor_spin", None) or getattr(self, "enhance_stddev_spin", None)
+        if std_spin is not None:
+            std_spin.setEnabled(radio_id == 3)
 
     def _on_export_page_size_changed(self, value):
         is_custom = str(value or "").strip().lower() == "custom"
@@ -838,7 +848,7 @@ class UiLayoutMixin:
                 enhance_widget.setStyleSheet("font-size: 9pt; padding: 1px 3px;")
 
         for radio in (
-            getattr(self, "enhance_radio_user", None),
+            getattr(self, "enhance_radio_user_defined", None),
             getattr(self, "enhance_radio_cumulative", None),
             getattr(self, "enhance_radio_minmax", None),
             getattr(self, "enhance_radio_stddev", None),

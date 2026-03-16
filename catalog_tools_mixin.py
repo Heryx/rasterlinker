@@ -1156,9 +1156,89 @@ class CatalogToolsMixin:
                 last_error = str(e)
         return False, last_error or "setContrastEnhancement failed for all signatures."
 
-    def _refresh_pseudocolor_renderer(self, renderer, provider=None, minimum=None, maximum=None):
+    def _apply_multiband_range_safely(
+        self,
+        renderer,
+        provider,
+        minimum,
+        maximum,
+        contrast_algorithm,
+    ):
         """
-        Force pseudocolor-like renderers to rebuild classes/ramp after min/max changes.
+        Safely apply contrast range for multiband renderers.
+
+        We build fresh QgsContrastEnhancement instances per RGB band and assign them
+        through renderer setters, avoiding in-place mutation of borrowed CE pointers.
+        """
+        if renderer is None:
+            return False
+
+        rgb_defs = (
+            ("redBand", "setRedContrastEnhancement"),
+            ("greenBand", "setGreenContrastEnhancement"),
+            ("blueBand", "setBlueContrastEnhancement"),
+        )
+
+        changed = False
+        for band_getter_name, ce_setter_name in rgb_defs:
+            band_getter = getattr(renderer, band_getter_name, None)
+            ce_setter = getattr(renderer, ce_setter_name, None)
+            if not callable(band_getter) or not callable(ce_setter):
+                continue
+
+            try:
+                band_idx = int(band_getter())
+            except Exception:
+                continue
+            if band_idx <= 0:
+                continue
+
+            mn_band = float(minimum)
+            mx_band = float(maximum)
+            if mx_band <= mn_band:
+                if provider is None:
+                    continue
+                try:
+                    stats = provider.bandStatistics(
+                        band_idx,
+                        QgsRasterBandStats.Min | QgsRasterBandStats.Max,
+                    )
+                    if float(stats.maximumValue) > float(stats.minimumValue):
+                        mn_band = float(stats.minimumValue)
+                        mx_band = float(stats.maximumValue)
+                    else:
+                        continue
+                except Exception:
+                    continue
+
+            try:
+                data_type = provider.dataType(band_idx) if provider is not None else 0
+                ce_new = QgsContrastEnhancement(data_type)
+                ce_new.setMinimumValue(float(mn_band))
+                ce_new.setMaximumValue(float(mx_band))
+                ce_new.setContrastEnhancementAlgorithm(contrast_algorithm, True)
+                ce_setter(ce_new)
+                changed = True
+            except Exception as e:
+                QgsMessageLog.logMessage(
+                    f"_apply_multiband_range_safely failed on band {band_idx}: {e}",
+                    "GeoSurvey Studio",
+                    level=Qgis.Warning,
+                )
+
+        return changed
+
+    def _refresh_pseudocolor_renderer(
+        self,
+        renderer,
+        provider=None,
+        minimum=None,
+        maximum=None,
+        reclassify=False,
+    ):
+        """
+        Force pseudocolor-like renderers to refresh after min/max changes.
+        When reclassify=True, classification can be recomputed from provider stats.
         """
         if renderer is None:
             return False
@@ -1210,17 +1290,30 @@ class CatalogToolsMixin:
                 if mx is not None and hasattr(shader_fn, "setMaximumValue"):
                     shader_fn.setMaximumValue(float(mx))
                     changed = True
+            if shader is not None and hasattr(renderer, "setShader"):
+                renderer.setShader(shader)
+                changed = True
         except Exception:
             pass
 
-        method_attempts = (
-            ("classifyColorRamp", ()),
-            ("classifyColorRamp", (int(band_idx),)),
-            ("classifyColorRamp", (int(band_idx), QgsRectangle())),
-            ("classify", ()),
-            ("classify", (int(band_idx),)),
-            ("updateClasses", ()),
-            ("updateColorRamp", ()),
+        method_attempts = []
+        if reclassify:
+            method_attempts.extend(
+                [
+                    ("classifyColorRamp", (int(band_idx), QgsRectangle(), provider)),
+                    ("classifyColorRamp", ()),
+                    ("classifyColorRamp", (int(band_idx),)),
+                    ("classifyColorRamp", (int(band_idx), QgsRectangle())),
+                    ("classify", (int(band_idx), QgsRectangle(), provider)),
+                    ("classify", ()),
+                    ("classify", (int(band_idx),)),
+                ]
+            )
+        method_attempts.extend(
+            [
+                ("updateClasses", ()),
+                ("updateColorRamp", ()),
+            ]
         )
         for method_name, args in method_attempts:
             method = getattr(renderer, method_name, None)
@@ -1229,11 +1322,27 @@ class CatalogToolsMixin:
             try:
                 method(*args)
                 changed = True
-                break
             except TypeError:
                 continue
             except Exception:
                 continue
+
+        refresh_method = getattr(renderer, "refresh", None)
+        if callable(refresh_method):
+            refresh_attempts = (
+                (QgsRectangle(), []),
+                (QgsRectangle(),),
+                (),
+            )
+            for args in refresh_attempts:
+                try:
+                    refresh_method(*args)
+                    changed = True
+                    break
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
 
         return changed
 
@@ -1406,15 +1515,15 @@ class CatalogToolsMixin:
                 return None
 
         def _set_algorithm_only(layer):
-            renderer = layer.renderer()
-            if renderer is None or not hasattr(renderer, "contrastEnhancement"):
-                return False
-            ce = renderer.contrastEnhancement()
-            if ce is None:
-                return False
-            ce.setContrastEnhancementAlgorithm(contrast_algorithm, True)
-            layer.triggerRepaint()
-            return True
+            ok, _err = self._apply_layer_contrast_enhancement_api(
+                layer,
+                contrast_algorithm,
+                extent=canvas_extent,
+                sample_size=sample_size,
+            )
+            if ok:
+                layer.triggerRepaint()
+            return ok
 
         selected_groups = self._selected_group_names()
         layers = []
@@ -1488,17 +1597,6 @@ class CatalogToolsMixin:
                     mn = float(stats.mean) - factor * float(stats.stdDev)
                     mx = float(stats.mean) + factor * float(stats.stdDev)
                 else:
-                    # Try layer API first (may honor provider native min/max behavior).
-                    applied_direct, _api_error = self._apply_layer_contrast_enhancement_api(
-                        layer,
-                        contrast_algorithm,
-                        extent=canvas_extent,
-                        sample_size=sample_size,
-                    )
-                    if applied_direct:
-                        enhanced += 1
-                        continue
-
                     stats = _read_stats(provider, QgsRasterBandStats.Min | QgsRasterBandStats.Max)
                     if stats is None:
                         failed.append(f"{layer_name}: cannot compute min/max stats")
@@ -1514,7 +1612,10 @@ class CatalogToolsMixin:
                 if ok:
                     enhanced += 1
                 else:
-                    failed.append(f"{layer_name}: apply failed")
+                    renderer_name = type(layer.renderer()).__name__ if layer is not None and layer.renderer() is not None else "UnknownRenderer"
+                    failed.append(
+                        f"{layer_name}: apply failed ({renderer_name}, min={mn:.6g}, max={mx:.6g})"
+                    )
             except Exception as e:
                 failed.append(f"{layer_name}: {e}")
                 QgsMessageLog.logMessage(
@@ -1535,6 +1636,13 @@ class CatalogToolsMixin:
                 "GeoSurvey Studio",
                 f"Enhance Min/Max skipped {len(failed)} layer(s). See Log Messages for details.",
             )
+            if enhanced == 0:
+                preview = "\n".join(failed[:5])
+                QMessageBox.warning(
+                    self.dlg,
+                    "Enhance Min/Max",
+                    "No layer was visually updated.\n\nFirst errors:\n" + preview,
+                )
 
     def _iter_group_raster_layers(self, group_name):
         group = self._get_or_create_plugin_qgis_group(group_name)
@@ -1567,6 +1675,11 @@ class CatalogToolsMixin:
         applied = False
         provider = layer.dataProvider()
         try:
+            is_multiband_renderer = any(
+                hasattr(renderer, attr)
+                for attr in ("redContrastEnhancement", "greenContrastEnhancement", "blueContrastEnhancement")
+            )
+
             if hasattr(renderer, "setClassificationMin"):
                 renderer.setClassificationMin(float(minimum))
                 applied = True
@@ -1578,63 +1691,69 @@ class CatalogToolsMixin:
                 provider=provider,
                 minimum=float(minimum),
                 maximum=float(maximum),
+                reclassify=False,
             ):
                 applied = True
+
+            # For multiband renderers avoid direct CE manipulation from Python:
+            # some QGIS/Qt builds can crash on CE method calls.
+            if is_multiband_renderer:
+                rgb_ok = self._apply_multiband_range_safely(
+                    renderer=renderer,
+                    provider=provider,
+                    minimum=float(minimum),
+                    maximum=float(maximum),
+                    contrast_algorithm=contrast_algorithm,
+                )
+                applied = bool(applied or rgb_ok)
+                if applied:
+                    layer.triggerRepaint()
+                    return True
+
+                renderer_name = type(renderer).__name__ if renderer is not None else "UnknownRenderer"
+                QgsMessageLog.logMessage(
+                    (
+                        f"_apply_value_range_to_layer: multiband renderer not updated for "
+                        f"{layer.name() if layer is not None else 'Unknown'} "
+                        f"(renderer={renderer_name}, min={float(minimum):.6g}, max={float(maximum):.6g})"
+                    ),
+                    "GeoSurvey Studio",
+                    level=Qgis.Warning,
+                )
+                return False
+
             if hasattr(renderer, "contrastEnhancement"):
                 ce = renderer.contrastEnhancement()
                 if ce is not None:
                     ce.setMinimumValue(float(minimum))
                     ce.setMaximumValue(float(maximum))
-                    ce.setContrastEnhancementAlgorithm(contrast_algorithm, True)
-                    applied = True
-
-            # Multiband RGB renderers often keep separate contrast enhancements.
-            rgb_defs = (
-                ("redBand", "redContrastEnhancement", "setRedContrastEnhancement"),
-                ("greenBand", "greenContrastEnhancement", "setGreenContrastEnhancement"),
-                ("blueBand", "blueContrastEnhancement", "setBlueContrastEnhancement"),
-            )
-            for band_getter_name, ce_getter_name, ce_setter_name in rgb_defs:
-                if not hasattr(renderer, band_getter_name) or not hasattr(renderer, ce_getter_name):
-                    continue
-                try:
-                    band_idx = int(getattr(renderer, band_getter_name)())
-                except Exception:
-                    continue
-                if band_idx <= 0:
-                    continue
-
-                mn_band = float(minimum)
-                mx_band = float(maximum)
-                if provider is not None:
                     try:
-                        stats = provider.bandStatistics(
-                            band_idx,
-                            QgsRasterBandStats.Min | QgsRasterBandStats.Max,
-                        )
-                        if float(stats.maximumValue) > float(stats.minimumValue):
-                            mn_band = float(stats.minimumValue)
-                            mx_band = float(stats.maximumValue)
+                        ce.setContrastEnhancementAlgorithm(contrast_algorithm, True)
                     except Exception:
                         pass
-
-                ce = getattr(renderer, ce_getter_name)()
-                if ce is None:
-                    continue
-                ce.setMinimumValue(mn_band)
-                ce.setMaximumValue(mx_band)
-                ce.setContrastEnhancementAlgorithm(contrast_algorithm, True)
-                setter = getattr(renderer, ce_setter_name, None)
-                if callable(setter):
-                    setter(ce)
-                applied = True
+                    applied = True
 
             if applied:
                 layer.triggerRepaint()
-            return applied
-        except Exception as e:
+                return True
+
+            renderer_name = type(renderer).__name__ if renderer is not None else "UnknownRenderer"
             QgsMessageLog.logMessage(
-                f"_apply_value_range_to_layer error on {layer.name() if layer is not None else 'Unknown'}: {e}",
+                (
+                    f"_apply_value_range_to_layer: no applicable path for {layer.name() if layer is not None else 'Unknown'} "
+                    f"(renderer={renderer_name}, min={float(minimum):.6g}, max={float(maximum):.6g})"
+                ),
+                "GeoSurvey Studio",
+                level=Qgis.Warning,
+            )
+            return False
+        except Exception as e:
+            renderer_name = type(renderer).__name__ if renderer is not None else "UnknownRenderer"
+            QgsMessageLog.logMessage(
+                (
+                    f"_apply_value_range_to_layer error on {layer.name() if layer is not None else 'Unknown'} "
+                    f"(renderer={renderer_name}, min={float(minimum):.6g}, max={float(maximum):.6g}): {e}"
+                ),
                 "GeoSurvey Studio",
                 level=Qgis.Warning,
             )
@@ -1745,37 +1864,15 @@ class CatalogToolsMixin:
                 return None
 
         def _apply_algorithm_only(layer):
-            renderer = layer.renderer()
-            if renderer is None:
-                return False
-            changed = False
-            try:
-                if hasattr(renderer, "contrastEnhancement"):
-                    ce = renderer.contrastEnhancement()
-                    if ce is not None:
-                        ce.setContrastEnhancementAlgorithm(enhancement_algorithm, True)
-                        changed = True
-                rgb_defs = (
-                    ("redContrastEnhancement", "setRedContrastEnhancement"),
-                    ("greenContrastEnhancement", "setGreenContrastEnhancement"),
-                    ("blueContrastEnhancement", "setBlueContrastEnhancement"),
-                )
-                for getter_name, setter_name in rgb_defs:
-                    if not hasattr(renderer, getter_name):
-                        continue
-                    ce = getattr(renderer, getter_name)()
-                    if ce is None:
-                        continue
-                    ce.setContrastEnhancementAlgorithm(enhancement_algorithm, True)
-                    setter = getattr(renderer, setter_name, None)
-                    if callable(setter):
-                        setter(ce)
-                    changed = True
-            except Exception:
-                return False
-            if changed:
+            ok, _err = self._apply_layer_contrast_enhancement_api(
+                layer,
+                enhancement_algorithm,
+                extent=canvas_extent,
+                sample_size=sample_size,
+            )
+            if ok:
                 layer.triggerRepaint()
-            return changed
+            return ok
 
         nodata_options = ["Keep current NoData", "Disable NoData=0"]
         nodata_mode, nodata_ok = QInputDialog.getItem(
