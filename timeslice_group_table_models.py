@@ -103,7 +103,7 @@ class TimesliceTableModel(_BaseRowsModel):
 
 
 class GroupTableModel(_BaseRowsModel):
-    HEADERS = ["ID", "Name", "Time-slices"]
-    COLUMN_KEYS = ("id", "name", "timeslice_count")
+    HEADERS = ["ID", "Name", "Time-slices", "System"]
+    COLUMN_KEYS = ("id", "name", "timeslice_count", "system")
     NUMERIC_KEYS = {"timeslice_count"}
 

@@ -673,6 +673,21 @@ class ProjectManagerDialog(
                         imported_ids = []
                         imported_paths = []
 
+                # Auto-assign records without CRS to system group 'grp_no_crs'
+                try:
+                    crs_missing_ids = [rec.get("id") for rec in (task_imported_records or []) if not (rec.get("crs") or "").strip()]
+                    if crs_missing_ids:
+                        from .project_catalog import ensure_system_group
+                        ensure_system_group(target_project_root, "grp_no_crs", "No_CRS")
+                        assign_timeslices_to_group(target_project_root, "grp_no_crs", crs_missing_ids)
+                        # remove them from imported default group if present
+                        try:
+                            remove_timeslices_from_group(target_project_root, "grp_imported", crs_missing_ids)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
                 if self._ask_partial_import_rollback(
                     "Time-slice",
                     imported_count=len(task_imported_records),

@@ -163,6 +163,9 @@ class TimesliceGroupManagerDialog(QDialog):
         grp_refresh_btn = QPushButton("Refresh")
         grp_refresh_btn.clicked.connect(self._refresh)
         grp_actions.addWidget(grp_refresh_btn)
+        verify_unassigned_btn = QPushButton("Verify Unassigned")
+        verify_unassigned_btn.clicked.connect(self._verify_unassigned_clicked)
+        grp_actions.addWidget(verify_unassigned_btn)
         grp_layout.addLayout(grp_actions)
 
         self.group_table = QTableView(self)
@@ -223,6 +226,12 @@ class TimesliceGroupManagerDialog(QDialog):
         for g in groups:
             gid = g.get("id")
             name = g.get("name") or gid or "Group"
+            # Hide empty system groups like grp_imported and grp_no_crs
+            is_system = bool(g.get("system", False))
+            times_count = len(g.get("timeslice_ids", []))
+            if is_system and times_count == 0:
+                # skip showing empty system groups
+                continue
             label = f"{name} [{gid}]"
             self.filter_group_combo.addItem(label, gid)
             self.group_action_combo.addItem(label, gid)
@@ -364,11 +373,13 @@ class TimesliceGroupManagerDialog(QDialog):
             gid = g.get("id") or ""
             name = g.get("name") or ""
             count = len(g.get("timeslice_ids", []))
+            system_flag = "Yes" if bool(g.get("system", False)) else ""
             model_rows.append(
                 {
                     "id": str(gid),
                     "name": str(name),
                     "timeslice_count": count,
+                    "system": system_flag,
                 }
             )
 

@@ -255,10 +255,11 @@ def _migrate_catalog_v1_to_v2(project_root, data):
         data["raster_groups"] = [
             {
                 "id": "grp_imported",
-                "name": "Imported",
+                "name": "Unassigned",
                 "radargram_ids": [r.get("id") for r in data.get("radargrams", []) if isinstance(r, dict) and r.get("id")],
                 "timeslice_ids": [t.get("id") for t in data.get("timeslices", []) if isinstance(t, dict) and t.get("id")],
                 "created_at": utc_now_iso(),
+                "system": True,
             }
         ]
     data["catalog_version"] = 2
@@ -282,11 +283,48 @@ def _migrate_catalog_v3_to_v4(project_root, data):
     return data
 
 
+def _migrate_catalog_v4_to_v5(project_root, data):
+    """Migration v4 -> v5:
+    - Rename default system group `grp_imported` name to 'Unassigned'
+    - Add `system: true` to system groups
+    - Ensure `grp_no_crs` exists
+    """
+    data = dict(data or {})
+    data.setdefault("raster_groups", [])
+    changed = False
+    for g in data.get("raster_groups", []) or []:
+        if g.get("id") == "grp_imported":
+            if str(g.get("name") or "").strip() != "Unassigned":
+                g["name"] = "Unassigned"
+                changed = True
+            g.setdefault("system", True)
+            changed = True
+
+    # Ensure grp_no_crs exists as a system group
+    if not any(str(g.get("id") or "") == "grp_no_crs" for g in data.get("raster_groups", []) or []):
+        data.setdefault("raster_groups", []).append(
+            {
+                "id": "grp_no_crs",
+                "name": "No_CRS",
+                "radargram_ids": [],
+                "timeslice_ids": [],
+                "created_at": utc_now_iso(),
+                "system": True,
+            }
+        )
+        changed = True
+
+    data["catalog_version"] = 5
+    data["schema_version"] = 5
+    return data
+
+
 _CATALOG_MIGRATIONS = {
     0: _migrate_catalog_v0_to_v1,
     1: _migrate_catalog_v1_to_v2,
     2: _migrate_catalog_v2_to_v3,
     3: _migrate_catalog_v3_to_v4,
+    4: _migrate_catalog_v4_to_v5,
 }
 
 
@@ -558,9 +596,10 @@ def ensure_catalog_schema(project_root, data, return_info=False):
             normalize_raster_group_record(
                 {
                     "id": "grp_imported",
-                    "name": "Imported",
+                        "name": "Unassigned",
                     "radargram_ids": [r.get("id") for r in data.get("radargrams", []) if r.get("id")],
                     "timeslice_ids": [],
+                        "system": True,
                 }
             )
         )
@@ -675,6 +714,7 @@ def normalize_raster_group_record(rec):
     rec.setdefault("radargram_ids", [])
     rec.setdefault("timeslice_ids", [])
     rec.setdefault("pinned", False)
+    rec.setdefault("system", False)
     rec.setdefault("style_qml_path", "")
     rec["radargram_ids"] = [v for v in rec.get("radargram_ids", []) if v]
     rec["timeslice_ids"] = [v for v in rec.get("timeslice_ids", []) if v]
@@ -695,6 +735,7 @@ def create_raster_group(project_root, group_name):
             "radargram_ids": [],
             "timeslice_ids": [],
             "created_at": utc_now_iso(),
+            "system": False,
         }
     )
     data["raster_groups"].append(group)
@@ -725,7 +766,7 @@ def add_radargram_to_default_group(project_root, radargram_id):
         default_group = normalize_raster_group_record(
             {
                 "id": "grp_imported",
-                "name": "Imported",
+                "name": "Unassigned",
                 "radargram_ids": [],
                 "timeslice_ids": [],
                 "created_at": utc_now_iso(),
@@ -749,6 +790,35 @@ def assign_timeslices_to_group(project_root, group_id, timeslice_ids):
     return group
 
 
+def ensure_system_group(project_root, group_id, group_name):
+    """Ensure a system group with the given id exists; create if missing."""
+    data = load_catalog(project_root)
+    group = next((g for g in data.get("raster_groups", []) if g.get("id") == group_id), None)
+    if group is not None:
+        changed = False
+        if str(group.get("name") or "").strip() != str(group_name or "").strip():
+            group["name"] = group_name
+            changed = True
+        if not bool(group.get("system", False)):
+            group["system"] = True
+            changed = True
+        if changed:
+            save_catalog(project_root, data)
+        return group
+
+    new = normalize_raster_group_record({
+        "id": group_id,
+        "name": group_name,
+        "radargram_ids": [],
+        "timeslice_ids": [],
+        "created_at": utc_now_iso(),
+        "system": True,
+    })
+    data.setdefault("raster_groups", []).append(new)
+    save_catalog(project_root, data)
+    return new
+
+
 def remove_timeslices_from_group(project_root, group_id, timeslice_ids):
     data = load_catalog(project_root)
     timeslice_ids = set(tid for tid in timeslice_ids if tid)
@@ -769,7 +839,7 @@ def add_timeslice_to_default_group(project_root, timeslice_id):
         default_group = normalize_raster_group_record(
             {
                 "id": "grp_imported",
-                "name": "Imported",
+                "name": "Unassigned",
                 "radargram_ids": [],
                 "timeslice_ids": [],
                 "created_at": utc_now_iso(),
