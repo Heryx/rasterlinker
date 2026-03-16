@@ -3,9 +3,9 @@ import re
 import time
 import tempfile
 
-from qgis.PyQt.QtCore import Qt, QVariant, QSizeF
+from qgis.PyQt.QtCore import Qt, QVariant, QSizeF, QSize
 from qgis.PyQt.QtGui import QColor, QFont, QImage, QPainter, QPdfWriter
-from qgis.PyQt.QtWidgets import QFileDialog, QInputDialog, QMessageBox, QWidget, QHBoxLayout, QLabel, QPushButton, QSize
+from qgis.PyQt.QtWidgets import QFileDialog, QInputDialog, QMessageBox, QWidget, QHBoxLayout, QLabel, QPushButton
 from qgis.core import (
     QgsContrastEnhancement,
     QgsCoordinateTransform,
