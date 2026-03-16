@@ -1,5 +1,5 @@
 from qgis.PyQt.QtCore import Qt, QSize
-from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtGui import QIcon, QFont, QColor
 from qgis.PyQt.QtWidgets import (
     QLabel,
     QSizePolicy,
@@ -17,10 +17,53 @@ from qgis.PyQt.QtWidgets import (
     QSpinBox,
     QButtonGroup,
     QCheckBox,
+    QStyledItemDelegate,
+    QStyle,
 )
 from qgis.core import QgsApplication, QgsLayerTreeLayer, QgsRasterLayer
 
 from .grid_options_ui import build_grid_options_controls
+
+
+class _GroupListDelegate(QStyledItemDelegate):
+    """Custom delegate for stable group item rendering across Qt/QGIS themes."""
+
+    FONT_SIZE = 9
+    BG_SELECTED = QColor(61, 122, 181)
+    BG_HOVER = QColor(61, 122, 181, 45)
+    FG_SELECTED = QColor(255, 255, 255)
+    FG_NORMAL = QColor(32, 32, 32)
+
+    def paint(self, painter, option, index):
+        painter.save()
+
+        is_selected = bool(option.state & QStyle.State_Selected)
+        is_hover = bool(option.state & QStyle.State_MouseOver)
+
+        if is_selected:
+            painter.fillRect(option.rect, self.BG_SELECTED)
+        elif is_hover:
+            painter.fillRect(option.rect, self.BG_HOVER)
+        else:
+            painter.fillRect(option.rect, option.palette.base())
+
+        font = QFont(option.font)
+        font.setPointSize(self.FONT_SIZE)
+        font.setBold(is_selected)
+        painter.setFont(font)
+        painter.setPen(self.FG_SELECTED if is_selected else self.FG_NORMAL)
+
+        text = str(index.data(Qt.DisplayRole) or "")
+        text_rect = option.rect.adjusted(4, 0, -4, 0)
+        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        if size.height() < 22:
+            size.setHeight(22)
+        return size
 
 
 class UiLayoutMixin:
@@ -663,7 +706,13 @@ class UiLayoutMixin:
             self.dlg.groupListWidget.setMinimumHeight(52)
             self.dlg.groupListWidget.setMaximumHeight(92)
             self.dlg.groupListWidget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            self.dlg.groupListWidget.setStyleSheet("font-size: 9pt;")
+            # Delegate controls selected/non-selected rendering; avoid CSS font quirks.
+            self.dlg.groupListWidget.setStyleSheet("")
+            self.dlg.groupListWidget.setMouseTracking(True)
+            if not hasattr(self.dlg.groupListWidget, "_group_delegate"):
+                delegate = _GroupListDelegate(self.dlg.groupListWidget)
+                self.dlg.groupListWidget.setItemDelegate(delegate)
+                self.dlg.groupListWidget._group_delegate = delegate
 
         for btn in [
             getattr(self, "load_groups_button", None),

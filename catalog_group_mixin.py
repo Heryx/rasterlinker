@@ -162,14 +162,6 @@ class CatalogGroupMixin:
                 item.setData(Qt.UserRole, group.get("id"))
                 item.setData(Qt.UserRole + 1, group_name)
                 self.dlg.groupListWidget.addItem(item)
-                # Build custom row widget when available.
-                try:
-                    if hasattr(self, "_build_group_list_item"):
-                        widget = self._build_group_list_item(group_name, group.get("id"))
-                        self.dlg.groupListWidget.setItemWidget(item, widget)
-                except Exception:
-                    # Fall back to simple text-only item.
-                    pass
             self._prune_group_raster_locks()
             self._restore_group_selection_from_settings(trigger_update=True)
             self._sync_raster_lock_flag_for_current_group()
