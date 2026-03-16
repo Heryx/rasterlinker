@@ -20,10 +20,11 @@ import os
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QDialogButtonBox,
     QLabel, QDoubleSpinBox, QComboBox, QLineEdit, QGroupBox,
-    QMessageBox,
+    QMessageBox, QHBoxLayout,
 )
 from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsProject
+from .project_catalog import parse_depth_from_filename, parse_depth_from_raster_metadata
 
 
 class GprOgprVolumeMixin:
@@ -57,9 +58,36 @@ class GprOgprVolumeMixin:
             depth_max_m   = saved.get("z_max",        depth_max_m)
 
         default_radius = (
-              2. compute_ogpr_slice_grids()  -> grids + meta (in RAM)
+            saved.get("radius", default_res * 2 ** 0.5) if saved
             else default_res * 2 ** 0.5
         )
+
+        # Attempt to infer z_min/z_max from filenames (cascading parser)
+        try:
+            # profiles expected to have .path attribute
+            candidates = []
+            for p in (profiles or []):
+                fp = getattr(p, "path", None) or getattr(p, "file", None) or None
+                if not fp:
+                    continue
+                parsed = parse_depth_from_filename(fp)
+                candidates.append((parsed.get("confidence", 0.0), parsed, fp))
+            # pick best candidate
+            if candidates:
+                best = max(candidates, key=lambda x: x[0])
+                conf, parsed, src = best
+                if conf >= 0.8 and parsed.get("depth_from") is not None and parsed.get("depth_to") is not None:
+                    default_zmin = parsed.get("depth_from")
+                    default_zmax = parsed.get("depth_to")
+                else:
+                    default_zmin = 0.0
+                    default_zmax = depth_max_m
+            else:
+                default_zmin = 0.0
+                default_zmax = depth_max_m
+        except Exception:
+            default_zmin = 0.0
+            default_zmax = depth_max_m
 
         # --- finestra ---
         dlg = QDialog(getattr(self, "dlg", None))
@@ -100,8 +128,8 @@ class GprOgprVolumeMixin:
                 if cb_ch.itemData(i) == (prev_ch, prev_comb):
                     cb_ch.setCurrentIndex(i); break
 
-        sp_zmin   = _spin(0.0,   1000.0, 4, 0.01,   saved.get("z_min",   0.0)         if saved else 0.0)
-        sp_zmax   = _spin(0.001, 1000.0, 4, 0.01,   saved.get("z_max",   depth_max_m) if saved else depth_max_m)
+        sp_zmin   = _spin(0.0,   1000.0, 4, 0.01,   saved.get("z_min",   default_zmin) if saved else default_zmin)
+        sp_zmax   = _spin(0.001, 1000.0, 4, 0.01,   saved.get("z_max",   default_zmax) if saved else default_zmax)
         sp_step   = _spin(0.001,  100.0, 4, 0.005,  default_step)
         sp_res    = _spin(0.001,  100.0, 4, 0.01,   default_res)
         sp_radius = _spin(0.001,  100.0, 4, 0.01,   default_radius)
@@ -124,7 +152,6 @@ class GprOgprVolumeMixin:
         btns.rejected.connect(dlg.reject)
 
         btn_row = QHBoxLayout()
-        btn_row.addWidget(btn_preview)
         btn_row.addStretch()
         btn_row.addWidget(btns)
         root.addLayout(btn_row)
@@ -173,7 +200,7 @@ class GprOgprVolumeMixin:
             QMessageBox.warning(
                 getattr(self, "dlg", None), "Nessun progetto attivo",
                 "Apri un progetto nel Project Manager prima di importare.",
-                    btn_row.addStretch()
+            )
             return
 
         base_names = list({

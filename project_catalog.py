@@ -81,6 +81,127 @@ def _safe_int(value, default=0):
         return int(default)
 
 
+def parse_depth_from_filename(filename: str, hints: dict | None = None) -> dict:
+    """Attempt to parse depth_from/depth_to and unit from a filename.
+
+    Returns dict: {depth_from: float|None, depth_to: float|None, unit: str|None, confidence: float}
+    confidence: 0.0-1.0 (1.0 = exact match)
+    """
+    base = os.path.basename(str(filename or "")).strip()
+    name = os.path.splitext(base)[0]
+    # Common patterns (priority): 0.000-0.008_m  or 0.000-0.008_(m)
+    patterns = [
+        r"(?P<from>\d+[.,]?\d*)\s*[-–_]\s*(?P<to>\d+[.,]?\d*)\s*[_\s]*\(?\s*(?P<unit>m|cm|ns|ft)\s*\)?$",
+        r"(?P<from>\d+[.,]?\d*)\s*[-–_]\s*(?P<to>\d+[.,]?\d*)$",
+        r"_(?P<from>\d+)[._](?P<to>\d+)[._]?$",
+    ]
+    for idx, pat in enumerate(patterns):
+        m = re.search(pat, name, flags=re.IGNORECASE)
+        if not m:
+            continue
+        try:
+            df = m.groupdict().get("from")
+            dt = m.groupdict().get("to")
+            unit = (m.groupdict().get("unit") or "").lower() or None
+            if df is None or dt is None:
+                continue
+            df = float(str(df).replace(",", "."))
+            dt = float(str(dt).replace(",", "."))
+            confidence = 1.0 if idx == 0 else 0.8 if idx == 1 else 0.6
+            return {"depth_from": df, "depth_to": dt, "unit": unit, "confidence": confidence}
+        except Exception:
+            continue
+    return {"depth_from": None, "depth_to": None, "unit": None, "confidence": 0.0}
+
+
+def parse_depth_from_raster_metadata(layer) -> dict:
+    """Attempt to extract depth info from raster metadata or GDAL tags.
+
+    Accepts a `QgsRasterLayer` or any object with `metadata()` / `dataProvider()`.
+    Returns same dict shape as `parse_depth_from_filename`.
+    """
+    try:
+        # Try QGIS metadata
+        md = None
+        if hasattr(layer, "metadata"):
+            try:
+                md = layer.metadata()
+            except Exception:
+                md = None
+        if not md and hasattr(layer, "dataProvider"):
+            prov = layer.dataProvider()
+            try:
+                md = prov.htmlMetadata()
+            except Exception:
+                md = None
+        text = ""
+        if isinstance(md, dict):
+            # some implementations return dict
+            text = json.dumps(md)
+        elif hasattr(md, "toHtml"):
+            try:
+                text = md.toHtml()
+            except Exception:
+                text = str(md)
+        elif md:
+            text = str(md)
+        # look for tags like DEPTH_FROM or DEPTH_TO or patterns like 0.000-0.008
+        if text:
+            m = re.search(r"DEPTH[_ ]?FROM\D*(?P<from>\d+[.,]?\d*)", text, flags=re.IGNORECASE)
+            m2 = re.search(r"DEPTH[_ ]?TO\D*(?P<to>\d+[.,]?\d*)", text, flags=re.IGNORECASE)
+            if m and m2:
+                try:
+                    df = float(m.group("from").replace(",", "."))
+                    dt = float(m2.group("to").replace(",", "."))
+                    return {"depth_from": df, "depth_to": dt, "unit": None, "confidence": 1.0}
+                except Exception:
+                    pass
+            # fallback: search numeric-range in text
+            m3 = re.search(r"(?P<from>\d+[.,]?\d*)\s*[-–_]\s*(?P<to>\d+[.,]?\d*)(?:\s*(?P<unit>m|cm|ns|ft))?", text, flags=re.IGNORECASE)
+            if m3:
+                try:
+                    df = float(m3.group("from").replace(",", "."))
+                    dt = float(m3.group("to").replace(",", "."))
+                    unit = (m3.group("unit") or "").lower() or None
+                    return {"depth_from": df, "depth_to": dt, "unit": unit, "confidence": 0.9}
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    # Try GDAL tags if available
+    try:
+        from osgeo import gdal
+        ds = None
+        if hasattr(layer, "dataProvider"):
+            prov = layer.dataProvider()
+            try:
+                uri = prov.dataSourceUri()
+            except Exception:
+                uri = None
+        else:
+            uri = None
+        if uri:
+            try:
+                ds = gdal.Open(uri)
+            except Exception:
+                ds = None
+        if ds is not None:
+            md = ds.GetMetadata()
+            for key in ("DEPTH_FROM", "DEPTH_TO", "DepthFrom", "DepthTo"):
+                if key in md:
+                    # if both present in tags
+                    df = md.get("DEPTH_FROM")
+                    dt = md.get("DEPTH_TO")
+                    try:
+                        if df is not None and dt is not None:
+                            return {"depth_from": float(str(df).replace(",", ".")), "depth_to": float(str(dt).replace(",", ".")), "unit": None, "confidence": 1.0}
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    return {"depth_from": None, "depth_to": None, "unit": None, "confidence": 0.0}
+
+
 def _detect_catalog_version(data):
     if not isinstance(data, dict):
         return 0
