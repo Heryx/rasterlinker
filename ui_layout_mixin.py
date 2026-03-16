@@ -83,6 +83,7 @@ class UiLayoutMixin:
         self.image_tools_label = None
         self.load_groups_button = None
         self.import_las_slice_button = None
+        self.import_csv_slice_button = None
         self.import_groups_button = None
         self.enhance_minmax_button = None
         self.enhance_batch_button = None
@@ -222,7 +223,16 @@ class UiLayoutMixin:
             "Richiede: PDAL nel PATH + laspy>=2.0"
         )
         self.import_las_slice_button.clicked.connect(self.import_las_as_slices)
-        group_layout.addWidget(self.import_las_slice_button, 2, 0, 1, 2)
+        group_layout.addWidget(self.import_las_slice_button, 2, 0, 1, 1)
+        self.import_csv_slice_button = QPushButton("Import CSV -> Slice", group_tab)
+        self.import_csv_slice_button.setObjectName("importCsvSliceButton")
+        self.import_csv_slice_button.setToolTip(
+            "Importa uno o piu CSV di punti e genera slice GeoTIFF con IDW.\n"
+            "Permette anteprima colonne + mapping X/Y/Z o Depth per file,\n"
+            "con opzione banda singola o RGB."
+        )
+        self.import_csv_slice_button.clicked.connect(self.import_csv_as_slices)
+        group_layout.addWidget(self.import_csv_slice_button, 2, 1, 1, 1)
         if hasattr(self.dlg, "groupNameEdit"):
             group_layout.addWidget(self.dlg.groupNameEdit, 3, 0, 1, 2)
         group_layout.setColumnStretch(0, 1)
@@ -727,6 +737,7 @@ class UiLayoutMixin:
         for btn in [
             getattr(self, "load_groups_button", None),
             getattr(self, "import_las_slice_button", None),
+            getattr(self, "import_csv_slice_button", None),
             getattr(self, "import_groups_button", None),
             getattr(self, "enhance_minmax_button", None),
             getattr(self, "enhance_batch_button", None),
@@ -1018,6 +1029,11 @@ class UiLayoutMixin:
         self._set_button_icon(
             getattr(self, "import_las_slice_button", None),
             "mActionAddPointCloudLayer.svg",
+            "mActionFileOpen.svg",
+        )
+        self._set_button_icon(
+            getattr(self, "import_csv_slice_button", None),
+            "mActionOpenTable.svg",
             "mActionFileOpen.svg",
         )
 
