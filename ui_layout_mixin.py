@@ -8,9 +8,13 @@ from qgis.PyQt.QtWidgets import (
     QTabWidget,
     QGridLayout,
     QVBoxLayout,
+    QHBoxLayout,
     QComboBox,
     QDoubleSpinBox,
     QPushButton,
+    QGroupBox,
+    QRadioButton,
+    QButtonGroup,
 )
 from qgis.core import QgsApplication, QgsLayerTreeLayer, QgsRasterLayer
 
@@ -60,6 +64,21 @@ class UiLayoutMixin:
         self.name_raster_panel = None
         self.name_raster_title = None
         self.name_raster_lines = []
+        # Batch enhance settings widgets
+        self.enhance_contrast_combo = None
+        self.enhance_minmax_settings_group = None
+        self.enhance_radio_user = None
+        self.enhance_radio_cumulative = None
+        self.enhance_radio_minmax = None
+        self.enhance_radio_stddev = None
+        self.enhance_radio_button_group = None
+        self.enhance_user_min_spin = None
+        self.enhance_user_max_spin = None
+        self.enhance_cumulative_min_spin = None
+        self.enhance_cumulative_max_spin = None
+        self.enhance_stddev_spin = None
+        self.enhance_extent_combo = None
+        self.enhance_accuracy_combo = None
 
     def _clear_qt_layout(self, layout):
         if layout is None:
@@ -132,7 +151,7 @@ class UiLayoutMixin:
         group_layout.addWidget(self.dlg.zoomSelectedGroupsButton, 0, 1, 1, 1)
         group_layout.addWidget(self.import_groups_button, 1, 0, 1, 1)
         group_layout.addWidget(self.dlg.createGroupButton, 1, 1, 1, 1)
-        self.import_las_slice_button = QPushButton("Import LAS → Slice", group_tab)
+        self.import_las_slice_button = QPushButton("Import LAS \u2192 Slice", group_tab)
         self.import_las_slice_button.setObjectName("importLasSliceButton")
         self.import_las_slice_button.setToolTip(
             "Importa COPC/LAS GPR, genera slice GeoTIFF via PDAL.\n"
@@ -151,17 +170,148 @@ class UiLayoutMixin:
 
         # ── TAB: Images ────────────────────────────────────────────────
         image_tab = QWidget(tabs)
-        image_layout = QGridLayout(image_tab)
+        image_scroll = QScrollArea(image_tab)
+        image_scroll.setWidgetResizable(True)
+        image_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        image_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        image_scroll.setFrameShape(QScrollArea.NoFrame)
+        image_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        image_tab_outer = QVBoxLayout(image_tab)
+        image_tab_outer.setContentsMargins(0, 0, 0, 0)
+        image_tab_outer.setSpacing(0)
+        image_tab_outer.addWidget(image_scroll)
+
+        image_inner = QWidget()
+        image_inner.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        image_scroll.setWidget(image_inner)
+
+        image_layout = QGridLayout(image_inner)
         image_layout.setContentsMargins(6, 6, 6, 6)
         image_layout.setHorizontalSpacing(8)
         image_layout.setVerticalSpacing(6)
+
+        # Row 0: Min/Max button  |  Batch Enhance button
+        self.enhance_minmax_button.setText("Min/Max")
         image_layout.addWidget(self.enhance_minmax_button, 0, 0, 1, 1)
         image_layout.addWidget(self.enhance_batch_button, 0, 1, 1, 1)
-        image_layout.addWidget(self.save_style_button, 1, 0, 1, 1)
-        image_layout.addWidget(self.load_style_button, 1, 1, 1, 1)
+
+        # Row 1: Contrast enhancement combo (full width)
+        self.enhance_contrast_combo = QComboBox(image_inner)
+        self.enhance_contrast_combo.setObjectName("enhanceContrastCombo")
+        self.enhance_contrast_combo.addItems([
+            "Stretch to Min/Max",
+            "Stretch and Clip to Min/Max",
+            "No Enhancement",
+            "Clip to Min/Max",
+        ])
+        image_layout.addWidget(self.enhance_contrast_combo, 1, 0, 1, 2)
+
+        # Row 2: Min/Max Settings group box
+        self.enhance_minmax_settings_group = QGroupBox("Min/Max Settings", image_inner)
+        self.enhance_minmax_settings_group.setObjectName("enhanceMinMaxSettingsGroup")
+        settings_layout = QGridLayout(self.enhance_minmax_settings_group)
+        settings_layout.setContentsMargins(6, 8, 6, 6)
+        settings_layout.setHorizontalSpacing(6)
+        settings_layout.setVerticalSpacing(4)
+
+        self.enhance_radio_button_group = QButtonGroup(self.enhance_minmax_settings_group)
+
+        # Radio: User defined
+        self.enhance_radio_user = QRadioButton("User defined", self.enhance_minmax_settings_group)
+        self.enhance_radio_button_group.addButton(self.enhance_radio_user, 0)
+        settings_layout.addWidget(self.enhance_radio_user, 0, 0, 1, 1)
+        user_spin_widget = QWidget(self.enhance_minmax_settings_group)
+        user_spin_layout = QHBoxLayout(user_spin_widget)
+        user_spin_layout.setContentsMargins(0, 0, 0, 0)
+        user_spin_layout.setSpacing(4)
+        self.enhance_user_min_spin = QDoubleSpinBox(user_spin_widget)
+        self.enhance_user_min_spin.setDecimals(4)
+        self.enhance_user_min_spin.setRange(-1e12, 1e12)
+        self.enhance_user_min_spin.setValue(0.0)
+        self.enhance_user_min_spin.setObjectName("enhanceUserMinSpin")
+        self.enhance_user_max_spin = QDoubleSpinBox(user_spin_widget)
+        self.enhance_user_max_spin.setDecimals(4)
+        self.enhance_user_max_spin.setRange(-1e12, 1e12)
+        self.enhance_user_max_spin.setValue(255.0)
+        self.enhance_user_max_spin.setObjectName("enhanceUserMaxSpin")
+        user_spin_layout.addWidget(self.enhance_user_min_spin)
+        user_spin_layout.addWidget(QLabel("-", user_spin_widget))
+        user_spin_layout.addWidget(self.enhance_user_max_spin)
+        settings_layout.addWidget(user_spin_widget, 0, 1, 1, 1)
+
+        # Radio: Cumulative cut
+        self.enhance_radio_cumulative = QRadioButton("Cumulative cut", self.enhance_minmax_settings_group)
+        self.enhance_radio_button_group.addButton(self.enhance_radio_cumulative, 1)
+        settings_layout.addWidget(self.enhance_radio_cumulative, 1, 0, 1, 1)
+        cum_spin_widget = QWidget(self.enhance_minmax_settings_group)
+        cum_spin_layout = QHBoxLayout(cum_spin_widget)
+        cum_spin_layout.setContentsMargins(0, 0, 0, 0)
+        cum_spin_layout.setSpacing(4)
+        self.enhance_cumulative_min_spin = QDoubleSpinBox(cum_spin_widget)
+        self.enhance_cumulative_min_spin.setDecimals(2)
+        self.enhance_cumulative_min_spin.setRange(0.0, 99.9)
+        self.enhance_cumulative_min_spin.setValue(2.0)
+        self.enhance_cumulative_min_spin.setSuffix(" %")
+        self.enhance_cumulative_min_spin.setObjectName("enhanceCumMinSpin")
+        self.enhance_cumulative_max_spin = QDoubleSpinBox(cum_spin_widget)
+        self.enhance_cumulative_max_spin.setDecimals(2)
+        self.enhance_cumulative_max_spin.setRange(0.1, 100.0)
+        self.enhance_cumulative_max_spin.setValue(98.0)
+        self.enhance_cumulative_max_spin.setSuffix(" %")
+        self.enhance_cumulative_max_spin.setObjectName("enhanceCumMaxSpin")
+        cum_spin_layout.addWidget(self.enhance_cumulative_min_spin)
+        cum_spin_layout.addWidget(QLabel("-", cum_spin_widget))
+        cum_spin_layout.addWidget(self.enhance_cumulative_max_spin)
+        settings_layout.addWidget(cum_spin_widget, 1, 1, 1, 1)
+
+        # Radio: Min / Max
+        self.enhance_radio_minmax = QRadioButton("Min / Max", self.enhance_minmax_settings_group)
+        self.enhance_radio_minmax.setChecked(True)
+        self.enhance_radio_button_group.addButton(self.enhance_radio_minmax, 2)
+        settings_layout.addWidget(self.enhance_radio_minmax, 2, 0, 1, 2)
+
+        # Radio: Mean +/- stddev
+        self.enhance_radio_stddev = QRadioButton("Mean +/- stddev \u00d7", self.enhance_minmax_settings_group)
+        self.enhance_radio_button_group.addButton(self.enhance_radio_stddev, 3)
+        settings_layout.addWidget(self.enhance_radio_stddev, 3, 0, 1, 1)
+        self.enhance_stddev_spin = QDoubleSpinBox(self.enhance_minmax_settings_group)
+        self.enhance_stddev_spin.setDecimals(2)
+        self.enhance_stddev_spin.setRange(0.01, 99.0)
+        self.enhance_stddev_spin.setValue(2.0)
+        self.enhance_stddev_spin.setObjectName("enhanceStdDevSpin")
+        settings_layout.addWidget(self.enhance_stddev_spin, 3, 1, 1, 1)
+
+        # Statistics extent
+        settings_layout.addWidget(QLabel("Statistics extent", self.enhance_minmax_settings_group), 4, 0, 1, 1)
+        self.enhance_extent_combo = QComboBox(self.enhance_minmax_settings_group)
+        self.enhance_extent_combo.addItems(["Whole Raster", "Current Canvas", "Updated Canvas"])
+        self.enhance_extent_combo.setObjectName("enhanceExtentCombo")
+        settings_layout.addWidget(self.enhance_extent_combo, 4, 1, 1, 1)
+
+        # Accuracy
+        settings_layout.addWidget(QLabel("Accuracy", self.enhance_minmax_settings_group), 5, 0, 1, 1)
+        self.enhance_accuracy_combo = QComboBox(self.enhance_minmax_settings_group)
+        self.enhance_accuracy_combo.addItems(["Estimated (faster)", "Actual (slower)"])
+        self.enhance_accuracy_combo.setObjectName("enhanceAccuracyCombo")
+        settings_layout.addWidget(self.enhance_accuracy_combo, 5, 1, 1, 1)
+
+        settings_layout.setColumnStretch(0, 0)
+        settings_layout.setColumnStretch(1, 1)
+
+        image_layout.addWidget(self.enhance_minmax_settings_group, 2, 0, 1, 2)
+
+        # Row 3: Style buttons
+        image_layout.addWidget(self.save_style_button, 3, 0, 1, 1)
+        image_layout.addWidget(self.load_style_button, 3, 1, 1, 1)
+
         image_layout.setColumnStretch(0, 1)
         image_layout.setColumnStretch(1, 1)
-        image_layout.setRowStretch(2, 1)
+        image_layout.setRowStretch(4, 1)
+
+        # Connect radio buttons to enable/disable related spin widgets
+        self.enhance_radio_button_group.buttonClicked.connect(self._on_enhance_radio_changed)
+        self._on_enhance_radio_changed(None)
 
         # ── TAB: Export (con QScrollArea per evitare taglio contenuto) ───
         export_tab = QWidget(tabs)
@@ -267,10 +417,8 @@ class UiLayoutMixin:
         tabs.addTab(export_tab, "Export")
         tabs.tabBar().setExpanding(False)
         tabs.tabBar().setElideMode(Qt.ElideRight)
-        # Expanding verticalmente: si adatta all'altezza disponibile del dock
         tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         tabs.setMinimumHeight(148)
-        # Nessun maxHeight rigido: il tab si espande liberamente
 
         if self.group_tools_label is not None:
             self.group_tools_label.hide()
@@ -283,9 +431,8 @@ class UiLayoutMixin:
         tools_layout = QVBoxLayout(tools_panel)
         tools_layout.setContentsMargins(12, 0, 0, 0)
         tools_layout.setSpacing(6)
-        tools_layout.addWidget(tabs, 1)  # stretch=1: il tab occupa tutto lo spazio verticale disponibile
+        tools_layout.addWidget(tabs, 1)
         self.tools_panel_layout = tools_layout
-        # Expanding in verticale: il pannello destro si allarga con il dock
         tools_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.tools_panel_widget = tools_panel
         self.tools_tabs = tabs
@@ -307,6 +454,21 @@ class UiLayoutMixin:
                     self.export_scale_spin.setValue(sc)
         except Exception:
             pass
+
+    def _on_enhance_radio_changed(self, _btn):
+        """Enable/disable spin widgets based on selected radio button."""
+        radio_id = self.enhance_radio_button_group.checkedId() if self.enhance_radio_button_group is not None else -1
+        # User defined (0): enable user min/max spins
+        for w in (self.enhance_user_min_spin, self.enhance_user_max_spin):
+            if w is not None:
+                w.setEnabled(radio_id == 0)
+        # Cumulative cut (1): enable cumulative spins
+        for w in (self.enhance_cumulative_min_spin, self.enhance_cumulative_max_spin):
+            if w is not None:
+                w.setEnabled(radio_id == 1)
+        # StdDev (3): enable stddev spin
+        if self.enhance_stddev_spin is not None:
+            self.enhance_stddev_spin.setEnabled(radio_id == 3)
 
     def _on_export_page_size_changed(self, value):
         is_custom = str(value or "").strip().lower() == "custom"
@@ -479,7 +641,6 @@ class UiLayoutMixin:
             vl.addWidget(self.left_nav_widget)
 
         if hasattr(self.dlg, "gridLayout_3") and getattr(self, "tools_panel_widget", None) is not None:
-            # Nessun Qt.AlignTop: il pannello destro deve espandersi verticalmente
             self.dlg.gridLayout_3.addWidget(self.tools_panel_widget, 0, 2, 1, 2)
         if getattr(self, "tools_panel_layout", None) is not None and hasattr(self.dlg, "widget"):
             self.dlg.widget.setParent(self.tools_panel_widget)
@@ -610,6 +771,36 @@ class UiLayoutMixin:
                 export_widget.setMinimumHeight(22)
                 export_widget.setStyleSheet("font-size: 9pt; padding: 1px 3px;")
 
+        for enhance_widget in (
+            getattr(self, "enhance_contrast_combo", None),
+            getattr(self, "enhance_extent_combo", None),
+            getattr(self, "enhance_accuracy_combo", None),
+            getattr(self, "enhance_user_min_spin", None),
+            getattr(self, "enhance_user_max_spin", None),
+            getattr(self, "enhance_cumulative_min_spin", None),
+            getattr(self, "enhance_cumulative_max_spin", None),
+            getattr(self, "enhance_stddev_spin", None),
+        ):
+            if enhance_widget is not None:
+                enhance_widget.setMinimumHeight(22)
+                enhance_widget.setStyleSheet("font-size: 9pt; padding: 1px 3px;")
+
+        for radio in (
+            getattr(self, "enhance_radio_user", None),
+            getattr(self, "enhance_radio_cumulative", None),
+            getattr(self, "enhance_radio_minmax", None),
+            getattr(self, "enhance_radio_stddev", None),
+        ):
+            if radio is not None:
+                radio.setStyleSheet(label_style)
+
+        if self.enhance_minmax_settings_group is not None:
+            self.enhance_minmax_settings_group.setStyleSheet(
+                "QGroupBox { font-size: 9pt; font-weight: 600; "
+                "border: 1px solid #b0b0b0; border-radius: 3px; margin-top: 6px; padding-top: 4px; } "
+                "QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 0 2px; }"
+            )
+
         if hasattr(self.dlg, "gridLayout"):
             self.dlg.gridLayout.setHorizontalSpacing(8)
             self.dlg.gridLayout.setVerticalSpacing(6)
@@ -627,7 +818,7 @@ class UiLayoutMixin:
             self.dlg.gridLayout_3.setColumnStretch(3, 0)
             if getattr(self, "tools_panel_widget", None) is not None:
                 self.dlg.gridLayout_3.addWidget(self.tools_panel_widget, 0, 2, 1, 2)
-            self.dlg.gridLayout_3.setRowStretch(0, 1)  # riga 0 si espande
+            self.dlg.gridLayout_3.setRowStretch(0, 1)
             self.dlg.gridLayout_3.setRowStretch(1, 0)
             self.dlg.gridLayout_3.setRowStretch(2, 0)
             self.dlg.gridLayout_3.setRowStretch(3, 0)
