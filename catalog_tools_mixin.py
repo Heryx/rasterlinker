@@ -27,6 +27,7 @@ from qgis.core import (
     QgsProject,
     QgsRasterBandStats,
     QgsRasterLayer,
+    QgsRasterMinMaxOrigin,
     QgsMessageLog,
     QgsVectorLayer,
     QgsRectangle,
@@ -1289,29 +1290,84 @@ class CatalogToolsMixin:
         self._apply_group_visibility_selection(dlg.selected_group_names())
 
     def enhance_loaded_images_minmax(self):
-        total = 0
-        enhanced = 0
-        failed = []
+        """Apply enhancement using Min/Max panel settings on selected groups."""
+        # Read panel UI controls (with backward-compatible fallbacks).
+        mode_combo = getattr(self, "enhance_contrast_mode_combo", None) or getattr(self, "enhance_contrast_combo", None)
+        mode_label = str(mode_combo.currentText()).strip() if mode_combo is not None else "Stretch to Min/Max"
+        mode_map = {
+            "Stretch to Min/Max": QgsContrastEnhancement.StretchToMinimumMaximum,
+            "Stretch and Clip to Min/Max": QgsContrastEnhancement.StretchAndClipToMinimumMaximum,
+            "Clip to Min/Max": QgsContrastEnhancement.ClipToMinimumMaximum,
+            "No Enhancement": QgsContrastEnhancement.NoEnhancement,
+        }
+        contrast_algorithm = mode_map.get(mode_label, QgsContrastEnhancement.StretchToMinimumMaximum)
+
+        radio_user = getattr(self, "enhance_radio_user_defined", None)
+        radio_cumulative = getattr(self, "enhance_radio_cumulative", None)
+        radio_stddev = getattr(self, "enhance_radio_stddev", None)
+
+        min_spin = getattr(self, "enhance_user_min_spin", None)
+        max_spin = getattr(self, "enhance_user_max_spin", None)
+        cum_min_spin = getattr(self, "enhance_cumulative_min_spin", None)
+        cum_max_spin = getattr(self, "enhance_cumulative_max_spin", None)
+        stddev_spin = getattr(self, "enhance_stddev_factor_spin", None) or getattr(self, "enhance_stddev_spin", None)
+
+        extent_combo = getattr(self, "enhance_extent_combo", None)
+        extent_label = str(extent_combo.currentText()).strip().lower() if extent_combo is not None else "whole raster"
+        use_canvas_extent = "current canvas" in extent_label or "updated canvas" in extent_label
+        canvas_extent = None
+        if use_canvas_extent and self.iface is not None and self.iface.mapCanvas() is not None:
+            try:
+                canvas_extent = self.iface.mapCanvas().extent()
+            except Exception:
+                canvas_extent = None
+
+        accuracy_combo = getattr(self, "enhance_accuracy_combo", None)
+        accuracy_label = str(accuracy_combo.currentText()).strip().lower() if accuracy_combo is not None else "estimated"
+        # 0 usually means full/accurate for raster providers; small sample gives faster estimate.
+        sample_size = 0 if "actual" in accuracy_label else 25000
+
+        def _read_stats(provider, flags):
+            extent = canvas_extent if canvas_extent is not None else QgsRectangle()
+            try:
+                return provider.bandStatistics(1, flags, extent, sample_size)
+            except TypeError:
+                try:
+                    return provider.bandStatistics(1, flags, extent)
+                except TypeError:
+                    return provider.bandStatistics(1, flags)
+            except Exception:
+                return None
+
+        def _set_algorithm_only(layer):
+            renderer = layer.renderer()
+            if renderer is None or not hasattr(renderer, "contrastEnhancement"):
+                return False
+            ce = renderer.contrastEnhancement()
+            if ce is None:
+                return False
+            ce.setContrastEnhancementAlgorithm(contrast_algorithm, True)
+            layer.triggerRepaint()
+            return True
+
         selected_groups = self._selected_group_names()
+        layers = []
         if selected_groups:
-            layers = []
             for name in selected_groups:
                 layers.extend(list(self._iter_group_raster_layers(name)))
         else:
             layers = list(self._iter_plugin_raster_layers() or [])
 
-        for layer in layers:
-            total += 1
-            ok, reason = self._apply_minmax_to_layer(layer, return_reason=True)
-            if ok:
-                enhanced += 1
-            else:
-                layer_name = layer.name() if layer is not None else "Unknown layer"
-                detail = f"{layer_name}: {reason or 'unknown reason'}"
-                failed.append(detail)
-                QgsMessageLog.logMessage(detail, "GeoSurvey Studio", level=Qgis.Warning)
+        # Avoid duplicate processing if a layer appears in multiple groups.
+        dedup = {}
+        for lyr in layers:
+            if lyr is None:
+                continue
+            key = lyr.id() if hasattr(lyr, "id") else id(lyr)
+            dedup[key] = lyr
+        layers = list(dedup.values())
 
-        if total == 0:
+        if not layers:
             QMessageBox.information(
                 self.dlg,
                 "Enhance Min/Max",
@@ -1319,12 +1375,108 @@ class CatalogToolsMixin:
             )
             return
 
+        enhanced = 0
+        failed = []
+        for layer in layers:
+            layer_name = layer.name() if layer is not None else "Unknown layer"
+            try:
+                provider = layer.dataProvider()
+                if provider is None:
+                    failed.append(f"{layer_name}: no data provider")
+                    continue
+
+                if contrast_algorithm == QgsContrastEnhancement.NoEnhancement:
+                    if _set_algorithm_only(layer):
+                        enhanced += 1
+                    else:
+                        failed.append(f"{layer_name}: no contrast enhancement available")
+                    continue
+
+                mode_id = 2  # default Min/Max
+                if radio_user is not None and radio_user.isChecked():
+                    mode_id = 0
+                elif radio_cumulative is not None and radio_cumulative.isChecked():
+                    mode_id = 1
+                elif radio_stddev is not None and radio_stddev.isChecked():
+                    mode_id = 3
+
+                if mode_id == 0:
+                    mn = float(min_spin.value()) if min_spin is not None else 0.0
+                    mx = float(max_spin.value()) if max_spin is not None else 255.0
+                elif mode_id == 1:
+                    pct_lo = (float(cum_min_spin.value()) / 100.0) if cum_min_spin is not None else 0.02
+                    pct_hi = (float(cum_max_spin.value()) / 100.0) if cum_max_spin is not None else 0.98
+                    stats = _read_stats(provider, QgsRasterBandStats.Min | QgsRasterBandStats.Max)
+                    if stats is None:
+                        failed.append(f"{layer_name}: cannot compute cumulative stats")
+                        continue
+                    span = float(stats.maximumValue) - float(stats.minimumValue)
+                    mn = float(stats.minimumValue) + pct_lo * span
+                    mx = float(stats.minimumValue) + pct_hi * span
+                elif mode_id == 3:
+                    factor = float(stddev_spin.value()) if stddev_spin is not None else 2.0
+                    stats = _read_stats(provider, QgsRasterBandStats.Mean | QgsRasterBandStats.StdDev)
+                    if stats is None:
+                        failed.append(f"{layer_name}: cannot compute stddev stats")
+                        continue
+                    mn = float(stats.mean) - factor * float(stats.stdDev)
+                    mx = float(stats.mean) + factor * float(stats.stdDev)
+                else:
+                    # Try layer API first (may honor provider native min/max behavior).
+                    applied_direct = False
+                    if hasattr(layer, "setContrastEnhancement"):
+                        try:
+                            if canvas_extent is not None:
+                                layer.setContrastEnhancement(
+                                    contrast_algorithm,
+                                    QgsRasterMinMaxOrigin.MinMax,
+                                    canvas_extent,
+                                )
+                            else:
+                                layer.setContrastEnhancement(
+                                    contrast_algorithm,
+                                    QgsRasterMinMaxOrigin.MinMax,
+                                )
+                            layer.triggerRepaint()
+                            applied_direct = True
+                        except Exception:
+                            applied_direct = False
+                    if applied_direct:
+                        enhanced += 1
+                        continue
+
+                    stats = _read_stats(provider, QgsRasterBandStats.Min | QgsRasterBandStats.Max)
+                    if stats is None:
+                        failed.append(f"{layer_name}: cannot compute min/max stats")
+                        continue
+                    mn = float(stats.minimumValue)
+                    mx = float(stats.maximumValue)
+
+                if mx <= mn:
+                    failed.append(f"{layer_name}: max <= min")
+                    continue
+
+                ok = self._apply_value_range_to_layer(layer, mn, mx, contrast_algorithm=contrast_algorithm)
+                if ok:
+                    enhanced += 1
+                else:
+                    failed.append(f"{layer_name}: apply failed")
+            except Exception as e:
+                failed.append(f"{layer_name}: {e}")
+                QgsMessageLog.logMessage(
+                    f"enhance_loaded_images_minmax error on {layer_name}: {e}",
+                    "GeoSurvey Studio",
+                    level=Qgis.Warning,
+                )
+
         scope_text = f" (group: {', '.join(selected_groups)})" if selected_groups else " (all groups)"
         self.iface.messageBar().pushInfo(
             "GeoSurvey Studio",
-            f"Enhance Min/Max applied: {enhanced}/{total} layers{scope_text}.",
+            f"Enhance Min/Max applied: {enhanced}/{len(layers)} layers{scope_text}.",
         )
         if failed:
+            for detail in failed:
+                QgsMessageLog.logMessage(detail, "GeoSurvey Studio", level=Qgis.Warning)
             self.iface.messageBar().pushWarning(
                 "GeoSurvey Studio",
                 f"Enhance Min/Max skipped {len(failed)} layer(s). See Log Messages for details.",
@@ -1341,7 +1493,13 @@ class CatalogToolsMixin:
             return []
         return [it.text().strip() for it in self.dlg.groupListWidget.selectedItems() if it.text().strip()]
 
-    def _apply_value_range_to_layer(self, layer, minimum, maximum):
+    def _apply_value_range_to_layer(
+        self,
+        layer,
+        minimum,
+        maximum,
+        contrast_algorithm=QgsContrastEnhancement.StretchToMinimumMaximum,
+    ):
         if minimum is None or maximum is None:
             return False
         if float(maximum) <= float(minimum):
@@ -1359,12 +1517,12 @@ class CatalogToolsMixin:
                 renderer.setClassificationMax(float(maximum))
                 applied = True
             if hasattr(renderer, "contrastEnhancement"):
-                ce = renderer.contrastEnhancement()
-                if ce is not None:
-                    ce.setMinimumValue(float(minimum))
-                    ce.setMaximumValue(float(maximum))
-                    ce.setContrastEnhancementAlgorithm(QgsContrastEnhancement.StretchToMinimumMaximum, True)
-                    applied = True
+                    ce = renderer.contrastEnhancement()
+                    if ce is not None:
+                        ce.setMinimumValue(float(minimum))
+                        ce.setMaximumValue(float(maximum))
+                        ce.setContrastEnhancementAlgorithm(contrast_algorithm, True)
+                        applied = True
             if applied:
                 layer.triggerRepaint()
             return applied
