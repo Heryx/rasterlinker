@@ -148,7 +148,7 @@ class AppRuntimeMixin:
             self.import_groups_button.setStatusTip("Open group manager")
             self.import_groups_button.clicked.connect(self.open_group_import_dialog)
             self.dlg.gridLayout.addWidget(self.import_groups_button, 8, 1, 1, 1)
-            self.enhance_minmax_button = QPushButton("Enhance Range")
+            self.enhance_minmax_button = QPushButton("Min/Max")
             self.enhance_minmax_button.setToolTip("Apply Min/Max enhancement to loaded rasters.")
             self.enhance_minmax_button.setStatusTip("Apply min/max enhancement")
             self.enhance_minmax_button.clicked.connect(self.enhance_loaded_images_minmax)

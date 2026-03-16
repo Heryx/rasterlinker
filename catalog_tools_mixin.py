@@ -1411,26 +1411,33 @@ class CatalogToolsMixin:
         return changed
 
     def enhance_batch_options(self):
-        options = ["No enhancement (NoData only)", "Min/Max", "Percent Clip (2%)", "StdDev (2 sigma)"]
-        mode, ok = QInputDialog.getItem(
-            self.dlg,
-            "Enhance Batch",
-            "Enhancement mode:",
-            options,
-            0,
-            False,
-        )
-        if not ok:
-            return
+        # Legge il tipo di enhancement dalla combo UI
+        mode_combo = getattr(self, "enhance_contrast_mode_combo", None)
+        mode = str(mode_combo.currentText()).strip() if mode_combo is not None else "Stretch to Min/Max"
+
+        # Legge il radio attivo per determinare i valori di Min/Max
+        radio_user = getattr(self, "enhance_radio_user_defined", None)
+        radio_cumul = getattr(self, "enhance_radio_cumulative", None)
+        radio_stddev = getattr(self, "enhance_radio_stddev", None)
+
+        accuracy_combo = getattr(self, "enhance_accuracy_combo", None)
+        use_estimated = True
+        if accuracy_combo is not None:
+            use_estimated = str(accuracy_combo.currentText()).lower().startswith("estimated")
+
+        # Legge il tipo di enhancement dal QGIS enum corretto
+        from qgis.core import QgsContrastEnhancement, QgsRasterMinMaxOrigin
+        enhancement_algorithm_map = {
+            "Stretch to Min/Max": QgsContrastEnhancement.StretchToMinimumMaximum,
+            "Stretch and Clip to Min/Max": QgsContrastEnhancement.StretchAndClipToMinimumMaximum,
+            "Clip to Min/Max": QgsContrastEnhancement.ClipToMinimumMaximum,
+            "No Enhancement": QgsContrastEnhancement.NoEnhancement,
+        }
+        enhancement_algorithm = enhancement_algorithm_map.get(mode, QgsContrastEnhancement.StretchToMinimumMaximum)
 
         nodata_options = ["Keep current NoData", "Disable NoData=0"]
         nodata_mode, nodata_ok = QInputDialog.getItem(
-            self.dlg,
-            "Enhance Batch",
-            "NoData handling:",
-            nodata_options,
-            0,
-            False,
+            self.dlg, "Enhance Batch", "NoData handling:", nodata_options, 0, False,
         )
         if not nodata_ok:
             return
@@ -1450,32 +1457,56 @@ class CatalogToolsMixin:
 
         enhanced = 0
         nodata_updated = 0
+
         for layer in layers:
             provider = layer.dataProvider()
             if provider is None:
                 continue
-            if mode != "No enhancement (NoData only)":
+
+            if enhancement_algorithm != QgsContrastEnhancement.NoEnhancement:
                 try:
-                    if mode == "StdDev (2 sigma)":
+                    # Calcola mn/mx in base al radio selezionato
+                    if radio_user is not None and radio_user.isChecked():
+                        mn = float(self.enhance_user_min_spin.value())
+                        mx = float(self.enhance_user_max_spin.value())
+                    elif radio_cumul is not None and radio_cumul.isChecked():
+                        pct_lo = float(self.enhance_cumulative_min_spin.value()) / 100.0
+                        pct_hi = float(self.enhance_cumulative_max_spin.value()) / 100.0
                         stats = provider.bandStatistics(
-                            1,
-                            QgsRasterBandStats.Mean | QgsRasterBandStats.StdDev,
+                            1, QgsRasterBandStats.Min | QgsRasterBandStats.Max
                         )
-                        mn = float(stats.mean) - 2.0 * float(stats.stdDev)
-                        mx = float(stats.mean) + 2.0 * float(stats.stdDev)
-                    else:
+                        span = float(stats.maximumValue) - float(stats.minimumValue)
+                        mn = float(stats.minimumValue) + pct_lo * span
+                        mx = float(stats.minimumValue) + pct_hi * span
+                    elif radio_stddev is not None and radio_stddev.isChecked():
+                        factor = float(self.enhance_stddev_factor_spin.value())
                         stats = provider.bandStatistics(
-                            1,
-                            QgsRasterBandStats.Min | QgsRasterBandStats.Max,
+                            1, QgsRasterBandStats.Mean | QgsRasterBandStats.StdDev
+                        )
+                        mn = float(stats.mean) - factor * float(stats.stdDev)
+                        mx = float(stats.mean) + factor * float(stats.stdDev)
+                    else:
+                        # Default: Min/Max reale
+                        stats = provider.bandStatistics(
+                            1, QgsRasterBandStats.Min | QgsRasterBandStats.Max
                         )
                         mn = float(stats.minimumValue)
                         mx = float(stats.maximumValue)
-                        if mode == "Percent Clip (2%)":
-                            span = mx - mn
-                            mn = mn + 0.02 * span
-                            mx = mx - 0.02 * span
-                    if self._apply_value_range_to_layer(layer, mn, mx):
-                        enhanced += 1
+
+                    if mx > mn:
+                        renderer = layer.renderer()
+                        if renderer is not None:
+                            ce = renderer.contrastEnhancement() if hasattr(renderer, "contrastEnhancement") else None
+                            if ce is not None:
+                                ce.setMinimumValue(mn)
+                                ce.setMaximumValue(mx)
+                                ce.setContrastEnhancementAlgorithm(enhancement_algorithm, True)
+                            if hasattr(renderer, "setClassificationMin"):
+                                renderer.setClassificationMin(mn)
+                            if hasattr(renderer, "setClassificationMax"):
+                                renderer.setClassificationMax(mx)
+                            layer.triggerRepaint()
+                            enhanced += 1
                 except Exception:
                     pass
 
