@@ -354,12 +354,32 @@ class OgprSliceBuildTask(CallbackTask):
             self.setProgress(100.0)
             return True
 
+        epsg_to_write = self.epsg
+        try:
+            if bool(self.meta.get("using_synthetic_coords", False)):
+                # Avoid writing misleading projected CRS when geometry is synthetic/local.
+                epsg_to_write = None
+                self.meta["georef_warning"] = (
+                    "Coordinate OGPR non plausibili: timeslice scritte con coordinate sintetiche locali "
+                    "(CRS non assegnato)."
+                )
+            elif int(self.meta.get("profiles_geo_skipped", 0) or 0) > 0:
+                skipped = int(self.meta.get("profiles_geo_skipped", 0) or 0)
+                total = int(self.meta.get("profiles_total", 0) or 0)
+                self.meta["georef_warning"] = (
+                    f"Esclusi {skipped}/{max(total, 1)} profili con coordinate non valide "
+                    "per mantenere georeferenziazione coerente."
+                )
+        except Exception:
+            pass
+        self.meta["epsg_written"] = int(epsg_to_write) if epsg_to_write else None
+
         try:
             self.slices = write_grids_to_tifs(
                 self.grids,
                 self.meta,
                 self.output_dir,
-                epsg=self.epsg,
+                epsg=epsg_to_write,
             )
         except Exception as e:
             self.error_message = str(e)

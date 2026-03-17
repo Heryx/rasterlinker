@@ -341,6 +341,12 @@ class Gpr3dViewerDialog(QDialog):
         self._threshold_mode_combo.currentIndexChanged.connect(self._on_threshold_mode_changed)
         form.addRow("Threshold mode:", self._threshold_mode_combo)
 
+        self._iso_extract_combo = QComboBox()
+        self._iso_extract_combo.addItem("Surface only", "surface")
+        self._iso_extract_combo.addItem("All voxels", "all")
+        self._iso_extract_combo.currentIndexChanged.connect(self._on_iso_extract_mode_changed)
+        form.addRow("Iso extraction:", self._iso_extract_combo)
+
         self._opacity_spin = QDoubleSpinBox()
         self._opacity_spin.setDecimals(2)
         self._opacity_spin.setRange(0.05, 1.00)
@@ -348,6 +354,14 @@ class Gpr3dViewerDialog(QDialog):
         self._opacity_spin.setValue(0.85)
         self._opacity_spin.valueChanged.connect(self._on_opacity_changed)
         form.addRow("Volume opacity:", self._opacity_spin)
+
+        self._z_scale_spin = QDoubleSpinBox()
+        self._z_scale_spin.setDecimals(2)
+        self._z_scale_spin.setRange(0.25, 20.0)
+        self._z_scale_spin.setSingleStep(0.25)
+        self._z_scale_spin.setValue(1.0)
+        self._z_scale_spin.valueChanged.connect(self._on_z_scale_changed)
+        form.addRow("Z exaggeration:", self._z_scale_spin)
 
         self._chk_show_volume = QCheckBox()
         self._chk_show_volume.setChecked(False)
@@ -614,7 +628,8 @@ class Gpr3dViewerDialog(QDialog):
         self._clip_min = float(self._clip_min_spin.value())
         self._clip_max = float(self._clip_max_spin.value())
         self._refresh_histogram()
-        self._draw_volume_actor()
+        if not self._update_volume_actor_clim_fast():
+            self._draw_volume_actor()
         self._refresh_section_plane()
         self._refresh_isosurface()
         self._render_now()
@@ -642,7 +657,8 @@ class Gpr3dViewerDialog(QDialog):
         self._clip_min = float(self._clip_min_spin.value())
         self._clip_max = float(self._clip_max_spin.value())
         self._refresh_histogram()
-        self._draw_volume_actor()
+        if not self._update_volume_actor_clim_fast():
+            self._draw_volume_actor()
         self._refresh_section_plane()
         self._refresh_isosurface()
         self._render_now()
@@ -795,6 +811,25 @@ class Gpr3dViewerDialog(QDialog):
         except Exception:
             pass
 
+    def _apply_z_scale(self):
+        if self._plotter is None:
+            return
+        try:
+            z_scale = float(self._z_scale_spin.value())
+        except Exception:
+            z_scale = 1.0
+        if not np.isfinite(z_scale) or z_scale <= 0.0:
+            z_scale = 1.0
+        try:
+            self._plotter.set_scale(xscale=1.0, yscale=1.0, zscale=float(z_scale), reset_camera=False)
+        except TypeError:
+            try:
+                self._plotter.set_scale(zscale=float(z_scale))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _apply_camera_for_mode(self, mode: str | None = None):
         if self._volume_grid is None:
             return
@@ -822,6 +857,7 @@ class Gpr3dViewerDialog(QDialog):
             except Exception:
                 pass
         self._apply_projection_mode()
+        self._apply_z_scale()
         self._render_now()
 
     def _enable_point_picking(self):
@@ -922,12 +958,12 @@ class Gpr3dViewerDialog(QDialog):
         if not bool(self._chk_show_volume.isChecked()):
             return
         clip_lo, clip_hi = self._effective_clim()
-        _op = float(np.clip(self._opacity_spin.value(), 0.05, 1.0))
+        opacity_tf = self._volume_opacity_tf()
         self._plotter.add_volume(
             self._volume_grid,
             scalars="amplitude",
             cmap=self._section_cmap,
-            opacity=_op,
+            opacity=opacity_tf,
             clim=(clip_lo, clip_hi),
             shade=False,
             blending="composite",
@@ -944,6 +980,90 @@ class Gpr3dViewerDialog(QDialog):
             )
         except Exception:
             pass
+
+    def _volume_opacity_tf(self) -> list[float]:
+        op = float(np.clip(self._opacity_spin.value(), 0.05, 1.0))
+        return [0.0, 0.0, op * 0.05, op * 0.30, op]
+
+    def _get_volume_actor(self):
+        try:
+            renderer = getattr(self._plotter, "renderer", None)
+            actors = getattr(renderer, "actors", None)
+            if isinstance(actors, dict):
+                return actors.get(self._volume_actor_name)
+        except Exception:
+            pass
+        return None
+
+    def _update_volume_actor_opacity_fast(self) -> bool:
+        """Update opacity on existing VTK volume actor without full re-add."""
+        if self._volume_grid is None or not bool(self._chk_show_volume.isChecked()):
+            return False
+        actor = self._get_volume_actor()
+        if actor is None:
+            return False
+
+        clip_lo, clip_hi = self._effective_clim()
+        if not np.isfinite(clip_lo):
+            clip_lo = float(self._amp_min)
+        if not np.isfinite(clip_hi) or clip_hi <= clip_lo:
+            clip_hi = float(clip_lo) + 1e-6
+
+        try:
+            vtk_mod = getattr(pv, "_vtk", None)
+            if vtk_mod is None:
+                import vtk as vtk_mod  # type: ignore
+
+            pwf = vtk_mod.vtkPiecewiseFunction()
+            xs = np.linspace(float(clip_lo), float(clip_hi), num=5, dtype=np.float64)
+            for xv, ov in zip(xs, self._volume_opacity_tf()):
+                pwf.AddPoint(float(xv), float(ov))
+
+            prop = actor.GetProperty() if hasattr(actor, "GetProperty") else None
+            if prop is None:
+                return False
+            prop.SetScalarOpacity(pwf)
+
+            try:
+                mapper = actor.GetMapper() if hasattr(actor, "GetMapper") else None
+                if mapper is not None and hasattr(mapper, "SetScalarRange"):
+                    mapper.SetScalarRange(float(clip_lo), float(clip_hi))
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    def _update_volume_actor_clim_fast(self) -> bool:
+        """Update scalar range on existing volume actor without full re-add."""
+        if self._volume_grid is None or not bool(self._chk_show_volume.isChecked()):
+            return False
+        actor = self._get_volume_actor()
+        if actor is None:
+            return False
+
+        clip_lo, clip_hi = self._effective_clim()
+        if not np.isfinite(clip_lo):
+            clip_lo = float(self._amp_min)
+        if not np.isfinite(clip_hi) or clip_hi <= clip_lo:
+            clip_hi = float(clip_lo) + 1e-6
+
+        try:
+            mapper = actor.GetMapper() if hasattr(actor, "GetMapper") else None
+            if mapper is None or not hasattr(mapper, "SetScalarRange"):
+                return False
+            mapper.SetScalarRange(float(clip_lo), float(clip_hi))
+            try:
+                mapper.Modified()
+            except Exception:
+                pass
+            try:
+                actor.Modified()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
 
     def _configure_controls_for_volume(self):
         self._updating_controls = True
@@ -965,6 +1085,7 @@ class Gpr3dViewerDialog(QDialog):
         self._threshold_slider.setEnabled(enabled)
         self._threshold_spin.setEnabled(enabled)
         self._threshold_mode_combo.setEnabled(enabled)
+        self._iso_extract_combo.setEnabled(enabled)
 
     def _replace_volume(self, volume: np.ndarray, meta: dict, reset_camera: bool = False):
         self._volume = np.asarray(volume, dtype=np.float32)
@@ -978,6 +1099,7 @@ class Gpr3dViewerDialog(QDialog):
         self._plotter.show_grid()
 
         self._load_volume_grid(self._volume, self._meta)
+        self._apply_z_scale()
         self._draw_volume_actor()
         self._load_profiles(self._profiles)
         self._configure_controls_for_volume()
@@ -994,10 +1116,12 @@ class Gpr3dViewerDialog(QDialog):
             self._apply_camera_for_mode(self._current_section_mode())
         else:
             self._apply_projection_mode()
+            self._apply_z_scale()
         self._render_now()
         self._status.setText(
             f"Volume: {int(self._spatial.get('n_x', 0))}x{int(self._spatial.get('n_y', 0))}x{int(self._spatial.get('n_z', 0))}  "
             f"res={float(self._spatial.get('res', 0.0)):.3f}m  z_step={float(self._spatial.get('z_step', 0.0)):.3f}m  "
+            f"z_scale={float(self._z_scale_spin.value()):.2f}  "
             f"finite={self._finite_voxels}/{self._total_voxels}  "
             f"origin=({float(self._spatial.get('x_min', 0.0)):.3f}, {float(self._spatial.get('y_min', 0.0)):.3f})"
         )
@@ -1172,6 +1296,7 @@ class Gpr3dViewerDialog(QDialog):
 
         threshold = float(self._threshold_spin.value())
         mode = str(self._threshold_mode_combo.currentData() or "above")
+        surface_only = str(self._iso_extract_combo.currentData() or "surface") == "surface"
         try:
             points = extract_isosurface_points(
                 self._volume,
@@ -1179,6 +1304,7 @@ class Gpr3dViewerDialog(QDialog):
                 self._meta,
                 threshold=threshold,
                 mode=mode,
+                surface_only=surface_only,
                 max_points=120000,
             )
         except Exception:
@@ -1265,8 +1391,16 @@ class Gpr3dViewerDialog(QDialog):
     def _on_threshold_mode_changed(self, _idx: int):
         self._refresh_isosurface()
 
+    def _on_iso_extract_mode_changed(self, _idx: int):
+        self._refresh_isosurface()
+
     def _on_opacity_changed(self, _value: float):
-        self._draw_volume_actor()
+        if not self._update_volume_actor_opacity_fast():
+            self._draw_volume_actor()
+        self._render_now()
+
+    def _on_z_scale_changed(self, _value: float):
+        self._apply_z_scale()
         self._render_now()
 
     def _on_show_volume_toggled(self, _checked: bool):
@@ -1375,6 +1509,7 @@ class Gpr3dViewerDialog(QDialog):
 
         threshold = float(self._threshold_spin.value())
         mode = str(self._threshold_mode_combo.currentData() or "above")
+        surface_only = str(self._iso_extract_combo.currentData() or "surface") == "surface"
         try:
             points = extract_isosurface_points(
                 self._volume,
@@ -1382,6 +1517,7 @@ class Gpr3dViewerDialog(QDialog):
                 self._meta,
                 threshold=threshold,
                 mode=mode,
+                surface_only=surface_only,
                 max_points=500000,
             )
             if points.shape[0] <= 0:

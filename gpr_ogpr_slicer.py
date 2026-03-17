@@ -594,7 +594,8 @@ def _process_profiles(
     stack_n: int = 1,
     stack_kernel: str = "boxcar",
     flip_traces_mode: str = "none",
-) -> list[tuple]:
+    return_diagnostics: bool = False,
+) -> list[tuple] | tuple[list[tuple], dict]:
     """Process profiles and return list of (prof, x_ref, y_ref, ampl_3d).
 
     Applies optional processing per channel and extracts amplitudes according to
@@ -628,6 +629,17 @@ def _process_profiles(
             ok_geo = False
         valid_geo_flags.append(ok_geo)
     use_synthetic_coords = not any(valid_geo_flags)
+    proc_diag = {
+        "profiles_total": int(len(profiles)),
+        "profiles_geo_valid": int(sum(1 for v in valid_geo_flags if bool(v))),
+        "profiles_geo_skipped": 0,
+        "using_synthetic_coords": bool(use_synthetic_coords),
+    }
+    if use_synthetic_coords:
+        print(
+            "[OGPR slicer][WARN] nessun profilo con geolocalizzazione plausibile; "
+            "uso coordinate sintetiche locali."
+        )
 
     bg_reference = None
     if use_proc and params.get("bg_removal", True) and params.get("bg_mode") == "grid_by_grid":
@@ -724,9 +736,17 @@ def _process_profiles(
         ampl_3d = np.stack(proc_channels, axis=2)
         n_traces = int(ampl_3d.shape[1])
 
+        profile_geo_valid = bool(valid_geo_flags[p_idx]) if p_idx < len(valid_geo_flags) else False
         if use_synthetic_coords:
             x_ref, y_ref = _synthetic_profile_xy(ch_ref, prof, p_idx)
         else:
+            if not profile_geo_valid:
+                proc_diag["profiles_geo_skipped"] += 1
+                print(
+                    f"[OGPR slicer][WARN] skip profile senza geolocalizzazione valida: "
+                    f"{getattr(prof, 'path', '')}"
+                )
+                continue
             x_ref = np.asarray(ch_ref.easting, dtype=np.float64)
             y_ref = np.asarray(ch_ref.northing, dtype=np.float64)
             finite = np.isfinite(x_ref) & np.isfinite(y_ref)
@@ -736,10 +756,22 @@ def _process_profiles(
                 x_ref = np.interp(idx, idx_ok, x_ref[finite]).astype(np.float64)
                 y_ref = np.interp(idx, idx_ok, y_ref[finite]).astype(np.float64)
             elif not finite.any():
-                x_ref, y_ref = _synthetic_profile_xy(ch_ref, prof, p_idx)
+                proc_diag["profiles_geo_skipped"] += 1
+                print(
+                    f"[OGPR slicer][WARN] skip profile senza coordinate finite: "
+                    f"{getattr(prof, 'path', '')}"
+                )
+                continue
 
         x_ref = _resample_vec_to_n(x_ref, n_traces)
         y_ref = _resample_vec_to_n(y_ref, n_traces)
+        if (not use_synthetic_coords) and (not _has_plausible_geo_xy(x_ref, y_ref)):
+            proc_diag["profiles_geo_skipped"] += 1
+            print(
+                f"[OGPR slicer][WARN] skip profile con geolocalizzazione non plausibile dopo resample: "
+                f"{getattr(prof, 'path', '')}"
+            )
+            continue
         z_surf_ref = _resample_vec_to_n(
             np.asarray(getattr(ch_ref, "altitude", []), dtype=np.float64),
             n_traces,
@@ -760,6 +792,8 @@ def _process_profiles(
         processed.append((prof, x_ref, y_ref, ampl_3d, z_surf_ref))
     if balance_profiles:
         processed = _normalize_inter_profile_processed(processed)
+    if return_diagnostics:
+        return processed, proc_diag
     return processed
 
 
@@ -1152,7 +1186,7 @@ def compute_ogpr_slice_grids(
 
     params = {**DEFAULT_PIPELINE, **(pipeline_params or {})} if use_processing else {}
 
-    processed = _process_profiles(
+    processed_result = _process_profiles(
         profiles,
         channel,
         combine_method,
@@ -1169,9 +1203,20 @@ def compute_ogpr_slice_grids(
         stack_n=stack_n,
         stack_kernel=stack_kernel,
         flip_traces_mode=flip_traces_mode,
+        return_diagnostics=True,
     )
+    if isinstance(processed_result, tuple):
+        processed, proc_diag = processed_result
+    else:
+        processed = processed_result
+        proc_diag = {}
     if not processed:
-        return [], {}
+        return [], {
+            "profiles_total": int(proc_diag.get("profiles_total", len(profiles))),
+            "profiles_geo_valid": int(proc_diag.get("profiles_geo_valid", 0)),
+            "profiles_geo_skipped": int(proc_diag.get("profiles_geo_skipped", 0)),
+            "using_synthetic_coords": bool(proc_diag.get("using_synthetic_coords", False)),
+        }
 
     gp = _build_grid_params(
         processed,
@@ -1249,6 +1294,10 @@ def compute_ogpr_slice_grids(
         topographic_correction=bool(topographic_correction),
         topo_reference_mode=str(topo_reference_mode or "median"),
         topo_reference_elevation=(float(topo_ref) if topo_ref is not None and np.isfinite(topo_ref) else None),
+        profiles_total=int(proc_diag.get("profiles_total", len(profiles))),
+        profiles_geo_valid=int(proc_diag.get("profiles_geo_valid", 0)),
+        profiles_geo_skipped=int(proc_diag.get("profiles_geo_skipped", 0)),
+        using_synthetic_coords=bool(proc_diag.get("using_synthetic_coords", False)),
     )
 
     for iz, z_lev in enumerate(z_levels):

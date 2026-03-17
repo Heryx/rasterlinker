@@ -304,6 +304,18 @@ class GprOgprVolumeMixin:
                     return
 
                 slices = list(getattr(done_task, "slices", []) or [])
+                task_meta = dict(getattr(done_task, "meta", {}) or {})
+                epsg_written = task_meta.get("epsg_written", epsg)
+                georef_warning = str(task_meta.get("georef_warning", "") or "").strip()
+                if georef_warning:
+                    try:
+                        self.iface.messageBar().pushWarning("GeoSurvey Studio", georef_warning)
+                    except Exception:
+                        QMessageBox.warning(
+                            getattr(self, "dlg", None),
+                            "Georeferenziazione OGPR",
+                            georef_warning,
+                        )
                 if bool(getattr(done_task, "no_grids", False)) or not slices:
                     QMessageBox.warning(
                         getattr(self, "dlg", None), "Nessuna slice prodotta",
@@ -324,7 +336,7 @@ class GprOgprVolumeMixin:
                     "z_step":          params["z_step"],
                     "resolution":      params["resolution"],
                     "radius":          params["radius"],
-                    "epsg":            epsg,
+                    "epsg":            epsg_written,
                     "n_slices":        len(slices),
                     "normalize_channels": bool(extra_slice_params.get("normalize_channels", False)),
                     "extraction_mode": str(extra_slice_params.get("extraction_mode", "las_like") or "las_like"),
@@ -356,7 +368,7 @@ class GprOgprVolumeMixin:
                 # --- registra nel catalogo (riusa GprVolumeMixin) ---
                 try:
                     self._register_las_slices_in_catalog(
-                        project_root, group_name, slices, epsg, reslice=is_reslice
+                        project_root, group_name, slices, epsg_written, reslice=is_reslice
                     )
                 except Exception as exc:
                     QMessageBox.warning(
@@ -421,7 +433,7 @@ class GprOgprVolumeMixin:
                                 "z_min": z_min_view,
                                 "z_max": z_max_view,
                                 "z_levels": [float(z) for z in z_levels] if z_levels else None,
-                                "epsg": int(epsg) if epsg else None,
+                                "epsg": int(epsg_written) if epsg_written else None,
                                 "channel": int(params.get("channel", 0) or 0),
                                 "use_processing": bool(extra_slice_params.get("use_processing", False)),
                                 "extraction_mode": str(extra_slice_params.get("extraction_mode", "las_like") or "las_like"),

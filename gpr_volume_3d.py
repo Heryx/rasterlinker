@@ -489,6 +489,7 @@ def extract_isosurface_points(
     meta: dict | None,
     threshold: float,
     mode: str = "above",
+    surface_only: bool = True,
     max_points: int | None = None,
     seed: int = 42,
 ) -> np.ndarray:
@@ -510,8 +511,8 @@ def extract_isosurface_points(
     else:
         mask = finite & (vol >= thr)
 
-    surface = _surface_mask_from_threshold(mask)
-    idx = np.argwhere(surface)
+    selected = _surface_mask_from_threshold(mask) if bool(surface_only) else mask
+    idx = np.argwhere(selected)
     if idx.size == 0:
         return np.zeros((0, 4), dtype=np.float32)
 
@@ -552,7 +553,8 @@ def export_points_to_las(
     if pts.shape[0] == 0:
         raise ValueError("No points to export")
 
-    header = laspy.LasHeader(point_format=3, version="1.2")
+    # Use a minimal point format to avoid requiring optional attributes.
+    header = laspy.LasHeader(point_format=0, version="1.2")
     header.scales = [0.001, 0.001, 0.001]
     las = laspy.LasData(header)
     las.x = pts[:, 0]
