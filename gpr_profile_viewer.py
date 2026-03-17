@@ -1394,7 +1394,7 @@ class GprProfileViewer(QDialog):
         prof = self._profiles[self._prof_idx]
         try:
             self._proc_data = apply_pipeline(
-                self._raw_data, params, dt_ns=prof.dt_ns
+                self._raw_data, params, dt_ns=prof.dt_ns, normalize_output=False
             )
         except Exception as e:
             QMessageBox.critical(self, "Errore processing", str(e))
@@ -1407,12 +1407,9 @@ class GprProfileViewer(QDialog):
         spread = float(np.nanmax(proc) - np.nanmin(proc)) if finite.any() else 0.0
         if finite_ratio < 0.5 or spread < 1e-6:
             try:
-                self._proc_data = normalize_display(
-                    np.asarray(self._raw_data, dtype=np.float32),
-                    clip_pct=float(self._spin_clip.value()),
-                )
+                self._proc_data = np.asarray(self._raw_data, dtype=np.float32)
                 self._lbl_status.setText(
-                    "Processing inconcludente: visualizzazione fallback su dato grezzo normalizzato."
+                    "Processing inconcludente: visualizzazione fallback su dato grezzo."
                 )
             except Exception:
                 pass
@@ -1909,13 +1906,29 @@ class GprProfileViewer(QDialog):
         g = np.clip(g, 1e-6, 1e6).astype(np.float32)
         return g.reshape(-1, 1)
 
+    def _compose_display_data(self) -> np.ndarray | None:
+        if self._proc_data is None:
+            return None
+        proc = np.asarray(self._proc_data, dtype=np.float32)
+        if proc.ndim != 2 or proc.size <= 0:
+            return None
+
+        clip_pct = float(self._spin_clip.value()) if hasattr(self, "_spin_clip") else 95.0
+        # Normalize first, then apply manual gains so gain controls remain visible.
+        base = normalize_display(proc, clip_pct=clip_pct).astype(np.float32, copy=False)
+        depth_gain = self._build_depth_range_gain(int(base.shape[0]))
+        gain = float(self._spin_gain.value()) if hasattr(self, "_spin_gain") else 1.0
+        disp = (base * depth_gain * gain).astype(np.float32, copy=False)
+        return np.clip(disp, -1.0, 1.0).astype(np.float32, copy=False)
+
     def _apply_gain_only(self):
         if self._proc_data is None:
             self._apply_processing()
             return
+        self._disp_data = self._compose_display_data()
+        if self._disp_data is None:
+            return
         gain = float(self._spin_gain.value())
-        depth_gain = self._build_depth_range_gain(int(self._proc_data.shape[0]))
-        self._disp_data = (self._proc_data * gain * depth_gain).astype(np.float32, copy=False)
         disp_arr = np.asarray(self._disp_data, dtype=np.float64)
         finite = np.isfinite(disp_arr)
         if finite.any():
@@ -2140,18 +2153,8 @@ class GprProfileViewer(QDialog):
             depth_max = max(1.0, float(n_out))
 
         self._ax.clear()
-        disp = np.asarray(self._disp_data, dtype=np.float64)
-        finite = disp[np.isfinite(disp)]
-        if finite.size:
-            vmin = float(np.percentile(finite, 1.0))
-            vmax = float(np.percentile(finite, 99.0))
-            if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax - vmin < 1e-6):
-                vmin = float(np.nanmin(finite))
-                vmax = float(np.nanmax(finite))
-            if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax - vmin < 1e-6):
-                vmin, vmax = -1.0, 1.0
-        else:
-            vmin, vmax = -1.0, 1.0
+        # Keep fixed display limits so gain controls affect what the user sees.
+        vmin, vmax = -1.0, 1.0
         real_aspect = bool(
             getattr(self, "_chk_real_aspect", None)
             and self._chk_real_aspect.isChecked()

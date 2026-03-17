@@ -278,20 +278,17 @@ def agc_gain(
     O(n_s * n_t) senza loop Python.
     """
     n_s, n_t = data.shape
-    half     = max(window, 8) // 2
-    d64 = data.astype(np.float64)
-    sq  = d64 ** 2
-    cs  = np.cumsum(sq, axis=0)
-    s_idx   = np.arange(n_s)
-    lo      = np.maximum(0,       s_idx - half)
-    hi      = np.minimum(n_s - 1, s_idx + half)
-    win_len = (hi - lo + 1).reshape(-1, 1)
-    sum_hi  = cs[hi, :]
-    lo_prev = np.maximum(0, lo - 1)
-    sum_lo  = cs[lo_prev, :]
-    mask_lo = (lo > 0).reshape(-1, 1)
-    sum_lo  = np.where(mask_lo, sum_lo, 0.0)
-    rms = np.sqrt((sum_hi - sum_lo) / win_len) + 1e-10
+    half = max(window, 8) // 2
+    d64 = data.astype(np.float64, copy=False)
+    sq = d64 ** 2
+    # Exclusive cumsum: cs[k] = sum(sq[:k]); avoids off-by-one at window start.
+    cs = np.vstack([np.zeros((1, n_t), dtype=np.float64), np.cumsum(sq, axis=0)])
+    s_idx = np.arange(n_s, dtype=np.int64)
+    lo = np.maximum(0, s_idx - half)
+    hi = np.minimum(n_s - 1, s_idx + half)
+    win_len = (hi - lo + 1).reshape(-1, 1).astype(np.float64)
+    sum_win = cs[hi + 1, :] - cs[lo, :]
+    rms = np.sqrt(np.maximum(sum_win / win_len, 0.0)) + 1e-10
     out = (d64 / rms).astype(np.float32)
     if out.size > 0:
         clip = float(np.percentile(np.abs(out), clip_percentile))
