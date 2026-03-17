@@ -10,6 +10,7 @@ import numpy as np
 from gpr_volume_3d import (
     build_3d_volume,
     export_volume_to_npz,
+    extract_isosurface_points,
     extract_b_scan_crossline,
     extract_b_scan_inline,
     extract_c_scan,
@@ -70,6 +71,31 @@ class GprVolume3DTest(unittest.TestCase):
             self.assertEqual(int(loaded_meta.get("n_z", -1)), 2)
             self.assertEqual(int(loaded_meta.get("n_y", -1)), 2)
             self.assertEqual(int(loaded_meta.get("n_x", -1)), 2)
+
+    def test_isosurface_points_without_grids(self):
+        vol = np.array(
+            [
+                [[0.1, 0.9], [0.2, 0.3]],
+                [[0.8, 0.4], [0.7, 0.6]],
+            ],
+            dtype=np.float32,
+        )
+        meta = {
+            "x_min": 10.0,
+            "y_min": 20.0,
+            "resolution": 0.5,
+            "z_min": 0.0,
+            "z_step": 0.25,
+        }
+        pts = extract_isosurface_points(
+            vol,
+            grids=None,
+            meta=meta,
+            threshold=0.75,
+            mode="above",
+        )
+        self.assertTrue(pts.shape[1] == 4)
+        self.assertGreaterEqual(pts.shape[0], 1)
 
 
 if __name__ == "__main__":

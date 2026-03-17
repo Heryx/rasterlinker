@@ -358,6 +358,59 @@ class GprOgprVolumeMixin:
                     except Exception:
                         pass
 
+                # --- apri viewer 3D con il volume appena calcolato ---
+                try:
+                    grids_for_viewer = list(getattr(done_task, "grids", []) or [])
+                    meta_for_viewer = dict(getattr(done_task, "meta", {}) or {})
+                    if grids_for_viewer and meta_for_viewer:
+                        from .gpr_volume_3d import build_3d_volume
+                        from .gpr_3d_viewer_dialog import Gpr3dViewerDialog
+
+                        z_levels = []
+                        for g in grids_for_viewer:
+                            try:
+                                z_levels.append(float(g.get("z_lev")))
+                            except Exception:
+                                continue
+                        z_levels = [z for z in z_levels if z == z]
+                        z_min_view = float(min(z_levels)) if z_levels else float(params["z_min"])
+                        z_max_view = float(max(z_levels)) if z_levels else float(params["z_max"])
+
+                        meta_for_viewer.update(
+                            {
+                                "z_step": float(params["z_step"]),
+                                "z_min": z_min_view,
+                                "z_max": z_max_view,
+                                "z_levels": [float(z) for z in z_levels] if z_levels else None,
+                                "epsg": int(epsg) if epsg else None,
+                            }
+                        )
+
+                        volume = build_3d_volume(grids_for_viewer, meta_for_viewer)
+                        old_viewer = getattr(self, "_ogpr_3d_viewer_dialog", None)
+                        if old_viewer is not None:
+                            try:
+                                old_viewer.close()
+                            except Exception:
+                                pass
+                        viewer = Gpr3dViewerDialog(
+                            volume=volume,
+                            meta=meta_for_viewer,
+                            profiles=profiles,
+                            grids=grids_for_viewer,
+                            parent=getattr(self, "dlg", None),
+                        )
+                        self._ogpr_3d_viewer_dialog = viewer
+                        viewer.show()
+                        viewer.raise_()
+                        viewer.activateWindow()
+                except Exception as exc:
+                    if hasattr(self, "_notify_info"):
+                        self._notify_info(
+                            f"Slice create: viewer 3D non aperto ({exc}).",
+                            duration=10,
+                        )
+
                 action = "Re-slice" if is_reslice else "Import OGPR->Slice"
                 msg = (
                     f"{action} completato: '{group_name}', "

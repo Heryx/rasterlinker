@@ -485,8 +485,8 @@ def _surface_mask_from_threshold(mask: np.ndarray) -> np.ndarray:
 
 def extract_isosurface_points(
     volume: np.ndarray,
-    grids: list[dict],
-    meta: dict,
+    grids: list[dict] | None,
+    meta: dict | None,
     threshold: float,
     mode: str = "above",
     max_points: int | None = None,
@@ -520,7 +520,7 @@ def extract_isosurface_points(
         sel = rng.choice(idx.shape[0], size=int(max_points), replace=False)
         idx = idx[sel]
 
-    z_axis, y_axis, x_axis = volume_axes(grids, meta)
+    z_axis, y_axis, x_axis = _axes_for_volume(vol, grids, dict(meta or {}))
     iz = idx[:, 0].astype(np.int64)
     iy = idx[:, 1].astype(np.int64)
     ix = idx[:, 2].astype(np.int64)
