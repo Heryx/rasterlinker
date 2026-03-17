@@ -100,7 +100,8 @@ def _normalize_inter_profile_processed(processed: list[tuple]) -> list[tuple]:
         return processed
 
     prof_medians = []
-    for _, _, _, ampl_3d in processed:
+    for entry in processed:
+        ampl_3d = entry[3]
         arr = np.asarray(ampl_3d, dtype=np.float64)
         finite = arr[np.isfinite(arr)]
         if finite.size == 0:
@@ -116,15 +117,33 @@ def _normalize_inter_profile_processed(processed: list[tuple]) -> list[tuple]:
         return processed
 
     out = []
-    for (prof, x_ref, y_ref, ampl_3d), prof_med in zip(processed, prof_medians):
+    for entry, prof_med in zip(processed, prof_medians):
+        prof, x_ref, y_ref, ampl_3d = entry[:4]
         scale = 1.0
         if np.isfinite(prof_med) and prof_med > 1e-12:
             scale = global_med / prof_med
             if not np.isfinite(scale) or scale <= 0:
                 scale = 1.0
         ampl_scaled = (np.asarray(ampl_3d, dtype=np.float64) * scale).astype(np.float32)
-        out.append((prof, x_ref, y_ref, ampl_scaled))
+        if len(entry) >= 5:
+            out.append((prof, x_ref, y_ref, ampl_scaled, entry[4]))
+        else:
+            out.append((prof, x_ref, y_ref, ampl_scaled))
     return out
+
+
+def _iter_processed_entries(processed: list[tuple]):
+    """Yield normalized processed tuples as (prof, x_ref, y_ref, ampl_3d, z_surf_ref)."""
+    for entry in processed:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 4:
+            continue
+        prof, x_ref, y_ref, ampl_3d = entry[:4]
+        n_traces = int(np.asarray(ampl_3d).shape[1]) if np.asarray(ampl_3d).ndim >= 2 else 0
+        if len(entry) >= 5:
+            z_surf_ref = _resample_vec_to_n(np.asarray(entry[4], dtype=np.float64), n_traces)
+        else:
+            z_surf_ref = np.full(n_traces, np.nan, dtype=np.float64)
+        yield prof, np.asarray(x_ref, dtype=np.float64), np.asarray(y_ref, dtype=np.float64), np.asarray(ampl_3d), z_surf_ref
 
 
 def _has_plausible_geo_xy(x: np.ndarray, y: np.ndarray) -> bool:
@@ -190,6 +209,30 @@ def _resample_vec_to_n(vec: np.ndarray, n: int) -> np.ndarray:
     return np.interp(dst, src, arr).astype(np.float64)
 
 
+def _normalize_flip_mode(mode: str | None) -> str:
+    m = str(mode or "none").strip().lower()
+    if m in {"all", "odd", "even"}:
+        return m
+    return "none"
+
+
+def _should_flip_profile(profile_idx: int, mode: str | None) -> bool:
+    """Return True if traces for the given profile index should be reversed.
+
+    `odd`/`even` are evaluated in 1-based profile order:
+      - odd  => profiles 1, 3, 5, ...
+      - even => profiles 2, 4, 6, ...
+    """
+    m = _normalize_flip_mode(mode)
+    if m == "all":
+        return True
+    if m == "odd":
+        return ((int(profile_idx) + 1) % 2) == 1
+    if m == "even":
+        return ((int(profile_idx) + 1) % 2) == 0
+    return False
+
+
 def _remove_amplitude_outliers(
     x: np.ndarray, y: np.ndarray, values: np.ndarray, n_sigma: float = 3.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -245,6 +288,43 @@ def _amplitude_diagnostics(values: np.ndarray, hist_bins: int = 10) -> dict:
         "hist_counts": [int(v) for v in counts.tolist()],
         "hist_edges": [float(v) for v in edges.tolist()],
     }
+
+
+def _stack_traces(
+    data: np.ndarray,
+    stack_n: int = 1,
+    kernel: str = "boxcar",
+) -> np.ndarray:
+    """Smooth along trace axis by stacking neighboring traces."""
+    try:
+        n = int(stack_n)
+    except Exception:
+        n = 1
+    if n <= 1:
+        return np.asarray(data, dtype=np.float32, copy=False)
+    n = max(1, min(255, n))
+    arr = np.asarray(data, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] <= 1:
+        return np.asarray(data, dtype=np.float32, copy=False)
+
+    if str(kernel or "boxcar").strip().lower() in {"tri", "triangle", "triangular"}:
+        # Triangular weights: 1..k..1
+        half = max(1, n // 2)
+        if n % 2 == 0:
+            w = np.concatenate([np.arange(1, half + 1), np.arange(half, 0, -1)])
+        else:
+            w = np.concatenate([np.arange(1, half + 1), np.arange(half + 1, 0, -1)])
+        w = w.astype(np.float64)
+    else:
+        w = np.ones(n, dtype=np.float64)
+    w /= max(float(w.sum()), 1e-12)
+
+    pad = len(w) // 2
+    padded = np.pad(arr, ((0, 0), (pad, pad)), mode="edge")
+    out = np.empty_like(arr)
+    for r in range(arr.shape[0]):
+        out[r, :] = np.convolve(padded[r, :], w, mode="valid")[: arr.shape[1]]
+    return out.astype(np.float32)
 
 
 def _estimate_acquisition_direction(x: np.ndarray, y: np.ndarray) -> float:
@@ -473,6 +553,14 @@ def _process_profiles(
     extraction_mode: str = "las_like",
     use_processing: bool = False,
     balance_profiles: bool = True,
+    pre_slice_bg_removal: bool = False,
+    pre_slice_bg_mode: str = "line_by_line",
+    pre_slice_bg_window: int = 0,
+    pre_slice_bg_sample_start: int = 0,
+    pre_slice_bg_sample_end: int = 0,
+    stack_n: int = 1,
+    stack_kernel: str = "boxcar",
+    flip_traces_mode: str = "none",
 ) -> list[tuple]:
     """Process profiles and return list of (prof, x_ref, y_ref, ampl_3d).
 
@@ -483,7 +571,7 @@ def _process_profiles(
       - signed: keep signed processed trace
     Optionally applies robust inter-profile balancing using global median.
     """
-    from .gpr_processing import apply_pipeline, apply_pre_bg_pipeline
+    from .gpr_processing import apply_pipeline, apply_pre_bg_pipeline, background_removal
 
     mode = str(extraction_mode or "las_like").strip().lower()
     use_proc = bool(use_processing)
@@ -548,6 +636,32 @@ def _process_profiles(
             else:
                 proc = raw
 
+            # Optional background removal for LAS-like flow (or when disabled in pipeline).
+            try:
+                need_pre_bg = bool(pre_slice_bg_removal) and (
+                    (not use_proc) or (not bool(params.get("bg_removal", False)))
+                )
+                if need_pre_bg:
+                    proc = background_removal(
+                        proc,
+                        mode=str(pre_slice_bg_mode or "line_by_line"),
+                        window=int(pre_slice_bg_window or 0),
+                        sample_start=int(pre_slice_bg_sample_start or 0),
+                        sample_end=int(pre_slice_bg_sample_end or 0),
+                    )
+            except Exception as exc:
+                print(f"[OGPR slicer] pre-slice bg_removal error ch{ci}: {exc}")
+
+            # Optional lateral trace stacking (noise reduction before extraction).
+            try:
+                proc = _stack_traces(
+                    proc,
+                    stack_n=int(stack_n or 1),
+                    kernel=str(stack_kernel or "boxcar"),
+                )
+            except Exception as exc:
+                print(f"[OGPR slicer] trace stacking error ch{ci}: {exc}")
+
             if mode in {"envelope", "hilbert"}:
                 ampl = _envelope(proc)
             elif mode in {"signed", "signed_amp"}:
@@ -576,10 +690,24 @@ def _process_profiles(
 
         x_ref = _resample_vec_to_n(x_ref, n_traces)
         y_ref = _resample_vec_to_n(y_ref, n_traces)
+        z_surf_ref = _resample_vec_to_n(
+            np.asarray(getattr(ch_ref, "altitude", []), dtype=np.float64),
+            n_traces,
+        )
+        if z_surf_ref.size != n_traces:
+            z_surf_ref = np.full(n_traces, np.nan, dtype=np.float64)
+        if not np.isfinite(z_surf_ref).any():
+            z_surf_ref = np.full(n_traces, np.nan, dtype=np.float64)
+
+        if _should_flip_profile(p_idx, flip_traces_mode):
+            ampl_3d = ampl_3d[:, ::-1, :]
+            x_ref = x_ref[::-1].copy()
+            y_ref = y_ref[::-1].copy()
+            z_surf_ref = z_surf_ref[::-1].copy()
 
         if normalize_channels and ampl_3d.shape[2] > 1:
             ampl_3d = _normalize_channels(ampl_3d)
-        processed.append((prof, x_ref, y_ref, ampl_3d))
+        processed.append((prof, x_ref, y_ref, ampl_3d, z_surf_ref))
     if balance_profiles:
         processed = _normalize_inter_profile_processed(processed)
     return processed
@@ -594,8 +722,8 @@ def _build_grid_params(
     anisotropy_ratio: float | None,
     anisotropy_angle: float | None,
 ) -> dict:
-    all_e = np.concatenate([x for _, x, _, _ in processed])
-    all_n = np.concatenate([y for _, _, y, _ in processed])
+    all_e = np.concatenate([x for _, x, _, _, _ in _iter_processed_entries(processed)])
+    all_n = np.concatenate([y for _, _, y, _, _ in _iter_processed_entries(processed)])
     finite = np.isfinite(all_e) & np.isfinite(all_n)
     if finite.any():
         all_e = all_e[finite]
@@ -633,6 +761,34 @@ def _build_grid_params(
     }
 
 
+def _compute_topo_reference(
+    processed: list,
+    mode: str = "median",
+    custom_elevation: float | None = None,
+) -> float | None:
+    if custom_elevation is not None and np.isfinite(float(custom_elevation)):
+        return float(custom_elevation)
+    vals = []
+    for _, _, _, _, z_surf_ref in _iter_processed_entries(processed):
+        zz = np.asarray(z_surf_ref, dtype=np.float64)
+        zz = zz[np.isfinite(zz)]
+        if zz.size > 0:
+            vals.append(zz)
+    if not vals:
+        return None
+    all_z = np.concatenate(vals).astype(np.float64, copy=False)
+    if all_z.size <= 0:
+        return None
+    md = str(mode or "median").strip().lower()
+    if md == "mean":
+        return float(np.nanmean(all_z))
+    if md == "min":
+        return float(np.nanmin(all_z))
+    if md == "max":
+        return float(np.nanmax(all_z))
+    return float(np.nanmedian(all_z))
+
+
 def _interpolate_z_level(
     processed: list,
     z_from: float, z_to: float,
@@ -646,23 +802,58 @@ def _interpolate_z_level(
     smooth_sigma: float,
     balance_profiles: bool = True,
     amplitude_hist_bins: int = 10,
+    topographic_correction: bool = False,
+    topo_reference_elevation: float | None = None,
 ) -> tuple[np.ndarray | None, int, dict]:
     profile_rows = []
-    for prof, x_ref, y_ref, ampl_3d in processed:
+    topo_on = bool(topographic_correction) and topo_reference_elevation is not None and np.isfinite(float(topo_reference_elevation))
+    topo_ref = float(topo_reference_elevation) if topo_on else float("nan")
+
+    for prof, x_ref, y_ref, ampl_3d, z_surf_ref in _iter_processed_entries(processed):
         n_s = ampl_3d.shape[0]
-        s_lo, s_hi = _depth_to_sample_range(z_from, z_to, prof.depth_max_m, n_s)
-        if s_lo >= s_hi:
-            continue
-        window = np.abs(ampl_3d[s_lo:s_hi, :, :]).astype(np.float32, copy=False)
-        if window.size == 0:
-            continue
-        # RMS integra la finestra verticale in modo piu' stabile rispetto alla media.
-        per_ch = np.sqrt(np.mean(window.astype(np.float64) ** 2, axis=0)).astype(np.float32)
+        n_t = ampl_3d.shape[1]
+
+        if topo_on and z_surf_ref.size == n_t and np.isfinite(z_surf_ref).any():
+            # Shift depth window per trace: d_local = d_ref + (z_surf - z_ref)
+            delta = np.asarray(z_surf_ref, dtype=np.float64) - topo_ref
+            per_ch = np.full((n_t, ampl_3d.shape[2]), np.nan, dtype=np.float32)
+            for it in range(n_t):
+                d = float(delta[it]) if np.isfinite(delta[it]) else float("nan")
+                if not np.isfinite(d):
+                    continue
+                s_lo, s_hi = _depth_to_sample_range(
+                    float(z_from + d),
+                    float(z_to + d),
+                    prof.depth_max_m,
+                    n_s,
+                )
+                if s_lo >= s_hi:
+                    continue
+                win = np.abs(ampl_3d[s_lo:s_hi, it, :]).astype(np.float64, copy=False)
+                if win.size == 0:
+                    continue
+                per_ch[it, :] = np.sqrt(np.mean(win ** 2, axis=0)).astype(np.float32)
+        else:
+            s_lo, s_hi = _depth_to_sample_range(z_from, z_to, prof.depth_max_m, n_s)
+            if s_lo >= s_hi:
+                continue
+            window = np.abs(ampl_3d[s_lo:s_hi, :, :]).astype(np.float32, copy=False)
+            if window.size == 0:
+                continue
+            # RMS integra la finestra verticale in modo piu' stabile rispetto alla media.
+            per_ch = np.sqrt(np.mean(window.astype(np.float64) ** 2, axis=0)).astype(np.float32)
+
         ampl = (per_ch.mean(axis=1) if (per_ch.shape[1] == 1 or combine_method == "mean")
                 else per_ch.max(axis=1)).astype(np.float32)
-        finite_ampl = ampl[np.isfinite(ampl)]
+        valid = np.isfinite(ampl) & np.isfinite(x_ref) & np.isfinite(y_ref)
+        if not valid.any():
+            continue
+        x_use = x_ref[valid]
+        y_use = y_ref[valid]
+        ampl_use = ampl[valid]
+        finite_ampl = ampl_use[np.isfinite(ampl_use)]
         prof_mean = float(np.nanmean(np.abs(finite_ampl))) if finite_ampl.size else float("nan")
-        profile_rows.append((x_ref, y_ref, ampl, prof_mean))
+        profile_rows.append((x_use, y_use, ampl_use, prof_mean))
     if not profile_rows:
         return None, 0, {"amp_pre": {"count": 0}, "amp_post": {"count": 0}}
 
@@ -762,6 +953,17 @@ def compute_preview_slice(
     depth_radius_factor: float = 0.6,
     balance_profiles: bool = True,
     amplitude_hist_bins: int = 10,
+    pre_slice_bg_removal: bool = False,
+    pre_slice_bg_mode: str = "line_by_line",
+    pre_slice_bg_window: int = 0,
+    pre_slice_bg_sample_start: int = 0,
+    pre_slice_bg_sample_end: int = 0,
+    stack_n: int = 1,
+    stack_kernel: str = "boxcar",
+    flip_traces_mode: str = "none",
+    topographic_correction: bool = False,
+    topo_reference_mode: str = "median",
+    topo_reference_elevation: float | None = None,
 ) -> dict | None:
     """Compute a single timeslice without writing to disk; used for preview dialog."""
     from .gpr_processing import DEFAULT_PIPELINE
@@ -777,6 +979,14 @@ def compute_preview_slice(
         extraction_mode=extraction_mode,
         use_processing=use_processing,
         balance_profiles=balance_profiles,
+        pre_slice_bg_removal=pre_slice_bg_removal,
+        pre_slice_bg_mode=pre_slice_bg_mode,
+        pre_slice_bg_window=pre_slice_bg_window,
+        pre_slice_bg_sample_start=pre_slice_bg_sample_start,
+        pre_slice_bg_sample_end=pre_slice_bg_sample_end,
+        stack_n=stack_n,
+        stack_kernel=stack_kernel,
+        flip_traces_mode=flip_traces_mode,
     )
     if not processed:
         return None
@@ -787,7 +997,14 @@ def compute_preview_slice(
     )
     z_from = z_center - z_step / 2.0
     z_to = z_center + z_step / 2.0
-    z_max_depth = max(prof.depth_max_m for prof, _, _, _ in processed)
+    z_max_depth = max(float(getattr(prof, "depth_max_m", 0.0) or 0.0) for prof, _, _, _, _ in _iter_processed_entries(processed))
+    topo_ref = None
+    if topographic_correction:
+        topo_ref = _compute_topo_reference(
+            processed,
+            mode=topo_reference_mode,
+            custom_elevation=topo_reference_elevation,
+        )
     radius_z = _depth_adaptive_radius(gp["radius"], float(z_center), float(z_max_depth), depth_radius_factor)
     gp_slice = dict(gp)
     gp_slice["radius"] = radius_z
@@ -798,6 +1015,8 @@ def compute_preview_slice(
         fill_nodata, fill_nodata_max_distance, smooth_sigma,
         balance_profiles=balance_profiles,
         amplitude_hist_bins=amplitude_hist_bins,
+        topographic_correction=bool(topographic_correction),
+        topo_reference_elevation=topo_ref,
     )
     if grid is None or n_pts == 0:
         return None
@@ -863,6 +1082,17 @@ def compute_ogpr_slice_grids(
     depth_radius_factor: float = 0.6,
     balance_profiles: bool = True,
     amplitude_hist_bins: int = 10,
+    pre_slice_bg_removal: bool = False,
+    pre_slice_bg_mode: str = "line_by_line",
+    pre_slice_bg_window: int = 0,
+    pre_slice_bg_sample_start: int = 0,
+    pre_slice_bg_sample_end: int = 0,
+    stack_n: int = 1,
+    stack_kernel: str = "boxcar",
+    flip_traces_mode: str = "none",
+    topographic_correction: bool = False,
+    topo_reference_mode: str = "median",
+    topo_reference_elevation: float | None = None,
 ) -> tuple[list[dict], dict]:
     """Compute IDW grids for each slice and return (grids, meta)."""
     from .gpr_processing import DEFAULT_PIPELINE
@@ -881,6 +1111,14 @@ def compute_ogpr_slice_grids(
         extraction_mode=extraction_mode,
         use_processing=use_processing,
         balance_profiles=balance_profiles,
+        pre_slice_bg_removal=pre_slice_bg_removal,
+        pre_slice_bg_mode=pre_slice_bg_mode,
+        pre_slice_bg_window=pre_slice_bg_window,
+        pre_slice_bg_sample_start=pre_slice_bg_sample_start,
+        pre_slice_bg_sample_end=pre_slice_bg_sample_end,
+        stack_n=stack_n,
+        stack_kernel=stack_kernel,
+        flip_traces_mode=flip_traces_mode,
     )
     if not processed:
         return [], {}
@@ -907,7 +1145,15 @@ def compute_ogpr_slice_grids(
     if z_min is None:
         z_min = 0.0
     if z_max is None:
-        z_max = max(prof.depth_max_m for prof, _, _, _ in processed)
+        z_max = max(float(getattr(prof, "depth_max_m", 0.0) or 0.0) for prof, _, _, _, _ in _iter_processed_entries(processed))
+
+    topo_ref = None
+    if topographic_correction:
+        topo_ref = _compute_topo_reference(
+            processed,
+            mode=topo_reference_mode,
+            custom_elevation=topo_reference_elevation,
+        )
 
     z_levels = np.arange(float(z_min), float(z_max) + z_step * 0.5, float(z_step))
 
@@ -933,12 +1179,26 @@ def compute_ogpr_slice_grids(
         z_min=float(z_min),
         z_max=float(z_max),
         z_step=float(z_step),
+        channel=int(channel),
+        combine_method=str(combine_method or "mean"),
+        extraction_mode=str(extraction_mode or "las_like"),
+        use_processing=bool(use_processing),
+        pipeline_params=dict(params or {}),
         radius=float(base_radius),
         effective_radius=float(effective_radius_base),
         depth_radius_factor=float(depth_radius_factor),
         use_anisotropic_idw=bool(use_anisotropic_idw),
         min_points=int(min_points),
         balance_profiles=bool(balance_profiles),
+        pre_slice_bg_removal=bool(pre_slice_bg_removal),
+        pre_slice_bg_mode=str(pre_slice_bg_mode or "line_by_line"),
+        pre_slice_bg_window=int(pre_slice_bg_window or 0),
+        stack_n=int(stack_n or 1),
+        stack_kernel=str(stack_kernel or "boxcar"),
+        flip_traces_mode=_normalize_flip_mode(flip_traces_mode),
+        topographic_correction=bool(topographic_correction),
+        topo_reference_mode=str(topo_reference_mode or "median"),
+        topo_reference_elevation=(float(topo_ref) if topo_ref is not None and np.isfinite(topo_ref) else None),
     )
 
     for iz, z_lev in enumerate(z_levels):
@@ -957,6 +1217,8 @@ def compute_ogpr_slice_grids(
             idw_power, min_points, fill_nodata, fill_nodata_max_distance, smooth_sigma,
             balance_profiles=balance_profiles,
             amplitude_hist_bins=amplitude_hist_bins,
+            topographic_correction=bool(topographic_correction),
+            topo_reference_elevation=topo_ref,
         )
         if grid is None:
             if emit_diagnostics:
@@ -1095,6 +1357,7 @@ def slice_ogpr_to_tifs(
     min_points: int = 1,
     depth_radius_factor: float = 0.6,
     balance_profiles: bool = True,
+    flip_traces_mode: str = "none",
 ) -> list[dict]:
     """Legacy entrypoint: compute grids and write to disk."""
     grids, meta = compute_ogpr_slice_grids(
@@ -1113,6 +1376,7 @@ def slice_ogpr_to_tifs(
         min_points=min_points,
         depth_radius_factor=depth_radius_factor,
         balance_profiles=balance_profiles,
+        flip_traces_mode=flip_traces_mode,
     )
     if not grids:
         return []

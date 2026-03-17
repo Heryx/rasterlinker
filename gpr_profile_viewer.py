@@ -7,6 +7,7 @@ QDialog con radargram matplotlib integrato.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Optional
 
@@ -18,8 +19,9 @@ from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QToolBar,
     QAction, QLabel, QComboBox,
     QCheckBox, QDoubleSpinBox, QSpinBox,
+    QInputDialog,
     QFileDialog, QMessageBox, QSizePolicy,
-    QGroupBox, QFormLayout, QPushButton,
+    QGroupBox, QFormLayout, QPushButton, QDialogButtonBox,
 )
 from qgis.core import (
     QgsCoordinateReferenceSystem,
@@ -41,8 +43,203 @@ from .gpr_ogpr_reader import read_ogpr, OgprProfile, OgprChannel
 from .gpr_processing  import apply_pipeline, DEFAULT_PIPELINE, normalize_display
 
 
-GPR_CMAPS    = ["RdBu_r", "seismic", "gray", "bwr", "Greys_r"]
+GPR_CMAPS    = [
+    "RdBu_r",
+    "seismic",
+    "gray",
+    "bwr",
+    "Greys_r",
+    "viridis",
+    "plasma",
+    "magma",
+    "cividis",
+    "turbo",
+    "Spectral_r",
+]
 DEFAULT_CMAP = "RdBu_r"
+
+
+class _RangeGainCurveDialog(QDialog):
+    """Interactive breakpoint editor for range gain curve."""
+
+    def __init__(self, points, max_points=16, on_curve_changed=None, parent=None):
+        super().__init__(parent, Qt.Window)
+        self.setWindowTitle("Range Gain Curve")
+        self.resize(620, 420)
+        self._max_points = int(max(2, min(32, max_points)))
+        self._on_curve_changed = on_curve_changed
+        self._drag_idx = None
+        self._points = self._sanitize(points)
+
+        root = QVBoxLayout(self)
+
+        if HAS_MPL:
+            self._fig = Figure(figsize=(6.2, 3.2), tight_layout=True)
+            self._ax = self._fig.add_subplot(111)
+            self._canvas = FigureCanvasQTAgg(self._fig)
+            root.addWidget(self._canvas, 1)
+            self._canvas.mpl_connect("button_press_event", self._on_press)
+            self._canvas.mpl_connect("button_release_event", self._on_release)
+            self._canvas.mpl_connect("motion_notify_event", self._on_move)
+        else:
+            self._fig = None
+            self._ax = None
+            self._canvas = None
+            lbl = QLabel("matplotlib non disponibile.")
+            lbl.setAlignment(Qt.AlignCenter)
+            root.addWidget(lbl, 1)
+
+        help_lbl = QLabel(
+            "Left drag: sposta punto | Double-click: aggiungi punto | Right-click: elimina punto interno"
+        )
+        help_lbl.setWordWrap(True)
+        root.addWidget(help_lbl)
+
+        btns_row = QHBoxLayout()
+        self._btn_reset = QPushButton("Reset")
+        self._btn_reset.clicked.connect(self._on_reset)
+        btns_row.addWidget(self._btn_reset)
+        btns_row.addStretch(1)
+        root.addLayout(btns_row)
+
+        dbb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        dbb.accepted.connect(self.accept)
+        dbb.rejected.connect(self.reject)
+        root.addWidget(dbb)
+
+        self._redraw()
+
+    def _sanitize(self, points):
+        arr = np.asarray(points if points is not None else [], dtype=np.float64).reshape(-1, 2)
+        clean = []
+        for x, y in arr:
+            if np.isfinite(x) and np.isfinite(y):
+                clean.append((float(np.clip(x, 0.0, 1.0)), float(np.clip(y, 0.1, 80.0))))
+        if not clean:
+            clean = [(0.0, 1.0), (1.0, 6.0)]
+        clean.sort(key=lambda p: p[0])
+        # Force endpoints and uniqueness.
+        x0, y0 = clean[0]
+        x1, y1 = clean[-1]
+        pts = [(0.0, float(y0))]
+        for x, y in clean[1:-1]:
+            if x <= 0.0 or x >= 1.0:
+                continue
+            if abs(x - pts[-1][0]) < 1e-6:
+                continue
+            pts.append((x, y))
+        if abs(1.0 - pts[-1][0]) < 1e-6:
+            pts[-1] = (1.0, float(y1))
+        else:
+            pts.append((1.0, float(y1)))
+        if len(pts) > self._max_points:
+            inner = pts[1:-1]
+            take = max(0, self._max_points - 2)
+            if len(inner) > take:
+                idx = np.linspace(0, len(inner) - 1, take, dtype=np.int64)
+                inner = [inner[i] for i in idx]
+            pts = [pts[0]] + inner + [pts[-1]]
+        return np.asarray(pts, dtype=np.float64)
+
+    def points(self):
+        return self._points.astype(np.float64, copy=True)
+
+    def _emit_changed(self):
+        if callable(self._on_curve_changed):
+            try:
+                self._on_curve_changed(self.points())
+            except Exception:
+                pass
+
+    def _redraw(self):
+        if not HAS_MPL or self._ax is None or self._canvas is None:
+            return
+        self._ax.clear()
+        p = self._points
+        self._ax.plot(p[:, 0], p[:, 1], color="#2d6ba3", lw=1.4)
+        self._ax.scatter(p[:, 0], p[:, 1], s=40, color="#c0392b", zorder=3)
+        self._ax.set_xlim(-0.02, 1.02)
+        y_top = float(max(10.0, np.nanmax(p[:, 1]) * 1.15))
+        self._ax.set_ylim(0.0, y_top)
+        self._ax.grid(True, ls=":", lw=0.5, alpha=0.7)
+        self._ax.set_xlabel("Depth fraction")
+        self._ax.set_ylabel("Gain")
+        self._ax.set_title(f"Breakpoints: {len(p)}/{self._max_points}")
+        self._canvas.draw_idle()
+
+    def _nearest_idx(self, x, y):
+        p = self._points
+        if p.shape[0] <= 0:
+            return None, 1e9
+        dx = p[:, 0] - float(x)
+        y_span = max(1e-6, float(np.nanmax(p[:, 1]) - np.nanmin(p[:, 1])))
+        dy = (p[:, 1] - float(y)) / y_span
+        d = np.sqrt(dx * dx + dy * dy)
+        idx = int(np.argmin(d))
+        return idx, float(d[idx])
+
+    def _on_press(self, event):
+        if event is None or event.inaxes != self._ax or event.xdata is None or event.ydata is None:
+            return
+        x = float(np.clip(event.xdata, 0.0, 1.0))
+        y = float(np.clip(event.ydata, 0.1, 80.0))
+        idx, dist = self._nearest_idx(x, y)
+
+        # Right click: remove internal point.
+        if int(getattr(event, "button", 0) or 0) == 3:
+            if idx is not None and dist < 0.05 and idx not in (0, len(self._points) - 1):
+                self._points = np.delete(self._points, idx, axis=0)
+                self._points = self._sanitize(self._points)
+                self._emit_changed()
+                self._redraw()
+            return
+
+        # Double left click: add point.
+        if bool(getattr(event, "dblclick", False)) and int(getattr(event, "button", 0) or 0) == 1:
+            if len(self._points) < self._max_points and (idx is None or dist >= 0.02):
+                self._points = np.vstack([self._points, np.asarray([[x, y]], dtype=np.float64)])
+                self._points = self._sanitize(self._points)
+                self._emit_changed()
+                self._redraw()
+            return
+
+        # Single left click: drag nearest point.
+        if int(getattr(event, "button", 0) or 0) == 1 and idx is not None and dist < 0.08:
+            self._drag_idx = int(idx)
+
+    def _on_move(self, event):
+        if self._drag_idx is None:
+            return
+        if event is None or event.inaxes != self._ax or event.xdata is None or event.ydata is None:
+            return
+        i = int(self._drag_idx)
+        x = float(np.clip(event.xdata, 0.0, 1.0))
+        y = float(np.clip(event.ydata, 0.1, 80.0))
+        p = self._points.copy()
+        if i == 0:
+            x = 0.0
+        elif i == (len(p) - 1):
+            x = 1.0
+        else:
+            lo = float(p[i - 1, 0] + 1e-4)
+            hi = float(p[i + 1, 0] - 1e-4)
+            if hi <= lo:
+                x = float(p[i, 0])
+            else:
+                x = float(np.clip(x, lo, hi))
+        p[i, 0] = x
+        p[i, 1] = y
+        self._points = self._sanitize(p)
+        self._emit_changed()
+        self._redraw()
+
+    def _on_release(self, _event):
+        self._drag_idx = None
+
+    def _on_reset(self):
+        self._points = np.asarray([(0.0, 1.0), (1.0, 6.0)], dtype=np.float64)
+        self._emit_changed()
+        self._redraw()
 
 
 class GprProfileViewer(QDialog):
@@ -69,6 +266,14 @@ class GprProfileViewer(QDialog):
         self._cached_catalog = None
         self._cached_catalog_pr: Optional[str] = None
         self._cached_catalog_mtime: Optional[float] = None
+        self._suppress_3d_depth_sync = False
+        self._updating_range_gain_controls = False
+        self._range_gain_breakpoints = np.asarray([(0.0, 1.0), (1.0, 6.0)], dtype=np.float64)
+        self._hyper_apex_x: Optional[float] = None
+        self._hyper_apex_depth: Optional[float] = None
+        self._trim_start_traces = 0
+        self._trim_end_traces = 0
+        self._trace_source_indices: Optional[np.ndarray] = None
 
         self._rb_point: Optional[QgsRubberBand] = None
         self._rb_line:  Optional[QgsRubberBand] = None
@@ -168,13 +373,20 @@ class GprProfileViewer(QDialog):
         act_reset_zoom.triggered.connect(self._reset_zoom)
         tb.addAction(act_reset_zoom)
 
+        act_export = QAction("Export Radargram", self)
+        act_export.setToolTip("Esporta il radargramma corrente in PNG/TIFF con DPI configurabile.")
+        act_export.triggered.connect(self._export_radargram_image)
+        tb.addAction(act_export)
+
         root.addWidget(tb)
 
         center = QHBoxLayout()
 
         if HAS_MPL:
             self._fig        = Figure(figsize=(9, 4), tight_layout=True)
-            self._ax         = self._fig.add_subplot(111)
+            gs = self._fig.add_gridspec(1, 2, width_ratios=[4.8, 1.2], wspace=0.08)
+            self._ax         = self._fig.add_subplot(gs[0, 0])
+            self._ax_wiggle  = self._fig.add_subplot(gs[0, 1])
             self._canvas_mpl = FigureCanvasQTAgg(self._fig)
             self._canvas_mpl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self._canvas_mpl.mpl_connect("motion_notify_event", self._on_mouse_move)
@@ -185,6 +397,7 @@ class GprProfileViewer(QDialog):
             self._im    = None
             self._vline = None
             self._hline = None
+            self._wiggle_line = None
         else:
             lbl = QLabel("matplotlib non trovato.\nInstalla: pip install matplotlib")
             lbl.setAlignment(Qt.AlignCenter)
@@ -330,6 +543,110 @@ class GprProfileViewer(QDialog):
         self._spin_gain.setValue(2.0)
         self._spin_gain.setToolTip("Moltiplicatore display post-normalize.")
 
+        self._chk_flip_profile = QCheckBox()
+        self._chk_flip_profile.setChecked(False)
+        self._chk_flip_profile.setToolTip(
+            "Inverti orizzontalmente il radargramma corrente (direzione tracce)."
+        )
+        self._chk_flip_profile.toggled.connect(lambda _v: self._reload_data())
+
+        self._spin_trim_start = QSpinBox()
+        self._spin_trim_start.setRange(0, 0)
+        self._spin_trim_start.setValue(0)
+        self._spin_trim_start.setToolTip("Numero tracce da rimuovere all'inizio del profilo.")
+        self._spin_trim_end = QSpinBox()
+        self._spin_trim_end.setRange(0, 0)
+        self._spin_trim_end.setValue(0)
+        self._spin_trim_end.setToolTip("Numero tracce da rimuovere alla fine del profilo.")
+        self._btn_apply_trim = QPushButton("Apply Trim")
+        self._btn_apply_trim.setToolTip("Applica il ritaglio tracce al profilo corrente.")
+        self._btn_apply_trim.clicked.connect(self._reload_data)
+        self._spin_trim_start.valueChanged.connect(self._on_trim_traces_changed)
+        self._spin_trim_end.valueChanged.connect(self._on_trim_traces_changed)
+
+        self._chk_range_gain = QCheckBox()
+        self._chk_range_gain.setChecked(False)
+        self._chk_range_gain.setToolTip(
+            "Gain in funzione della profondita' per recuperare riflessioni profonde."
+        )
+        self._spin_gain_surface = QDoubleSpinBox()
+        self._spin_gain_surface.setRange(0.1, 20.0)
+        self._spin_gain_surface.setSingleStep(0.1)
+        self._spin_gain_surface.setValue(1.0)
+        self._spin_gain_surface.setEnabled(False)
+        self._spin_gain_deep = QDoubleSpinBox()
+        self._spin_gain_deep.setRange(0.1, 60.0)
+        self._spin_gain_deep.setSingleStep(0.5)
+        self._spin_gain_deep.setValue(6.0)
+        self._spin_gain_deep.setEnabled(False)
+        self._cb_range_gain_curve = QComboBox()
+        self._cb_range_gain_curve.addItem("Linear", "linear")
+        self._cb_range_gain_curve.addItem("Power", "power")
+        self._cb_range_gain_curve.addItem("Exponential", "exp")
+        self._cb_range_gain_curve.addItem("Breakpoints", "breakpoints")
+        self._cb_range_gain_curve.setCurrentIndex(1)
+        self._cb_range_gain_curve.setEnabled(False)
+        self._spin_range_gain_power = QDoubleSpinBox()
+        self._spin_range_gain_power.setRange(0.2, 6.0)
+        self._spin_range_gain_power.setSingleStep(0.1)
+        self._spin_range_gain_power.setValue(1.8)
+        self._spin_range_gain_power.setEnabled(False)
+        self._btn_range_gain_curve = QPushButton("Edit curve...")
+        self._btn_range_gain_curve.setEnabled(False)
+        self._btn_range_gain_curve.clicked.connect(self._open_range_gain_curve_editor)
+
+        def _toggle_range_gain(checked):
+            mode = str(self._cb_range_gain_curve.currentData() or "power")
+            use_breakpoints = checked and mode == "breakpoints"
+            self._spin_gain_surface.setEnabled(checked)
+            self._spin_gain_deep.setEnabled(checked)
+            self._cb_range_gain_curve.setEnabled(checked)
+            self._spin_range_gain_power.setEnabled(checked and mode in {"power", "exp"})
+            self._btn_range_gain_curve.setEnabled(use_breakpoints)
+            self._apply_gain_only()
+
+        self._chk_range_gain.toggled.connect(_toggle_range_gain)
+        self._spin_gain_surface.valueChanged.connect(self._on_range_gain_surface_changed)
+        self._spin_gain_deep.valueChanged.connect(self._on_range_gain_deep_changed)
+        self._spin_range_gain_power.valueChanged.connect(lambda _v: self._apply_gain_only())
+        self._cb_range_gain_curve.currentIndexChanged.connect(self._on_range_gain_mode_changed)
+
+        self._chk_hyperbola = QCheckBox()
+        self._chk_hyperbola.setChecked(False)
+        self._chk_hyperbola.setToolTip(
+            "Overlay iperbole modello per stima RDP/velocita'."
+        )
+        self._spin_hyperbola_rdp = QDoubleSpinBox()
+        self._spin_hyperbola_rdp.setRange(1.0, 40.0)
+        self._spin_hyperbola_rdp.setSingleStep(0.1)
+        self._spin_hyperbola_rdp.setValue(9.0)
+        self._spin_hyperbola_rdp.setEnabled(False)
+        self._lbl_hyperbola_vel = QLabel("v=n/a")
+        self._btn_set_hyper_apex = QPushButton("Set apex from cursor")
+        self._btn_set_hyper_apex.setEnabled(False)
+        self._btn_hyper_auto_fit = QPushButton("Auto-fit RDP")
+        self._btn_hyper_auto_fit.setEnabled(False)
+        self._btn_clear_hyper = QPushButton("Clear apex")
+        self._btn_clear_hyper.setEnabled(False)
+
+        def _toggle_hyperbola_controls(checked):
+            self._spin_hyperbola_rdp.setEnabled(checked)
+            self._btn_set_hyper_apex.setEnabled(checked)
+            self._btn_hyper_auto_fit.setEnabled(checked)
+            self._btn_clear_hyper.setEnabled(checked)
+            self._redraw()
+
+        self._chk_hyperbola.toggled.connect(_toggle_hyperbola_controls)
+        self._spin_hyperbola_rdp.valueChanged.connect(self._on_hyperbola_rdp_changed)
+        self._btn_set_hyper_apex.clicked.connect(self._set_hyperbola_apex_from_cursor)
+        self._btn_hyper_auto_fit.clicked.connect(self._auto_fit_hyperbola_rdp)
+        self._btn_clear_hyper.clicked.connect(self._clear_hyperbola_apex)
+        self._on_hyperbola_rdp_changed(self._spin_hyperbola_rdp.value())
+        self._btn_save_gain_preset = QPushButton("Save Gain/Hyper Preset")
+        self._btn_load_gain_preset = QPushButton("Load Gain/Hyper Preset")
+        self._btn_save_gain_preset.clicked.connect(self._save_gain_hyper_preset)
+        self._btn_load_gain_preset.clicked.connect(self._load_gain_hyper_preset)
+
         fl.addRow("Dewow:",              self._chk_dewow)
         fl.addRow("  finestra:",         self._spin_dewow)
         fl.addRow("Time-zero:",          self._chk_timezero)
@@ -348,8 +665,26 @@ class GprProfileViewer(QDialog):
         fl.addRow("Bandpass:",           self._chk_bp)
         fl.addRow("  low (MHz):",        self._spin_bp_lo)
         fl.addRow("  high (MHz):",       self._spin_bp_hi)
+        fl.addRow("Trim start traces:",  self._spin_trim_start)
+        fl.addRow("Trim end traces:",    self._spin_trim_end)
+        fl.addRow("  apply trim:",       self._btn_apply_trim)
+        fl.addRow("Flip profile X:",     self._chk_flip_profile)
         fl.addRow("Clip %:",             self._spin_clip)
         fl.addRow("Gain display:",       self._spin_gain)
+        fl.addRow("Range gain:",         self._chk_range_gain)
+        fl.addRow("  gain superficie:",  self._spin_gain_surface)
+        fl.addRow("  gain profondo:",    self._spin_gain_deep)
+        fl.addRow("  curva:",            self._cb_range_gain_curve)
+        fl.addRow("  power:",            self._spin_range_gain_power)
+        fl.addRow("  breakpoints:",      self._btn_range_gain_curve)
+        fl.addRow("Hyperbola fit:",      self._chk_hyperbola)
+        fl.addRow("  RDP:",              self._spin_hyperbola_rdp)
+        fl.addRow("  velocity:",         self._lbl_hyperbola_vel)
+        fl.addRow("  apex:",             self._btn_set_hyper_apex)
+        fl.addRow("  auto-fit:",         self._btn_hyper_auto_fit)
+        fl.addRow("  clear apex:",       self._btn_clear_hyper)
+        fl.addRow(self._btn_save_gain_preset)
+        fl.addRow(self._btn_load_gain_preset)
 
         btn_apply = QPushButton("Applica")
         btn_apply.clicked.connect(self._apply_processing)
@@ -380,6 +715,95 @@ class GprProfileViewer(QDialog):
             "Applica dewow/time-zero/bg/agc/bandpass prima della creazione slice.\n"
             "Disattivato = comportamento piu' vicino al LAS."
         )
+
+        self._chk_slice_bg = QCheckBox()
+        self._chk_slice_bg.setChecked(True)
+        self._chk_slice_bg.setToolTip(
+            "Background removal diretto prima dell'estrazione ampiezza.\n"
+            "Se Processing pre-slice e' OFF, aiuta a rimuovere banding orizzontale."
+        )
+        self._cb_slice_bg_mode = QComboBox()
+        self._cb_slice_bg_mode.addItem("line_by_line", "line_by_line")
+        self._cb_slice_bg_mode.addItem("grid_by_grid", "grid_by_grid")
+        self._cb_slice_bg_mode.setCurrentIndex(0)
+        self._chk_slice_bg_auto = QCheckBox("Auto")
+        self._chk_slice_bg_auto.setChecked(True)
+        self._spin_slice_bg_window = QSpinBox()
+        self._spin_slice_bg_window.setRange(8, 99000)
+        self._spin_slice_bg_window.setValue(200)
+        self._spin_slice_bg_window.setEnabled(False)
+        self._spin_slice_bg_sample_start = QSpinBox()
+        self._spin_slice_bg_sample_start.setRange(0, 9999)
+        self._spin_slice_bg_sample_start.setValue(0)
+        self._spin_slice_bg_sample_end = QSpinBox()
+        self._spin_slice_bg_sample_end.setRange(0, 9999)
+        self._spin_slice_bg_sample_end.setValue(0)
+
+        def _toggle_slice_bg_auto(auto_checked):
+            self._spin_slice_bg_window.setEnabled(bool(self._chk_slice_bg.isChecked()) and (not auto_checked))
+
+        def _toggle_slice_bg(bg_checked):
+            self._cb_slice_bg_mode.setEnabled(bg_checked)
+            self._chk_slice_bg_auto.setEnabled(bg_checked)
+            self._spin_slice_bg_sample_start.setEnabled(bg_checked)
+            self._spin_slice_bg_sample_end.setEnabled(bg_checked)
+            _toggle_slice_bg_auto(self._chk_slice_bg_auto.isChecked())
+
+        self._chk_slice_bg.toggled.connect(_toggle_slice_bg)
+        self._chk_slice_bg_auto.toggled.connect(_toggle_slice_bg_auto)
+        _toggle_slice_bg(self._chk_slice_bg.isChecked())
+
+        self._spin_slice_stack_n = QSpinBox()
+        self._spin_slice_stack_n.setRange(1, 31)
+        self._spin_slice_stack_n.setValue(1)
+        self._spin_slice_stack_n.setToolTip(
+            "Numero tracce per stacking laterale (1 = disattivato)."
+        )
+        self._cb_slice_stack_kernel = QComboBox()
+        self._cb_slice_stack_kernel.addItem("Boxcar", "boxcar")
+        self._cb_slice_stack_kernel.addItem("Triangolare", "triangular")
+        self._cb_slice_stack_kernel.setCurrentIndex(0)
+
+        self._cb_slice_flip_mode = QComboBox()
+        self._cb_slice_flip_mode.addItem("None", "none")
+        self._cb_slice_flip_mode.addItem("Flip all profiles", "all")
+        self._cb_slice_flip_mode.addItem("Flip odd profiles", "odd")
+        self._cb_slice_flip_mode.addItem("Flip even profiles", "even")
+        self._cb_slice_flip_mode.setCurrentIndex(0)
+        self._cb_slice_flip_mode.setToolTip(
+            "Inverte la direzione tracce prima del calcolo timeslice.\n"
+            "Utile per uniformare profili acquisiti avanti/indietro."
+        )
+
+        self._chk_slice_topographic = QCheckBox()
+        self._chk_slice_topographic.setChecked(False)
+        self._chk_slice_topographic.setToolTip(
+            "Correzione topografica: allinea la finestra depth per quota traccia."
+        )
+        self._cb_slice_topo_ref_mode = QComboBox()
+        self._cb_slice_topo_ref_mode.addItem("Median surface", "median")
+        self._cb_slice_topo_ref_mode.addItem("Mean surface", "mean")
+        self._cb_slice_topo_ref_mode.addItem("Min surface", "min")
+        self._cb_slice_topo_ref_mode.addItem("Max surface", "max")
+        self._cb_slice_topo_ref_mode.addItem("Custom elevation", "custom")
+        self._cb_slice_topo_ref_mode.setCurrentIndex(0)
+        self._cb_slice_topo_ref_mode.setEnabled(False)
+        self._spin_slice_topo_ref_custom = QDoubleSpinBox()
+        self._spin_slice_topo_ref_custom.setDecimals(3)
+        self._spin_slice_topo_ref_custom.setRange(-10000.0, 100000.0)
+        self._spin_slice_topo_ref_custom.setSingleStep(0.1)
+        self._spin_slice_topo_ref_custom.setValue(0.0)
+        self._spin_slice_topo_ref_custom.setEnabled(False)
+
+        def _toggle_topo_controls():
+            on = bool(self._chk_slice_topographic.isChecked())
+            self._cb_slice_topo_ref_mode.setEnabled(on)
+            is_custom = str(self._cb_slice_topo_ref_mode.currentData() or "") == "custom"
+            self._spin_slice_topo_ref_custom.setEnabled(on and is_custom)
+
+        self._chk_slice_topographic.toggled.connect(lambda _v: _toggle_topo_controls())
+        self._cb_slice_topo_ref_mode.currentIndexChanged.connect(lambda _v: _toggle_topo_controls())
+        _toggle_topo_controls()
 
         self._chk_normalize_ch = QCheckBox(); self._chk_normalize_ch.setChecked(False)
         self._chk_normalize_ch.setToolTip("Bilancia ampiezza inter-canale (LAS-like: normalmente OFF).")
@@ -419,6 +843,18 @@ class GprProfileViewer(QDialog):
 
         fl_slice.addRow("Estrazione:",         self._cb_slice_extraction)
         fl_slice.addRow("Processing pre-slice:", self._chk_slice_use_processing)
+        fl_slice.addRow("BG pre-slice:",       self._chk_slice_bg)
+        fl_slice.addRow("  modo BG:",          self._cb_slice_bg_mode)
+        fl_slice.addRow("  auto BG:",          self._chk_slice_bg_auto)
+        fl_slice.addRow("  finestra BG:",      self._spin_slice_bg_window)
+        fl_slice.addRow("  BG da campione:",   self._spin_slice_bg_sample_start)
+        fl_slice.addRow("  BG a campione:",    self._spin_slice_bg_sample_end)
+        fl_slice.addRow("Trace stacking:",     self._spin_slice_stack_n)
+        fl_slice.addRow("  kernel:",           self._cb_slice_stack_kernel)
+        fl_slice.addRow("Flip pre-slice:",     self._cb_slice_flip_mode)
+        fl_slice.addRow("Topographic corr.:",  self._chk_slice_topographic)
+        fl_slice.addRow("  topo reference:",   self._cb_slice_topo_ref_mode)
+        fl_slice.addRow("  custom elev:",      self._spin_slice_topo_ref_custom)
         fl_slice.addRow("Normalizza canali:",  self._chk_normalize_ch)
         fl_slice.addRow("Filtro ampiezza:",    self._chk_amplitude_filter)
         fl_slice.addRow("  sigma:",            self._spin_amplitude_sigma)
@@ -533,6 +969,51 @@ class GprProfileViewer(QDialog):
             self._ch_idx = idx
             self._reload_data()
 
+    def _update_trim_controls_for_channel(self, n_traces: int):
+        n_t = max(0, int(n_traces))
+        max_trim = max(0, n_t - 1)
+        cur_start = int(np.clip(self._spin_trim_start.value(), 0, max_trim))
+        cur_end = int(np.clip(self._spin_trim_end.value(), 0, max_trim))
+        if cur_start + cur_end > max_trim:
+            cur_end = max(0, max_trim - cur_start)
+        self._spin_trim_start.blockSignals(True)
+        self._spin_trim_end.blockSignals(True)
+        try:
+            self._spin_trim_start.setRange(0, max_trim)
+            self._spin_trim_end.setRange(0, max_trim)
+            self._spin_trim_start.setValue(cur_start)
+            self._spin_trim_end.setValue(cur_end)
+        finally:
+            self._spin_trim_start.blockSignals(False)
+            self._spin_trim_end.blockSignals(False)
+        self._trim_start_traces = int(cur_start)
+        self._trim_end_traces = int(cur_end)
+
+    def _on_trim_traces_changed(self, _value):
+        if not self._profiles:
+            return
+        start = int(self._spin_trim_start.value())
+        end = int(self._spin_trim_end.value())
+        max_trim = max(0, int(self._spin_trim_start.maximum()))
+        if start + end > max_trim:
+            if self.sender() is self._spin_trim_start:
+                end = max(0, max_trim - start)
+                self._spin_trim_end.blockSignals(True)
+                try:
+                    self._spin_trim_end.setValue(end)
+                finally:
+                    self._spin_trim_end.blockSignals(False)
+            else:
+                start = max(0, max_trim - end)
+                self._spin_trim_start.blockSignals(True)
+                try:
+                    self._spin_trim_start.setValue(start)
+                finally:
+                    self._spin_trim_start.blockSignals(False)
+        self._trim_start_traces = int(start)
+        self._trim_end_traces = int(end)
+        self._reload_data()
+
     def _load_current_profile(self):
         if not self._profiles:
             return
@@ -560,6 +1041,16 @@ class GprProfileViewer(QDialog):
         self._ch_idx = int(best_idx)
         self._cb_channel.setCurrentIndex(self._ch_idx)
         self._cb_channel.blockSignals(False)
+        try:
+            self._update_trim_controls_for_channel(int(prof.channel(self._ch_idx).data.shape[1]))
+        except Exception:
+            self._update_trim_controls_for_channel(0)
+        try:
+            v_prof = self._profile_reference_velocity(prof)
+            rdp_prof = float(np.clip(self._velocity_to_rdp(v_prof), 1.0, 40.0))
+            self._spin_hyperbola_rdp.setValue(rdp_prof)
+        except Exception:
+            pass
         self._reload_data()
         if self._ch_idx != 0:
             self._lbl_status.setText(
@@ -572,40 +1063,61 @@ class GprProfileViewer(QDialog):
             return
         prof = self._profiles[self._prof_idx]
         ch   = prof.channel(self._ch_idx)
-        self._raw_data  = ch.data.copy()
+        full = ch.data.copy()
+        n_t = int(full.shape[1]) if full.ndim == 2 else 0
+        self._update_trim_controls_for_channel(n_t)
+        start = int(np.clip(self._trim_start_traces, 0, max(0, n_t - 1)))
+        end_trim = int(np.clip(self._trim_end_traces, 0, max(0, n_t - 1)))
+        end = max(start + 1, n_t - end_trim)
+        end = min(end, n_t)
+        idx = np.arange(start, end, dtype=np.int64)
+        if bool(getattr(self, "_chk_flip_profile", None) and self._chk_flip_profile.isChecked()):
+            idx = idx[::-1]
+        if idx.size <= 0:
+            idx = np.arange(0, min(1, n_t), dtype=np.int64)
+        if full.ndim == 2 and idx.size > 0:
+            self._raw_data = full[:, idx].copy()
+        else:
+            self._raw_data = full.copy()
+        self._trace_source_indices = idx.astype(np.int64, copy=False)
         self._proc_data = None
+        self._hyper_apex_x = None
+        self._hyper_apex_depth = None
         self._apply_processing()
 
     # ------------------------------------------------------------------
     # Processing
     # ------------------------------------------------------------------
 
+    def _current_processing_params(self) -> dict:
+        """Return current processing controls as pipeline params."""
+        bg_auto = bool(self._chk_bg_auto.isChecked())
+        bg_window = 0 if bg_auto else int(self._spin_bg_window.value())
+        return {
+            "dewow": bool(self._chk_dewow.isChecked()),
+            "dewow_win": int(self._spin_dewow.value()),
+            "timezero": bool(self._chk_timezero.isChecked()),
+            "tz_method": str(self._cb_tz_method.currentText()),
+            "tz_mode": str(self._cb_tz_mode.currentText()),
+            "tz_threshold": float(self._spin_tz_threshold.value()),
+            "tz_backup_nsamp": int(self._spin_tz_backup.value()),
+            "bg_removal": bool(self._chk_bg.isChecked()),
+            "bg_mode": str(self._cb_bg_mode.currentData() or "line_by_line"),
+            "bg_window": int(bg_window),
+            "bg_sample_start": int(self._spin_bg_sample_start.value()),
+            "bg_sample_end": int(self._spin_bg_sample_end.value()),
+            "agc": bool(self._chk_agc.isChecked()),
+            "agc_win": int(self._spin_agc.value()),
+            "bandpass": bool(self._chk_bp.isChecked()),
+            "bp_low_mhz": float(self._spin_bp_lo.value()),
+            "bp_high_mhz": float(self._spin_bp_hi.value()),
+            "clip_pct": float(self._spin_clip.value()),
+        }
+
     def _apply_processing(self):
         if self._raw_data is None:
             return
-        bg_auto   = self._chk_bg_auto.isChecked()
-        bg_window = 0 if bg_auto else int(self._spin_bg_window.value())
-
-        params = {
-            "dewow":            self._chk_dewow.isChecked(),
-            "dewow_win":        self._spin_dewow.value(),
-            "timezero":         self._chk_timezero.isChecked(),
-            "tz_method":        self._cb_tz_method.currentText(),
-            "tz_mode":          self._cb_tz_mode.currentText(),
-            "tz_threshold":     self._spin_tz_threshold.value(),
-            "tz_backup_nsamp":  self._spin_tz_backup.value(),
-            "bg_removal":       self._chk_bg.isChecked(),
-            "bg_mode":          self._cb_bg_mode.currentData() or "line_by_line",
-            "bg_window":        bg_window,
-            "bg_sample_start":  self._spin_bg_sample_start.value(),
-            "bg_sample_end":    self._spin_bg_sample_end.value(),
-            "agc":              self._chk_agc.isChecked(),
-            "agc_win":          self._spin_agc.value(),
-            "bandpass":         self._chk_bp.isChecked(),
-            "bp_low_mhz":       self._spin_bp_lo.value(),
-            "bp_high_mhz":      self._spin_bp_hi.value(),
-            "clip_pct":         self._spin_clip.value(),
-        }
+        params = self._current_processing_params()
         prof = self._profiles[self._prof_idx]
         try:
             self._proc_data = apply_pipeline(
@@ -634,12 +1146,502 @@ class GprProfileViewer(QDialog):
 
         self._apply_gain_only()
 
+    def _sanitize_range_gain_breakpoints(self, points):
+        arr = np.asarray(points if points is not None else [], dtype=np.float64).reshape(-1, 2)
+        rows = []
+        for x, y in arr:
+            if np.isfinite(x) and np.isfinite(y):
+                rows.append((float(np.clip(x, 0.0, 1.0)), float(np.clip(y, 0.1, 80.0))))
+        if not rows:
+            rows = [(0.0, float(self._spin_gain_surface.value())), (1.0, float(self._spin_gain_deep.value()))]
+        rows.sort(key=lambda p: p[0])
+        out = [(0.0, float(rows[0][1]))]
+        for x, y in rows[1:-1]:
+            if x <= 0.0 or x >= 1.0:
+                continue
+            if abs(x - out[-1][0]) < 1e-6:
+                continue
+            out.append((x, y))
+        out.append((1.0, float(rows[-1][1])))
+        max_pts = 16
+        if len(out) > max_pts:
+            inner = out[1:-1]
+            take = max(0, max_pts - 2)
+            idx = np.linspace(0, len(inner) - 1, take, dtype=np.int64) if take > 0 else np.zeros(0, dtype=np.int64)
+            inner = [inner[i] for i in idx] if take > 0 else []
+            out = [out[0]] + inner + [out[-1]]
+        return np.asarray(out, dtype=np.float64)
+
+    def _sync_range_gain_spins_from_breakpoints(self):
+        if self._range_gain_breakpoints is None or self._range_gain_breakpoints.shape[0] < 2:
+            return
+        self._updating_range_gain_controls = True
+        try:
+            self._spin_gain_surface.setValue(float(self._range_gain_breakpoints[0, 1]))
+            self._spin_gain_deep.setValue(float(self._range_gain_breakpoints[-1, 1]))
+        finally:
+            self._updating_range_gain_controls = False
+
+    def _sync_range_gain_breakpoints_from_spins(self):
+        if self._range_gain_breakpoints is None or self._range_gain_breakpoints.shape[0] < 2:
+            self._range_gain_breakpoints = np.asarray(
+                [
+                    (0.0, float(self._spin_gain_surface.value())),
+                    (1.0, float(self._spin_gain_deep.value())),
+                ],
+                dtype=np.float64,
+            )
+        else:
+            self._range_gain_breakpoints[0, 0] = 0.0
+            self._range_gain_breakpoints[-1, 0] = 1.0
+            self._range_gain_breakpoints[0, 1] = float(self._spin_gain_surface.value())
+            self._range_gain_breakpoints[-1, 1] = float(self._spin_gain_deep.value())
+            self._range_gain_breakpoints = self._sanitize_range_gain_breakpoints(self._range_gain_breakpoints)
+
+    def _on_range_gain_surface_changed(self, _value: float):
+        if self._updating_range_gain_controls:
+            return
+        self._sync_range_gain_breakpoints_from_spins()
+        self._apply_gain_only()
+
+    def _on_range_gain_deep_changed(self, _value: float):
+        if self._updating_range_gain_controls:
+            return
+        self._sync_range_gain_breakpoints_from_spins()
+        self._apply_gain_only()
+
+    def _on_range_gain_mode_changed(self, _idx: int):
+        checked = bool(self._chk_range_gain.isChecked())
+        mode = str(self._cb_range_gain_curve.currentData() or "power")
+        self._spin_range_gain_power.setEnabled(checked and mode in {"power", "exp"})
+        self._btn_range_gain_curve.setEnabled(checked and mode == "breakpoints")
+        self._apply_gain_only()
+
+    def _on_range_gain_curve_live_changed(self, points):
+        self._range_gain_breakpoints = self._sanitize_range_gain_breakpoints(points)
+        self._sync_range_gain_spins_from_breakpoints()
+        if self._chk_range_gain.isChecked():
+            self._apply_gain_only()
+
+    def _open_range_gain_curve_editor(self):
+        if not HAS_MPL:
+            QMessageBox.information(self, "Range Gain", "Editor curva non disponibile (matplotlib mancante).")
+            return
+        original = np.asarray(self._range_gain_breakpoints, dtype=np.float64).copy()
+        dlg = _RangeGainCurveDialog(
+            points=original,
+            max_points=16,
+            on_curve_changed=self._on_range_gain_curve_live_changed,
+            parent=self,
+        )
+        if dlg.exec_() == QDialog.Accepted:
+            self._range_gain_breakpoints = self._sanitize_range_gain_breakpoints(dlg.points())
+            self._sync_range_gain_spins_from_breakpoints()
+            if self._chk_range_gain.isChecked():
+                self._apply_gain_only()
+            return
+        # Revert previewed edits on cancel.
+        self._range_gain_breakpoints = self._sanitize_range_gain_breakpoints(original)
+        self._sync_range_gain_spins_from_breakpoints()
+        if self._chk_range_gain.isChecked():
+            self._apply_gain_only()
+
+    @staticmethod
+    def _rdp_to_velocity_m_s(rdp: float) -> float:
+        c = 299792458.0
+        rr = max(float(rdp), 1e-6)
+        return float(c / np.sqrt(rr))
+
+    @staticmethod
+    def _velocity_to_rdp(v_m_s: float) -> float:
+        c = 299792458.0
+        v = max(float(v_m_s), 1e-9)
+        return float((c / v) ** 2)
+
+    def _profile_reference_velocity(self, prof) -> float:
+        try:
+            v = float(getattr(prof, "velocity_m_s", 0.0) or 0.0)
+        except Exception:
+            v = 0.0
+        if not np.isfinite(v) or v <= 0:
+            # Default medium equivalent ~RDP 9.
+            v = self._rdp_to_velocity_m_s(9.0)
+        return float(v)
+
+    def _on_hyperbola_rdp_changed(self, value: float):
+        v = self._rdp_to_velocity_m_s(float(value))
+        self._lbl_hyperbola_vel.setText(f"v={v:.3e} m/s")
+        if self._chk_hyperbola.isChecked():
+            self._redraw()
+
+    def _set_hyperbola_apex_from_cursor(self):
+        if self._cursor_x is None or self._cursor_z is None:
+            QMessageBox.information(self, "Hyperbola Fit", "Muovi il cursore sul radargramma e riprova.")
+            return
+        self._hyper_apex_x = float(self._cursor_x)
+        self._hyper_apex_depth = float(self._cursor_z)
+        if self._chk_hyperbola.isChecked():
+            self._redraw()
+
+    def _clear_hyperbola_apex(self):
+        self._hyper_apex_x = None
+        self._hyper_apex_depth = None
+        if self._chk_hyperbola.isChecked():
+            self._redraw()
+
+    def _channel_trace_vector(self, values, n_t: int) -> np.ndarray:
+        target = max(0, int(n_t))
+        if target <= 0:
+            return np.zeros(0, dtype=np.float64)
+        arr = np.asarray(values if values is not None else [], dtype=np.float64)
+        idx = self._trace_source_indices
+        if (
+            isinstance(idx, np.ndarray)
+            and idx.ndim == 1
+            and idx.size == target
+            and arr.size > 0
+        ):
+            try:
+                imin = int(np.nanmin(idx))
+                imax = int(np.nanmax(idx))
+            except Exception:
+                imin, imax = 0, -1
+            if imin >= 0 and imax < arr.size:
+                try:
+                    return np.asarray(arr[idx.astype(np.int64)], dtype=np.float64)
+                except Exception:
+                    pass
+        if arr.size == target:
+            return arr.astype(np.float64, copy=False)
+        if arr.size <= 0:
+            return np.full(target, np.nan, dtype=np.float64)
+        if arr.size == 1:
+            return np.full(target, float(arr[0]), dtype=np.float64)
+        src = np.linspace(0.0, 1.0, arr.size, dtype=np.float64)
+        dst = np.linspace(0.0, 1.0, target, dtype=np.float64)
+        return np.interp(dst, src, arr).astype(np.float64)
+
+    def _display_distance_axis(self, prof, n_traces: int) -> np.ndarray:
+        n_t = max(1, int(n_traces))
+        try:
+            ch = prof.channel(self._ch_idx)
+            distances = self._channel_trace_vector(getattr(ch, "distances", []), n_t)
+        except Exception:
+            distances = np.zeros(0, dtype=np.float64)
+        if distances.size != n_t:
+            if distances.size > 1:
+                src = np.linspace(0.0, 1.0, distances.size, dtype=np.float64)
+                dst = np.linspace(0.0, 1.0, n_t, dtype=np.float64)
+                distances = np.interp(dst, src, distances).astype(np.float64)
+            else:
+                step = float(getattr(prof, "sampling_step_m", 0.1) or 0.1)
+                step = max(step, 1e-6)
+                distances = (np.arange(n_t, dtype=np.float64) * step).astype(np.float64)
+        finite = np.isfinite(distances)
+        if not finite.any():
+            return np.linspace(0.0, float(max(1, n_t - 1)), n_t, dtype=np.float64)
+        if not finite.all():
+            idx = np.arange(distances.size, dtype=np.float64)
+            ok = np.where(finite)[0].astype(np.float64)
+            distances = np.interp(idx, ok, distances[finite]).astype(np.float64)
+        d0 = float(distances[0]) if np.isfinite(distances[0]) else 0.0
+        distances = distances - d0
+        if distances[-1] <= 0:
+            distances = np.linspace(0.0, float(max(1, n_t - 1)), n_t, dtype=np.float64)
+        return distances
+
+    def _auto_fit_hyperbola_rdp(self):
+        if self._disp_data is None or not self._profiles:
+            QMessageBox.information(self, "Hyperbola Fit", "Nessun profilo visualizzato.")
+            return
+        if self._hyper_apex_x is None or self._hyper_apex_depth is None:
+            if self._cursor_x is not None and self._cursor_z is not None:
+                self._set_hyperbola_apex_from_cursor()
+            else:
+                QMessageBox.information(
+                    self,
+                    "Hyperbola Fit",
+                    "Imposta prima l'apice (Set apex from cursor o doppio click).",
+                )
+                return
+        prof = self._profiles[self._prof_idx]
+        arr = np.asarray(self._disp_data, dtype=np.float64)
+        if arr.ndim != 2 or arr.size == 0:
+            QMessageBox.information(self, "Hyperbola Fit", "Dati radargramma non disponibili.")
+            return
+        n_s, n_t = arr.shape
+        depth_max = self._depth_max_display(prof)
+        if not np.isfinite(depth_max) or depth_max <= 0:
+            QMessageBox.information(self, "Hyperbola Fit", "Scala profondita' non valida.")
+            return
+
+        x0 = float(self._hyper_apex_x)
+        z0 = float(self._hyper_apex_depth)
+        if not (np.isfinite(x0) and np.isfinite(z0) and z0 >= 0.0):
+            QMessageBox.information(self, "Hyperbola Fit", "Apice non valido.")
+            return
+
+        distances = self._display_distance_axis(prof, n_t)
+        v_ref = self._profile_reference_velocity(prof)
+        t0 = (2.0 * z0) / max(v_ref, 1e-9)
+        if not np.isfinite(t0) or t0 < 0:
+            QMessageBox.information(self, "Hyperbola Fit", "Tempo apice non valido.")
+            return
+
+        abs_arr = np.abs(arr)
+        if not np.isfinite(abs_arr).any():
+            QMessageBox.information(self, "Hyperbola Fit", "Segnale non valido per il fit.")
+            return
+
+        # Focus near apex: robust span around current profile.
+        dist_span = float(np.nanmax(distances) - np.nanmin(distances)) if distances.size > 1 else 0.0
+        focus_half = max(1.5, 0.30 * max(dist_span, 1.0))
+        near = np.abs(distances - x0) <= focus_half
+        if int(np.count_nonzero(near)) < 8:
+            near = np.ones_like(distances, dtype=bool)
+
+        corridor = max(1, int(round(0.006 * n_s)))
+        candidates = np.linspace(1.0, 40.0, 157, dtype=np.float64)
+        best_rdp = None
+        best_score = -np.inf
+        best_count = 0
+
+        for rdp in candidates:
+            v_fit = self._rdp_to_velocity_m_s(float(rdp))
+            dx = distances - x0
+            t = np.sqrt(np.maximum(0.0, t0 * t0 + (2.0 * dx / max(v_fit, 1e-9)) ** 2))
+            z_disp = 0.5 * v_ref * t
+            idx_f = (z_disp / max(depth_max, 1e-9)) * max(0, n_s - 1)
+            valid = near & np.isfinite(idx_f) & (idx_f >= 0.0) & (idx_f <= (n_s - 1))
+            count = int(np.count_nonzero(valid))
+            if count < 12:
+                continue
+            jj = np.where(valid)[0]
+            ii = np.rint(idx_f[valid]).astype(np.int64)
+            # Corridor amplitude around modeled curve.
+            if corridor > 0:
+                vals = []
+                for k in range(-corridor, corridor + 1):
+                    si = np.clip(ii + k, 0, n_s - 1)
+                    vals.append(abs_arr[si, jj])
+                amp = np.max(np.vstack(vals), axis=0)
+            else:
+                amp = abs_arr[ii, jj]
+            dxv = np.abs(distances[valid] - x0)
+            span = max(1e-6, float(np.nanpercentile(dxv, 90))) if dxv.size > 0 else 1.0
+            w = 1.0 / (1.0 + (dxv / span) ** 2)
+            if not np.isfinite(amp).any():
+                continue
+            score = float(np.average(np.nan_to_num(amp, nan=0.0), weights=np.nan_to_num(w, nan=0.0)))
+            if np.isfinite(score) and score > best_score:
+                best_score = score
+                best_rdp = float(rdp)
+                best_count = count
+
+        if best_rdp is None:
+            QMessageBox.information(self, "Hyperbola Fit", "Impossibile stimare RDP con i dati correnti.")
+            return
+
+        self._spin_hyperbola_rdp.setValue(float(best_rdp))
+        self._lbl_status.setText(
+            f"Hyperbola auto-fit: RDP={best_rdp:.2f}  score={best_score:.4g}  traces={best_count}"
+        )
+        if self._chk_hyperbola.isChecked():
+            self._redraw()
+
+    def _collect_gain_hyper_preset(self) -> dict:
+        points = self._sanitize_range_gain_breakpoints(self._range_gain_breakpoints)
+        preset = {
+            "format": "gpr_gain_hyper_preset",
+            "version": 1,
+            "display_gain": float(self._spin_gain.value()),
+            "clip_pct": float(self._spin_clip.value()),
+            "range_gain": {
+                "enabled": bool(self._chk_range_gain.isChecked()),
+                "surface_gain": float(self._spin_gain_surface.value()),
+                "deep_gain": float(self._spin_gain_deep.value()),
+                "curve_mode": str(self._cb_range_gain_curve.currentData() or "power"),
+                "power": float(self._spin_range_gain_power.value()),
+                "breakpoints": [[float(x), float(y)] for x, y in points.tolist()],
+            },
+            "hyperbola": {
+                "enabled": bool(self._chk_hyperbola.isChecked()),
+                "rdp": float(self._spin_hyperbola_rdp.value()),
+                "apex_x": (float(self._hyper_apex_x) if self._hyper_apex_x is not None else None),
+                "apex_depth": (float(self._hyper_apex_depth) if self._hyper_apex_depth is not None else None),
+            },
+        }
+        return preset
+
+    def _apply_gain_hyper_preset(self, payload: dict):
+        if not isinstance(payload, dict):
+            raise ValueError("Preset non valido: struttura JSON non riconosciuta.")
+        if payload.get("format") not in {"gpr_gain_hyper_preset", None}:
+            raise ValueError("Preset non valido: campo format non supportato.")
+
+        rg = payload.get("range_gain", {}) if isinstance(payload.get("range_gain"), dict) else {}
+        hy = payload.get("hyperbola", {}) if isinstance(payload.get("hyperbola"), dict) else {}
+
+        # Basic controls first.
+        self._spin_gain.setValue(float(payload.get("display_gain", self._spin_gain.value())))
+        self._spin_clip.setValue(float(payload.get("clip_pct", self._spin_clip.value())))
+
+        self._updating_range_gain_controls = True
+        try:
+            self._spin_gain_surface.setValue(float(rg.get("surface_gain", self._spin_gain_surface.value())))
+            self._spin_gain_deep.setValue(float(rg.get("deep_gain", self._spin_gain_deep.value())))
+            self._spin_range_gain_power.setValue(float(rg.get("power", self._spin_range_gain_power.value())))
+        finally:
+            self._updating_range_gain_controls = False
+
+        # Breakpoint curve.
+        pts = rg.get("breakpoints")
+        if isinstance(pts, list) and pts:
+            self._range_gain_breakpoints = self._sanitize_range_gain_breakpoints(pts)
+            self._sync_range_gain_spins_from_breakpoints()
+        else:
+            self._sync_range_gain_breakpoints_from_spins()
+
+        mode = str(rg.get("curve_mode", self._cb_range_gain_curve.currentData() or "power")).strip().lower()
+        mode_idx = 0
+        for i in range(self._cb_range_gain_curve.count()):
+            if str(self._cb_range_gain_curve.itemData(i) or "").strip().lower() == mode:
+                mode_idx = i
+                break
+        self._cb_range_gain_curve.setCurrentIndex(mode_idx)
+        self._chk_range_gain.setChecked(bool(rg.get("enabled", self._chk_range_gain.isChecked())))
+        self._on_range_gain_mode_changed(self._cb_range_gain_curve.currentIndex())
+
+        # Hyperbola.
+        self._spin_hyperbola_rdp.setValue(float(hy.get("rdp", self._spin_hyperbola_rdp.value())))
+        self._chk_hyperbola.setChecked(bool(hy.get("enabled", self._chk_hyperbola.isChecked())))
+        apex_x = hy.get("apex_x")
+        apex_d = hy.get("apex_depth")
+        self._hyper_apex_x = float(apex_x) if apex_x is not None else None
+        self._hyper_apex_depth = float(apex_d) if apex_d is not None else None
+
+        self._apply_gain_only()
+        if self._chk_hyperbola.isChecked():
+            self._redraw()
+
+    def _save_gain_hyper_preset(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Gain/Hyper Preset",
+            "gpr_gain_hyper_preset.json",
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        if not str(path).lower().endswith(".json"):
+            path = f"{path}.json"
+        payload = self._collect_gain_hyper_preset()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=True)
+            self._lbl_status.setText(f"Preset salvato: {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Preset", f"Errore salvataggio preset:\n{exc}")
+
+    def _load_gain_hyper_preset(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Gain/Hyper Preset",
+            "",
+            "JSON (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            self._apply_gain_hyper_preset(payload)
+            self._lbl_status.setText(f"Preset caricato: {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Preset", f"Errore caricamento preset:\n{exc}")
+
+    def _draw_hyperbola_overlay_on_axis(self, ax, prof, dist_max: float, depth_max: float):
+        if ax is None:
+            return
+        if not bool(getattr(self, "_chk_hyperbola", None) and self._chk_hyperbola.isChecked()):
+            return
+        if self._hyper_apex_x is None or self._hyper_apex_depth is None:
+            return
+        x0 = float(self._hyper_apex_x)
+        z0_disp = float(self._hyper_apex_depth)
+        if not (np.isfinite(x0) and np.isfinite(z0_disp) and np.isfinite(dist_max) and np.isfinite(depth_max)):
+            return
+        if z0_disp < 0 or z0_disp > depth_max:
+            return
+
+        v_ref = self._profile_reference_velocity(prof)
+        rdp = float(self._spin_hyperbola_rdp.value())
+        v_fit = self._rdp_to_velocity_m_s(rdp)
+        # Apex sample time from current displayed depth scale.
+        t0 = (2.0 * z0_disp) / max(v_ref, 1e-9)
+        x = np.linspace(0.0, float(dist_max), 600, dtype=np.float64)
+        dx = x - x0
+        # t(x)=sqrt(t0^2 + (2*dx/v)^2), then mapped back to display-depth with v_ref.
+        t = np.sqrt(np.maximum(0.0, t0 * t0 + (2.0 * dx / max(v_fit, 1e-9)) ** 2))
+        z_disp = 0.5 * v_ref * t
+        finite = np.isfinite(z_disp) & (z_disp >= 0.0) & (z_disp <= (depth_max * 1.02))
+        if not finite.any():
+            return
+        ax.plot(x[finite], z_disp[finite], color="#ffd000", lw=1.5, alpha=0.95, zorder=7)
+        ax.scatter([x0], [z0_disp], s=28, color="#ff8c00", edgecolor="#1f1f1f", linewidths=0.5, zorder=8)
+        ax.text(
+            x0,
+            min(depth_max, z0_disp + 0.03 * max(depth_max, 1e-6)),
+            f"RDP {rdp:.2f}",
+            color="#ffd000",
+            fontsize=8,
+            ha="left",
+            va="bottom",
+            zorder=8,
+        )
+
+    def _draw_hyperbola_overlay(self, prof, dist_max: float, depth_max: float):
+        self._draw_hyperbola_overlay_on_axis(self._ax, prof, dist_max, depth_max)
+
+    def _build_depth_range_gain(self, n_samples: int) -> np.ndarray:
+        n = max(1, int(n_samples))
+        if not bool(getattr(self, "_chk_range_gain", None) and self._chk_range_gain.isChecked()):
+            return np.ones((n, 1), dtype=np.float32)
+        g0 = float(getattr(self, "_spin_gain_surface", None).value() if hasattr(self, "_spin_gain_surface") else 1.0)
+        g1 = float(getattr(self, "_spin_gain_deep", None).value() if hasattr(self, "_spin_gain_deep") else 1.0)
+        g0 = max(g0, 1e-6)
+        g1 = max(g1, 1e-6)
+        t = np.linspace(0.0, 1.0, n, dtype=np.float64)
+        mode = str(
+            getattr(self, "_cb_range_gain_curve", None).currentData()
+            if hasattr(self, "_cb_range_gain_curve")
+            else "power"
+        )
+        if mode == "breakpoints":
+            pts = self._sanitize_range_gain_breakpoints(self._range_gain_breakpoints)
+            x = np.asarray(pts[:, 0], dtype=np.float64)
+            y = np.asarray(pts[:, 1], dtype=np.float64)
+            g = np.interp(t, x, y)
+        else:
+            p = float(getattr(self, "_spin_range_gain_power", None).value() if hasattr(self, "_spin_range_gain_power") else 1.8)
+            p = float(np.clip(p, 0.2, 8.0))
+            if mode == "linear":
+                g = g0 + (g1 - g0) * t
+            elif mode == "exp":
+                # Exponential interpolation in log domain keeps monotonic behavior.
+                g = np.exp(np.log(g0) + (np.log(g1) - np.log(g0)) * t)
+            else:
+                g = g0 + (g1 - g0) * (t ** p)
+        g = np.clip(g, 1e-6, 1e6).astype(np.float32)
+        return g.reshape(-1, 1)
+
     def _apply_gain_only(self):
         if self._proc_data is None:
             self._apply_processing()
             return
         gain = float(self._spin_gain.value())
-        self._disp_data = (self._proc_data * gain).astype(np.float32, copy=False)
+        depth_gain = self._build_depth_range_gain(int(self._proc_data.shape[0]))
+        self._disp_data = (self._proc_data * gain * depth_gain).astype(np.float32, copy=False)
         disp_arr = np.asarray(self._disp_data, dtype=np.float64)
         finite = np.isfinite(disp_arr)
         if finite.any():
@@ -652,7 +1654,8 @@ class GprProfileViewer(QDialog):
             f"proc: min={self._proc_data.min():.3f}  "
             f"max={self._proc_data.max():.3f}  "
             f"disp: min={disp_min:.3f} max={disp_max:.3f}  "
-            f"gain={gain:.1f}x"
+            f"gain={gain:.1f}x  "
+            f"range_gain={'on' if self._chk_range_gain.isChecked() else 'off'}"
         )
         self._redraw()
 
@@ -688,6 +1691,89 @@ class GprProfileViewer(QDialog):
         self._view_ylim = None
         self._redraw()
 
+    def _export_radargram_image(self):
+        if not HAS_MPL or self._disp_data is None or not self._profiles:
+            QMessageBox.information(self, "Export Radargram", "Nessun radargramma da esportare.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Radargram",
+            "radargram_export.png",
+            "PNG (*.png);;TIFF (*.tif *.tiff)",
+        )
+        if not path:
+            return
+        dpi, ok = QInputDialog.getInt(
+            self,
+            "Export Radargram",
+            "DPI:",
+            300,
+            72,
+            2400,
+            10,
+        )
+        if not ok:
+            return
+        prof = self._profiles[self._prof_idx]
+        arr = np.asarray(self._disp_data, dtype=np.float64)
+        if arr.ndim != 2 or arr.size <= 0:
+            QMessageBox.information(self, "Export Radargram", "Dati radargramma non validi.")
+            return
+        n_s, n_t = arr.shape
+        dist_arr = self._display_distance_axis(prof, n_t)
+        if dist_arr.size > 0 and np.isfinite(dist_arr).any():
+            dist_max = float(np.nanmax(dist_arr))
+        else:
+            dist_max = float(max(1.0, getattr(prof, "sampling_step_m", 0.1) * max(n_t - 1, 1)))
+        depth_max = self._depth_max_display(prof)
+        if not np.isfinite(depth_max) or depth_max <= 0:
+            depth_max = float(max(1, n_s))
+
+        finite = arr[np.isfinite(arr)]
+        if finite.size:
+            vmin = float(np.percentile(finite, 1.0))
+            vmax = float(np.percentile(finite, 99.0))
+            if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax - vmin < 1e-6):
+                vmin = float(np.nanmin(finite))
+                vmax = float(np.nanmax(finite))
+            if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax - vmin < 1e-6):
+                vmin, vmax = -1.0, 1.0
+        else:
+            vmin, vmax = -1.0, 1.0
+        cmap = self._cb_cmap.currentText()
+        interpolation_mode = str(self._cb_interp.currentData() or "bilinear")
+        real_aspect = bool(self._chk_real_aspect.isChecked())
+
+        fig = Figure(figsize=(12.0, 5.5), tight_layout=True)
+        ax = fig.add_subplot(111)
+        ax.imshow(
+            self._disp_data,
+            aspect="equal" if real_aspect else "auto",
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            extent=[0, dist_max, depth_max, 0],
+            interpolation=interpolation_mode,
+            resample=True,
+        )
+        ax.set_xlim(0.0, dist_max)
+        ax.set_ylim(depth_max, 0.0)
+        ax.set_xlabel("Distanza (m)")
+        ax.set_ylabel("Profondita' (m)")
+        ax.set_title(
+            f"{os.path.basename(prof.path)}  |  Ch {self._ch_idx}  |  {float(getattr(prof, 'frequency_mhz', 0.0)):.0f} MHz"
+        )
+        self._draw_hyperbola_overlay_on_axis(ax, prof, dist_max, depth_max)
+
+        ext = os.path.splitext(path)[1].strip().lower()
+        if ext not in {".png", ".tif", ".tiff"}:
+            path = f"{path}.png"
+        try:
+            fig.savefig(path, dpi=int(dpi), bbox_inches="tight", facecolor="white")
+            self._lbl_status.setText(f"Radargram export: {path}  dpi={int(dpi)}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Radargram", f"Errore export:\n{exc}")
+
     # ------------------------------------------------------------------
     # Disegno
     # ------------------------------------------------------------------
@@ -699,7 +1785,7 @@ class GprProfileViewer(QDialog):
         ch   = prof.channel(self._ch_idx)
         cmap = self._cb_cmap.currentText()
 
-        dist_arr = np.asarray(ch.distances, dtype=np.float64)
+        dist_arr = self._display_distance_axis(prof, int(self._disp_data.shape[1]))
         if dist_arr.size and np.isfinite(dist_arr).any():
             dist_max = float(np.nanmax(dist_arr))
         else:
@@ -761,9 +1847,148 @@ class GprProfileViewer(QDialog):
             f"Ch {self._ch_idx}  |  "
             f"{prof.frequency_mhz:.0f} MHz"
         )
+        self._draw_hyperbola_overlay(prof, dist_max, depth_max)
         self._vline = self._ax.axvline(x=0, color="yellow", lw=1, visible=False)
         self._hline = self._ax.axhline(y=0, color="cyan",   lw=1, linestyle="--", visible=False)
+        self._update_wiggle_plot(draw=False)
         self._canvas_mpl.draw_idle()
+
+    def _depth_max_display(self, prof) -> float:
+        if self._disp_data is not None:
+            n_out = int(self._disp_data.shape[0])
+        elif self._proc_data is not None:
+            n_out = int(self._proc_data.shape[0])
+        elif self._raw_data is not None:
+            n_out = int(self._raw_data.shape[0])
+        else:
+            n_out = int(getattr(prof, "n_samples", 0) or 0)
+        n_orig = int(getattr(prof, "n_samples", 0) or 0)
+        depth_base = float(getattr(prof, "depth_max_m", 0.0) or 0.0)
+        depth_max = depth_base * (n_out / n_orig) if n_orig > 0 else depth_base
+        if not np.isfinite(depth_max) or depth_max <= 0:
+            depth_max = max(1.0, float(n_out))
+        return float(depth_max)
+
+    def _cursor_metrics(self):
+        if (
+            not self._profiles
+            or self._disp_data is None
+            or self._cursor_x is None
+            or self._cursor_z is None
+        ):
+            return None
+        try:
+            prof = self._profiles[self._prof_idx]
+            ch = prof.channel(self._ch_idx)
+        except Exception:
+            return None
+
+        n_tr = int(self._disp_data.shape[1])
+        distances = self._channel_trace_vector(getattr(ch, "distances", []), n_tr)
+        if distances.size != n_tr:
+            step = float(getattr(prof, "sampling_step_m", 0.1) or 0.1)
+            distances = (np.arange(n_tr, dtype=np.float64) * max(step, 1e-6)).astype(np.float64)
+        if distances.size <= 0:
+            return None
+
+        depth_max = self._depth_max_display(prof)
+        idx_t = int(np.searchsorted(distances, float(self._cursor_x)))
+        idx_t = int(np.clip(idx_t, 0, max(0, n_tr - 1)))
+        n_s = int(self._disp_data.shape[0])
+        idx_s = int(np.rint((float(self._cursor_z) / max(depth_max, 1e-9)) * max(0, n_s - 1)))
+        idx_s = int(np.clip(idx_s, 0, max(0, n_s - 1)))
+
+        amp = None
+        try:
+            a = float(self._disp_data[idx_s, idx_t])
+            amp = a if np.isfinite(a) else None
+        except Exception:
+            amp = None
+
+        east = north = None
+        try:
+            e_vec = self._channel_trace_vector(getattr(ch, "easting", []), n_tr)
+            n_vec = self._channel_trace_vector(getattr(ch, "northing", []), n_tr)
+            if idx_t < e_vec.size:
+                east = float(e_vec[idx_t])
+            if idx_t < n_vec.size:
+                north = float(n_vec[idx_t])
+            if east is not None and not np.isfinite(east):
+                east = None
+            if north is not None and not np.isfinite(north):
+                north = None
+        except Exception:
+            east = north = None
+
+        return {
+            "idx_trace": int(idx_t),
+            "idx_sample": int(idx_s),
+            "distance_m": float(distances[idx_t]),
+            "depth_m": float(self._cursor_z),
+            "time_ns": float(idx_s * float(getattr(prof, "dt_ns", 0.0) or 0.0)),
+            "amplitude": amp,
+            "east": east,
+            "north": north,
+            "depth_max_m": depth_max,
+        }
+
+    def _update_wiggle_plot(self, draw: bool = True):
+        if not HAS_MPL or not hasattr(self, "_ax_wiggle"):
+            return
+        axw = self._ax_wiggle
+        axw.clear()
+        if self._disp_data is None or not self._profiles:
+            axw.set_title("Wiggle")
+            axw.set_xticks([])
+            axw.set_yticks([])
+            if draw:
+                self._canvas_mpl.draw_idle()
+            return
+
+        metrics = self._cursor_metrics()
+        if metrics is None:
+            idx_t = int(np.clip(self._disp_data.shape[1] // 2, 0, max(0, self._disp_data.shape[1] - 1)))
+            idx_s = 0
+            depth_max = self._depth_max_display(self._profiles[self._prof_idx])
+        else:
+            idx_t = int(metrics["idx_trace"])
+            idx_s = int(metrics["idx_sample"])
+            depth_max = float(metrics["depth_max_m"])
+
+        trace = np.asarray(self._disp_data[:, idx_t], dtype=np.float64)
+        if trace.size <= 0:
+            axw.set_title("Wiggle")
+            axw.set_xticks([])
+            axw.set_yticks([])
+            if draw:
+                self._canvas_mpl.draw_idle()
+            return
+        depth_axis = np.linspace(0.0, float(depth_max), trace.size, dtype=np.float64)
+        finite = np.isfinite(trace)
+        if finite.any():
+            vmax = float(np.nanpercentile(np.abs(trace[finite]), 99.0))
+            if not np.isfinite(vmax) or vmax <= 1e-9:
+                vmax = float(np.nanmax(np.abs(trace[finite])))
+            if not np.isfinite(vmax) or vmax <= 1e-9:
+                vmax = 1.0
+            trn = trace / vmax
+        else:
+            trn = np.zeros_like(trace)
+
+        axw.plot(trn, depth_axis, color="#222222", lw=0.9)
+        axw.fill_betweenx(depth_axis, 0.0, trn, where=trn >= 0.0, color="#d94f3d", alpha=0.45)
+        axw.fill_betweenx(depth_axis, 0.0, trn, where=trn < 0.0, color="#2d6ba3", alpha=0.45)
+        if 0 <= idx_s < depth_axis.size:
+            axw.axhline(depth_axis[idx_s], color="goldenrod", lw=0.8, ls="--")
+        axw.axvline(0.0, color="#444444", lw=0.7)
+        axw.set_ylim(float(depth_max), 0.0)
+        axw.set_xlim(-1.25, 1.25)
+        axw.set_title(f"Wiggle T{idx_t}")
+        axw.set_xlabel("Norm amp")
+        axw.set_ylabel("m")
+        axw.grid(True, ls=":", lw=0.4, alpha=0.6)
+        if draw:
+            self._canvas_mpl.draw_idle()
 
     # ------------------------------------------------------------------
     # Cursore
@@ -775,12 +2000,17 @@ class GprProfileViewer(QDialog):
         self._cursor_x = event.xdata
         self._cursor_z = event.ydata
         self._update_cursor_lines()
+        self._update_wiggle_plot(draw=False)
         self._update_status()
         self._canvas_timer.start()
 
     def _on_mouse_press(self, event):
         if event.inaxes == self._ax and event.button == 1:
+            self._cursor_x = event.xdata
             self._cursor_z = event.ydata
+            self._update_wiggle_plot(draw=False)
+            if bool(getattr(event, "dblclick", False)) and bool(self._chk_hyperbola.isChecked()):
+                self._set_hyperbola_apex_from_cursor()
             self._update_dial()
             self._emit_cursor_moved()
 
@@ -837,41 +2067,39 @@ class GprProfileViewer(QDialog):
     def _update_status(self):
         if not self._profiles:
             return
-        east, north, _ = self._cursor_world_position()
-        east = float(east) if east is not None else np.nan
-        north = float(north) if north is not None else np.nan
-        z_str = f"{self._cursor_z:.3f} m" if self._cursor_z is not None else "\u2014"
-        x_str = f"{self._cursor_x:.2f} m" if self._cursor_x is not None else "\u2014"
+        m = self._cursor_metrics()
+        if not m:
+            z_str = f"{self._cursor_z:.3f} m" if self._cursor_z is not None else "\u2014"
+            x_str = f"{self._cursor_x:.2f} m" if self._cursor_x is not None else "\u2014"
+            self._lbl_status.setText(
+                f"Dist: {x_str}  |  Profondita': {z_str}"
+            )
+            return
+        amp = m.get("amplitude")
+        amp_str = f"{float(amp):.6g}" if amp is not None else "n/a"
+        east = m.get("east")
+        north = m.get("north")
+        east_str = f"{float(east):.2f}" if east is not None else "n/a"
+        north_str = f"{float(north):.2f}" if north is not None else "n/a"
         self._lbl_status.setText(
-            f"Dist: {x_str}  |  Profondit\u00e0: {z_str}  "
-            f"|  E {east:.1f}  N {north:.1f}"
+            f"Trace={int(m['idx_trace'])}  Sample={int(m['idx_sample'])}  "
+            f"Amp={amp_str}  Time={float(m['time_ns']):.3f} ns  "
+            f"Depth={float(m['depth_m']):.3f} m  Dist={float(m['distance_m']):.3f} m  "
+            f"E {east_str}  N {north_str}"
         )
 
     def _cursor_world_position(self):
-        if (
-            not self._profiles
-            or self._cursor_x is None
-            or self._cursor_z is None
-        ):
+        m = self._cursor_metrics()
+        if not m:
             return None, None, None
-        try:
-            prof = self._profiles[self._prof_idx]
-            ch = prof.channel(self._ch_idx)
-        except Exception:
+        east = m.get("east")
+        north = m.get("north")
+        depth = float(m.get("depth_m", np.nan))
+        if east is None or north is None:
             return None, None, None
-        if len(ch.distances) < 1:
+        if not (np.isfinite(float(east)) and np.isfinite(float(north)) and np.isfinite(depth)):
             return None, None, None
-        try:
-            idx_t = int(np.searchsorted(ch.distances, self._cursor_x))
-            idx_t = min(max(idx_t, 0), len(ch.distances) - 1)
-            east = float(ch.easting[idx_t])
-            north = float(ch.northing[idx_t])
-            depth = float(self._cursor_z)
-        except Exception:
-            return None, None, None
-        if not (np.isfinite(east) and np.isfinite(north) and np.isfinite(depth)):
-            return None, None, None
-        return east, north, depth
+        return float(east), float(north), float(depth)
 
     def _emit_cursor_moved(self):
         east, north, depth = self._cursor_world_position()
@@ -881,6 +2109,41 @@ class GprProfileViewer(QDialog):
             self.cursor_moved.emit(float(east), float(north), float(depth))
         except Exception:
             pass
+        if not self._suppress_3d_depth_sync and self._gpr_3d_viewer is not None:
+            try:
+                self._gpr_3d_viewer.set_depth_from_external(float(depth))
+            except Exception:
+                pass
+
+    def _on_3d_depth_changed(self, depth: float):
+        if not np.isfinite(depth):
+            return
+        if self._profiles:
+            try:
+                prof = self._profiles[self._prof_idx]
+                n_out = int(self._disp_data.shape[0]) if self._disp_data is not None else int(prof.n_samples)
+                n_orig = int(prof.n_samples) if int(prof.n_samples) > 0 else max(1, n_out)
+                depth_base = float(prof.depth_max_m) if np.isfinite(prof.depth_max_m) else 0.0
+                depth_max = depth_base * (n_out / n_orig) if n_orig > 0 else depth_base
+                if not np.isfinite(depth_max) or depth_max <= 0:
+                    depth_max = max(1.0, float(n_out))
+                depth = float(np.clip(float(depth), 0.0, depth_max))
+            except Exception:
+                depth = float(depth)
+        else:
+            depth = float(depth)
+
+        self._suppress_3d_depth_sync = True
+        try:
+            self._cursor_z = depth
+            self._update_cursor_lines()
+            self._update_wiggle_plot(draw=False)
+            self._update_status()
+            self._update_dial()
+            self._emit_cursor_moved()
+            self._canvas_timer.start()
+        finally:
+            self._suppress_3d_depth_sync = False
 
     # ------------------------------------------------------------------
     # Bridge QGIS
@@ -926,14 +2189,14 @@ class GprProfileViewer(QDialog):
     def _update_rubber_band(self):
         if self._cursor_x is None or not self._profiles or self.iface is None:
             return
-        prof = self._profiles[self._prof_idx]
-        ch   = prof.channel(self._ch_idx)
-        if len(ch.distances) < 2:
+        m = self._cursor_metrics()
+        if not m:
             return
-        idx_t = min(
-            int(np.searchsorted(ch.distances, self._cursor_x)),
-            len(ch.distances) - 1
-        )
+        east = m.get("east")
+        north = m.get("north")
+        if east is None or north is None:
+            return
+        prof = self._profiles[self._prof_idx]
         canvas = self.iface.mapCanvas()
         if self._rb_point is None:
             self._rb_point = QgsRubberBand(canvas, QgsWkbTypes.PointGeometry)
@@ -942,7 +2205,7 @@ class GprProfileViewer(QDialog):
         self._rb_point.setWidth(3)
         self._rb_point.setVisible(True)
         self._rb_point.reset(QgsWkbTypes.PointGeometry)
-        pt_canvas = self._to_canvas_point(prof, ch.easting[idx_t], ch.northing[idx_t])
+        pt_canvas = self._to_canvas_point(prof, float(east), float(north))
         self._rb_point.addPoint(
             pt_canvas, True
         )
@@ -960,11 +2223,25 @@ class GprProfileViewer(QDialog):
             self._rb_line.setVisible(True)
         else:
             self._rb_line.reset(QgsWkbTypes.LineGeometry)
-        for i in range(len(ch.easting)):
-            pt_canvas = self._to_canvas_point(prof, ch.easting[i], ch.northing[i])
+        if self._disp_data is not None and np.asarray(self._disp_data).ndim == 2:
+            n_t = int(self._disp_data.shape[1])
+        else:
+            try:
+                n_t = int(np.asarray(ch.data).shape[1])
+            except Exception:
+                n_t = 0
+        e_vec = self._channel_trace_vector(getattr(ch, "easting", []), n_t)
+        n_vec = self._channel_trace_vector(getattr(ch, "northing", []), n_t)
+        finite = np.isfinite(e_vec) & np.isfinite(n_vec)
+        if int(np.count_nonzero(finite)) < 2:
+            return
+        e_use = e_vec[finite]
+        n_use = n_vec[finite]
+        for i in range(len(e_use)):
+            pt_canvas = self._to_canvas_point(prof, e_use[i], n_use[i])
             self._rb_line.addPoint(
                 pt_canvas,
-                i == len(ch.easting) - 1
+                i == len(e_use) - 1
             )
 
     def _get_cached_catalog(self, project_root: str):
@@ -1039,10 +2316,27 @@ class GprProfileViewer(QDialog):
     # ------------------------------------------------------------------
 
     def get_slice_params(self) -> dict:
+        slice_bg_auto = bool(self._chk_slice_bg_auto.isChecked())
+        topo_mode = str(self._cb_slice_topo_ref_mode.currentData() or "median")
+        topo_custom = None
+        if topo_mode == "custom":
+            topo_custom = float(self._spin_slice_topo_ref_custom.value())
         return {
             "normalize_channels":  self._chk_normalize_ch.isChecked(),
             "extraction_mode":     str(self._cb_slice_extraction.currentData() or "las_like"),
             "use_processing":      self._chk_slice_use_processing.isChecked(),
+            "pre_slice_bg_removal": self._chk_slice_bg.isChecked(),
+            "pre_slice_bg_mode": str(self._cb_slice_bg_mode.currentData() or "line_by_line"),
+            "pre_slice_bg_window": (0 if slice_bg_auto else int(self._spin_slice_bg_window.value())),
+            "pre_slice_bg_sample_start": int(self._spin_slice_bg_sample_start.value()),
+            "pre_slice_bg_sample_end": int(self._spin_slice_bg_sample_end.value()),
+            "stack_n": int(self._spin_slice_stack_n.value()),
+            "stack_kernel": str(self._cb_slice_stack_kernel.currentData() or "boxcar"),
+            "flip_traces_mode": str(self._cb_slice_flip_mode.currentData() or "none"),
+            "pipeline_params": self._current_processing_params(),
+            "topographic_correction": bool(self._chk_slice_topographic.isChecked()),
+            "topo_reference_mode": topo_mode,
+            "topo_reference_elevation": topo_custom,
             "amplitude_sigma":     (
                 float(self._spin_amplitude_sigma.value())
                 if self._chk_amplitude_filter.isChecked() else None
@@ -1141,6 +2435,7 @@ class GprProfileViewer(QDialog):
                 z_min=float(params["z_min"]),
                 z_max=float(params["z_max"]),
                 radius=float(params["radius"]),
+                pipeline_params=extra.get("pipeline_params"),
                 normalize_channels=bool(extra.get("normalize_channels", False)),
                 extraction_mode=str(extra.get("extraction_mode", "las_like") or "las_like"),
                 use_processing=bool(extra.get("use_processing", False)),
@@ -1152,6 +2447,17 @@ class GprProfileViewer(QDialog):
                 smooth_sigma=float(extra.get("smooth_sigma", 0.0) or 0.0),
                 depth_radius_factor=float(extra.get("depth_radius_factor", 0.6) or 0.0),
                 balance_profiles=bool(extra.get("balance_profiles", True)),
+                pre_slice_bg_removal=bool(extra.get("pre_slice_bg_removal", False)),
+                pre_slice_bg_mode=str(extra.get("pre_slice_bg_mode", "line_by_line") or "line_by_line"),
+                pre_slice_bg_window=int(extra.get("pre_slice_bg_window", 0) or 0),
+                pre_slice_bg_sample_start=int(extra.get("pre_slice_bg_sample_start", 0) or 0),
+                pre_slice_bg_sample_end=int(extra.get("pre_slice_bg_sample_end", 0) or 0),
+                stack_n=int(extra.get("stack_n", 1) or 1),
+                stack_kernel=str(extra.get("stack_kernel", "boxcar") or "boxcar"),
+                flip_traces_mode=str(extra.get("flip_traces_mode", "none") or "none"),
+                topographic_correction=bool(extra.get("topographic_correction", False)),
+                topo_reference_mode=str(extra.get("topo_reference_mode", "median") or "median"),
+                topo_reference_elevation=extra.get("topo_reference_elevation"),
                 emit_diagnostics=True,
             )
         except Exception as exc:
@@ -1199,11 +2505,19 @@ class GprProfileViewer(QDialog):
             "z_min": z_min_view,
             "z_max": z_max_view,
             "z_levels": [float(z) for z in z_levels] if z_levels else None,
+            "channel": int(params["channel"]),
+            "use_processing": bool(extra.get("use_processing", False)),
+            "extraction_mode": str(extra.get("extraction_mode", "las_like") or "las_like"),
+            "pipeline_params": dict(extra.get("pipeline_params") or {}),
         })
 
         if self._gpr_3d_viewer is not None:
             try:
                 self.cursor_moved.disconnect(self._gpr_3d_viewer.update_cursor_position)
+            except Exception:
+                pass
+            try:
+                self._gpr_3d_viewer.depth_changed.disconnect(self._on_3d_depth_changed)
             except Exception:
                 pass
             try:
@@ -1221,16 +2535,22 @@ class GprProfileViewer(QDialog):
                 parent=self,
             )
         except Exception as exc:
+            import traceback
+            tb = traceback.format_exc(limit=8)
             QMessageBox.warning(
                 self,
                 "Viewer 3D",
-                f"Impossibile aprire il viewer 3D:\n{exc}",
+                f"Impossibile aprire il viewer 3D:\n{exc}\n\n{tb}",
             )
             return
 
         self._gpr_3d_viewer = viewer
         try:
             self.cursor_moved.connect(viewer.update_cursor_position)
+        except Exception:
+            pass
+        try:
+            viewer.depth_changed.connect(self._on_3d_depth_changed)
         except Exception:
             pass
         self._emit_cursor_moved()
@@ -1246,6 +2566,10 @@ class GprProfileViewer(QDialog):
         if self._gpr_3d_viewer is not None:
             try:
                 self.cursor_moved.disconnect(self._gpr_3d_viewer.update_cursor_position)
+            except Exception:
+                pass
+            try:
+                self._gpr_3d_viewer.depth_changed.disconnect(self._on_3d_depth_changed)
             except Exception:
                 pass
             try:

@@ -312,6 +312,7 @@ class OgprSliceBuildTask(CallbackTask):
                 z_min=self.params["z_min"],
                 z_max=self.params["z_max"],
                 radius=self.params["radius"],
+                pipeline_params=self.extra_slice_params.get("pipeline_params"),
                 normalize_channels=bool(self.extra_slice_params.get("normalize_channels", False)),
                 extraction_mode=str(self.extra_slice_params.get("extraction_mode", "las_like") or "las_like"),
                 use_processing=bool(self.extra_slice_params.get("use_processing", False)),
@@ -323,6 +324,17 @@ class OgprSliceBuildTask(CallbackTask):
                 smooth_sigma=float(self.extra_slice_params.get("smooth_sigma", 0.0) or 0.0),
                 depth_radius_factor=float(self.extra_slice_params.get("depth_radius_factor", 0.6) or 0.0),
                 balance_profiles=bool(self.extra_slice_params.get("balance_profiles", True)),
+                pre_slice_bg_removal=bool(self.extra_slice_params.get("pre_slice_bg_removal", False)),
+                pre_slice_bg_mode=str(self.extra_slice_params.get("pre_slice_bg_mode", "line_by_line") or "line_by_line"),
+                pre_slice_bg_window=int(self.extra_slice_params.get("pre_slice_bg_window", 0) or 0),
+                pre_slice_bg_sample_start=int(self.extra_slice_params.get("pre_slice_bg_sample_start", 0) or 0),
+                pre_slice_bg_sample_end=int(self.extra_slice_params.get("pre_slice_bg_sample_end", 0) or 0),
+                stack_n=int(self.extra_slice_params.get("stack_n", 1) or 1),
+                stack_kernel=str(self.extra_slice_params.get("stack_kernel", "boxcar") or "boxcar"),
+                flip_traces_mode=str(self.extra_slice_params.get("flip_traces_mode", "none") or "none"),
+                topographic_correction=bool(self.extra_slice_params.get("topographic_correction", False)),
+                topo_reference_mode=str(self.extra_slice_params.get("topo_reference_mode", "median") or "median"),
+                topo_reference_elevation=self.extra_slice_params.get("topo_reference_elevation"),
             )
         except Exception as e:
             self.error_message = str(e)

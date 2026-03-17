@@ -329,6 +329,18 @@ class GprOgprVolumeMixin:
                     "normalize_channels": bool(extra_slice_params.get("normalize_channels", False)),
                     "extraction_mode": str(extra_slice_params.get("extraction_mode", "las_like") or "las_like"),
                     "use_processing": bool(extra_slice_params.get("use_processing", False)),
+                    "pre_slice_bg_removal": bool(extra_slice_params.get("pre_slice_bg_removal", False)),
+                    "pre_slice_bg_mode": str(extra_slice_params.get("pre_slice_bg_mode", "line_by_line") or "line_by_line"),
+                    "pre_slice_bg_window": int(extra_slice_params.get("pre_slice_bg_window", 0) or 0),
+                    "pre_slice_bg_sample_start": int(extra_slice_params.get("pre_slice_bg_sample_start", 0) or 0),
+                    "pre_slice_bg_sample_end": int(extra_slice_params.get("pre_slice_bg_sample_end", 0) or 0),
+                    "stack_n": int(extra_slice_params.get("stack_n", 1) or 1),
+                    "stack_kernel": str(extra_slice_params.get("stack_kernel", "boxcar") or "boxcar"),
+                    "flip_traces_mode": str(extra_slice_params.get("flip_traces_mode", "none") or "none"),
+                    "pipeline_params": dict(extra_slice_params.get("pipeline_params") or {}),
+                    "topographic_correction": bool(extra_slice_params.get("topographic_correction", False)),
+                    "topo_reference_mode": str(extra_slice_params.get("topo_reference_mode", "median") or "median"),
+                    "topo_reference_elevation": extra_slice_params.get("topo_reference_elevation"),
                     "use_anisotropic_idw": bool(extra_slice_params.get("use_anisotropic_idw", False)),
                     "auto_radius": bool(extra_slice_params.get("auto_radius", False)),
                     "min_points": int(extra_slice_params.get("min_points", 1) or 1),
@@ -376,6 +388,33 @@ class GprOgprVolumeMixin:
                         z_min_view = float(min(z_levels)) if z_levels else float(params["z_min"])
                         z_max_view = float(max(z_levels)) if z_levels else float(params["z_max"])
 
+                        if "x_min" not in meta_for_viewer or "y_min" not in meta_for_viewer:
+                            x_vals = []
+                            y_vals = []
+                            for prof in profiles:
+                                try:
+                                    ch0 = prof.channel(0)
+                                except Exception:
+                                    continue
+                                for x in list(getattr(ch0, "easting", []) or []):
+                                    try:
+                                        xf = float(x)
+                                    except Exception:
+                                        continue
+                                    if xf == xf:
+                                        x_vals.append(xf)
+                                for y in list(getattr(ch0, "northing", []) or []):
+                                    try:
+                                        yf = float(y)
+                                    except Exception:
+                                        continue
+                                    if yf == yf:
+                                        y_vals.append(yf)
+                            if x_vals and "x_min" not in meta_for_viewer:
+                                meta_for_viewer["x_min"] = float(min(x_vals))
+                            if y_vals and "y_min" not in meta_for_viewer:
+                                meta_for_viewer["y_min"] = float(min(y_vals))
+
                         meta_for_viewer.update(
                             {
                                 "z_step": float(params["z_step"]),
@@ -383,6 +422,10 @@ class GprOgprVolumeMixin:
                                 "z_max": z_max_view,
                                 "z_levels": [float(z) for z in z_levels] if z_levels else None,
                                 "epsg": int(epsg) if epsg else None,
+                                "channel": int(params.get("channel", 0) or 0),
+                                "use_processing": bool(extra_slice_params.get("use_processing", False)),
+                                "extraction_mode": str(extra_slice_params.get("extraction_mode", "las_like") or "las_like"),
+                                "pipeline_params": dict(extra_slice_params.get("pipeline_params") or {}),
                             }
                         )
 
