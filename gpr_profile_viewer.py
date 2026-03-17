@@ -34,7 +34,7 @@ except ImportError:
     HAS_MPL = False
 
 from .gpr_ogpr_reader import read_ogpr, OgprProfile, OgprChannel
-from .gpr_processing  import apply_pipeline, DEFAULT_PIPELINE
+from .gpr_processing  import apply_pipeline, DEFAULT_PIPELINE, normalize_display
 
 
 GPR_CMAPS    = ["RdBu_r", "seismic", "gray", "bwr", "Greys_r"]
@@ -58,6 +58,8 @@ class GprProfileViewer(QDialog):
         self._disp_data:   Optional[np.ndarray] = None
         self._cursor_x:    Optional[float] = None
         self._cursor_z:    Optional[float] = None
+        self._view_xlim:   Optional[tuple[float, float]] = None
+        self._view_ylim:   Optional[tuple[float, float]] = None
 
         self._rb_point: Optional[QgsRubberBand] = None
         self._rb_line:  Optional[QgsRubberBand] = None
@@ -68,6 +70,25 @@ class GprProfileViewer(QDialog):
         self._canvas_timer.timeout.connect(self._flush_canvas_update)
 
         self._build_ui()
+
+    def _channel_signal_score(self, data: np.ndarray) -> float:
+        arr = np.asarray(data, dtype=np.float64)
+        if arr.size == 0:
+            return -1.0
+        # Sampling leggero per evitare costi elevati su profili lunghi.
+        if arr.size > 800_000:
+            step = max(1, arr.size // 200_000)
+            arr = arr.ravel()[::step]
+        finite = np.isfinite(arr)
+        if not finite.any():
+            return -1.0
+        arr = arr[finite]
+        if arr.size == 0:
+            return -1.0
+        nz_ratio = float(np.count_nonzero(arr)) / float(arr.size)
+        std = float(np.std(arr))
+        amp = float(np.nanpercentile(np.abs(arr), 95)) if arr.size else 0.0
+        return nz_ratio * 10.0 + std + amp * 1e-3
 
     # ------------------------------------------------------------------
     # UI
@@ -108,6 +129,36 @@ class GprProfileViewer(QDialog):
         self._cb_cmap.currentTextChanged.connect(self._redraw)
         tb.addWidget(self._cb_cmap)
 
+        tb.addSeparator()
+        tb.addWidget(QLabel(" Render:"))
+        self._cb_interp = QComboBox()
+        self._cb_interp.addItem("Sharp", "nearest")
+        self._cb_interp.addItem("Smooth", "bilinear")
+        self._cb_interp.addItem("Fine", "bicubic")
+        self._cb_interp.setCurrentIndex(1)  # Smooth by default
+        self._cb_interp.setToolTip(
+            "Sharp: pixel netti.\n"
+            "Smooth: riduce effetto pixel rettangolari.\n"
+            "Fine: resa piu' continua (piu' morbida)."
+        )
+        self._cb_interp.currentIndexChanged.connect(self._redraw)
+        tb.addWidget(self._cb_interp)
+
+        tb.addSeparator()
+        self._chk_real_aspect = QCheckBox("Scala reale")
+        self._chk_real_aspect.setChecked(True)
+        self._chk_real_aspect.setToolTip(
+            "Mantiene proporzioni metriche reali distanza/profondita'.\n"
+            "Disattiva per adattare il profilo alla finestra."
+        )
+        self._chk_real_aspect.toggled.connect(self._redraw)
+        tb.addWidget(self._chk_real_aspect)
+
+        act_reset_zoom = QAction("Reset Zoom", self)
+        act_reset_zoom.setToolTip("Ripristina l'estensione completa del profilo.")
+        act_reset_zoom.triggered.connect(self._reset_zoom)
+        tb.addAction(act_reset_zoom)
+
         root.addWidget(tb)
 
         center = QHBoxLayout()
@@ -120,6 +171,7 @@ class GprProfileViewer(QDialog):
             self._canvas_mpl.mpl_connect("motion_notify_event", self._on_mouse_move)
             self._canvas_mpl.mpl_connect("button_press_event",  self._on_mouse_press)
             self._canvas_mpl.mpl_connect("axes_leave_event",    self._on_axes_leave)
+            self._canvas_mpl.mpl_connect("scroll_event",        self._on_scroll_zoom)
             center.addWidget(self._canvas_mpl, stretch=4)
             self._im    = None
             self._vline = None
@@ -362,14 +414,47 @@ class GprProfileViewer(QDialog):
         if not paths:
             return
         errors = []
+        imported_warnings = []
         for p in paths:
+            md5_failed = False
             try:
-                prof = read_ogpr(p)
+                prof = read_ogpr(p, verify_md5=True)
                 self._profiles.append(prof)
             except Exception as e:
-                errors.append(f"{os.path.basename(p)}: {e}")
+                msg = str(e)
+                if "MD5" in msg:
+                    try:
+                        prof = read_ogpr(p, verify_md5=False)
+                        self._profiles.append(prof)
+                        md5_failed = True
+                        imported_warnings.append(
+                            f"{os.path.basename(p)}: verifica MD5 fallita, importato comunque "
+                            "(possibile schema MD5 non standard o file alterato)."
+                        )
+                    except Exception as e2:
+                        errors.append(f"{os.path.basename(p)}: {e2}")
+                        continue
+                else:
+                    errors.append(f"{os.path.basename(p)}: {msg}")
+                    continue
+            for w in list(getattr(prof, "parse_warnings", []) or []):
+                # Evita doppioni: il warning MD5 esteso e' gia' mostrato sopra.
+                if md5_failed and "MD5 mismatch" in str(w):
+                    continue
+                imported_warnings.append(f"{os.path.basename(p)}: {w}")
         if errors:
             QMessageBox.warning(self, "Errori import", "\n".join(errors))
+        if imported_warnings:
+            dedup = list(dict.fromkeys(imported_warnings))
+            QMessageBox.information(
+                self,
+                "Warning import OGPR",
+                "\n".join(dedup[:12]) + (
+                    f"\n... altri {len(dedup) - 12} warning"
+                    if len(dedup) > 12
+                    else ""
+                ),
+            )
         if self._profiles:
             self._prof_idx = len(self._profiles) - 1
             self._load_current_profile()
@@ -405,10 +490,26 @@ class GprProfileViewer(QDialog):
         self._cb_channel.clear()
         for i in range(prof.n_channels):
             self._cb_channel.addItem(f"Ch {i}")
+
+        # Seleziona automaticamente il canale con segnale migliore.
+        best_idx = 0
+        best_score = -1.0
+        for i in range(prof.n_channels):
+            try:
+                score = self._channel_signal_score(prof.channel(i).data)
+            except Exception:
+                score = -1.0
+            if score > best_score:
+                best_score = score
+                best_idx = i
+        self._ch_idx = int(best_idx)
+        self._cb_channel.setCurrentIndex(self._ch_idx)
         self._cb_channel.blockSignals(False)
-        self._ch_idx = 0
-        self._cb_channel.setCurrentIndex(0)
         self._reload_data()
+        if self._ch_idx != 0:
+            self._lbl_status.setText(
+                f"Canale auto-selezionato: Ch {self._ch_idx} (segnale migliore)."
+            )
         self._draw_profile_line_on_canvas()
 
     def _reload_data(self):
@@ -458,6 +559,24 @@ class GprProfileViewer(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Errore processing", str(e))
             return
+
+        # Fallback robusto: evita profilo "vuoto" quando il risultato e' quasi nullo o non finito.
+        proc = np.asarray(self._proc_data)
+        finite = np.isfinite(proc)
+        finite_ratio = float(finite.mean()) if proc.size else 0.0
+        spread = float(np.nanmax(proc) - np.nanmin(proc)) if finite.any() else 0.0
+        if finite_ratio < 0.5 or spread < 1e-6:
+            try:
+                self._proc_data = normalize_display(
+                    np.asarray(self._raw_data, dtype=np.float32),
+                    clip_pct=float(self._spin_clip.value()),
+                )
+                self._lbl_status.setText(
+                    "Processing inconcludente: visualizzazione fallback su dato grezzo normalizzato."
+                )
+            except Exception:
+                pass
+
         self._apply_gain_only()
 
     def _apply_gain_only(self):
@@ -465,14 +584,53 @@ class GprProfileViewer(QDialog):
             self._apply_processing()
             return
         gain = float(self._spin_gain.value())
-        self._disp_data = np.clip(
-            self._proc_data * gain, -1.0, 1.0
-        ).astype(np.float32)
+        self._disp_data = (self._proc_data * gain).astype(np.float32, copy=False)
+        disp_arr = np.asarray(self._disp_data, dtype=np.float64)
+        finite = np.isfinite(disp_arr)
+        if finite.any():
+            disp_min = float(np.nanmin(disp_arr))
+            disp_max = float(np.nanmax(disp_arr))
+        else:
+            disp_min = float("nan")
+            disp_max = float("nan")
         self._lbl_status.setText(
             f"proc: min={self._proc_data.min():.3f}  "
             f"max={self._proc_data.max():.3f}  "
+            f"disp: min={disp_min:.3f} max={disp_max:.3f}  "
             f"gain={gain:.1f}x"
         )
+        self._redraw()
+
+    @staticmethod
+    def _clamp_axis_limits(
+        lim0: float, lim1: float, axis_min: float, axis_max: float, min_span_ratio: float = 1e-3
+    ) -> tuple[float, float]:
+        if not (np.isfinite(lim0) and np.isfinite(lim1)):
+            return axis_min, axis_max
+        span_total = max(axis_max - axis_min, 1e-12)
+        forward = lim1 >= lim0
+        lo = min(lim0, lim1)
+        hi = max(lim0, lim1)
+        min_span = span_total * min_span_ratio
+        if (hi - lo) < min_span:
+            c = 0.5 * (lo + hi)
+            lo = c - 0.5 * min_span
+            hi = c + 0.5 * min_span
+        if lo < axis_min:
+            shift = axis_min - lo
+            lo += shift
+            hi += shift
+        if hi > axis_max:
+            shift = hi - axis_max
+            lo -= shift
+            hi -= shift
+        lo = max(axis_min, lo)
+        hi = min(axis_max, hi)
+        return (lo, hi) if forward else (hi, lo)
+
+    def _reset_zoom(self):
+        self._view_xlim = None
+        self._view_ylim = None
         self._redraw()
 
     # ------------------------------------------------------------------
@@ -486,20 +644,61 @@ class GprProfileViewer(QDialog):
         ch   = prof.channel(self._ch_idx)
         cmap = self._cb_cmap.currentText()
 
-        dist_max  = float(ch.distances[-1]) if len(ch.distances) else 1.0
+        dist_arr = np.asarray(ch.distances, dtype=np.float64)
+        if dist_arr.size and np.isfinite(dist_arr).any():
+            dist_max = float(np.nanmax(dist_arr))
+        else:
+            dist_max = float(max(1.0, prof.sampling_step_m * max(self._disp_data.shape[1] - 1, 1)))
+        if not np.isfinite(dist_max) or dist_max <= 0:
+            dist_max = float(max(1.0, prof.sampling_step_m * max(self._disp_data.shape[1] - 1, 1)))
+
         n_out     = self._disp_data.shape[0]
         n_orig    = prof.n_samples
-        depth_max = prof.depth_max_m * (n_out / n_orig) if n_orig > 0 else prof.depth_max_m
+        depth_base = float(prof.depth_max_m) if np.isfinite(prof.depth_max_m) else 0.0
+        depth_max = depth_base * (n_out / n_orig) if n_orig > 0 else depth_base
+        if not np.isfinite(depth_max) or depth_max <= 0:
+            depth_max = max(1.0, float(n_out))
 
         self._ax.clear()
+        disp = np.asarray(self._disp_data, dtype=np.float64)
+        finite = disp[np.isfinite(disp)]
+        if finite.size:
+            vmin = float(np.percentile(finite, 1.0))
+            vmax = float(np.percentile(finite, 99.0))
+            if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax - vmin < 1e-6):
+                vmin = float(np.nanmin(finite))
+                vmax = float(np.nanmax(finite))
+            if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax - vmin < 1e-6):
+                vmin, vmax = -1.0, 1.0
+        else:
+            vmin, vmax = -1.0, 1.0
+        real_aspect = bool(
+            getattr(self, "_chk_real_aspect", None)
+            and self._chk_real_aspect.isChecked()
+        )
+        interpolation_mode = "bilinear"
+        if hasattr(self, "_cb_interp") and self._cb_interp is not None:
+            interpolation_mode = str(self._cb_interp.currentData() or "bilinear")
         self._im = self._ax.imshow(
             self._disp_data,
-            aspect="auto",
+            aspect="equal" if real_aspect else "auto",
             cmap=cmap,
-            vmin=-1, vmax=1,
+            vmin=vmin, vmax=vmax,
             extent=[0, dist_max, depth_max, 0],
-            interpolation="nearest",
+            interpolation=interpolation_mode,
+            resample=True,
         )
+        x_full = (0.0, dist_max)
+        y_full = (depth_max, 0.0)
+        x_view = self._view_xlim if self._view_xlim is not None else x_full
+        y_view = self._view_ylim if self._view_ylim is not None else y_full
+        x_view = self._clamp_axis_limits(x_view[0], x_view[1], x_full[0], x_full[1])
+        y_view = self._clamp_axis_limits(y_view[0], y_view[1], 0.0, depth_max)
+        self._view_xlim = x_view
+        self._view_ylim = y_view
+        self._ax.set_xlim(*x_view)
+        self._ax.set_ylim(*y_view)
+        self._ax.set_aspect("equal" if real_aspect else "auto", adjustable="box")
         self._ax.set_xlabel("Distanza (m)")
         self._ax.set_ylabel("Profondit\u00e0 (m)")
         self._ax.set_title(
@@ -528,6 +727,42 @@ class GprProfileViewer(QDialog):
         if event.inaxes == self._ax and event.button == 1:
             self._cursor_z = event.ydata
             self._update_dial()
+
+    def _on_scroll_zoom(self, event):
+        if event.inaxes != self._ax or self._im is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+
+        step = float(getattr(event, "step", 0.0) or 0.0)
+        btn = str(getattr(event, "button", "") or "").lower()
+        if step > 0 or btn == "up":
+            scale = 1.0 / 1.2
+        elif step < 0 or btn == "down":
+            scale = 1.2
+        else:
+            return
+
+        x0, x1 = self._ax.get_xlim()
+        y0, y1 = self._ax.get_ylim()
+        x = float(event.xdata)
+        y = float(event.ydata)
+
+        nx0 = x - (x - x0) * scale
+        nx1 = x + (x1 - x) * scale
+        ny0 = y - (y - y0) * scale
+        ny1 = y + (y1 - y) * scale
+
+        ex0, ex1, ey0, ey1 = self._im.get_extent()
+        x_min, x_max = float(min(ex0, ex1)), float(max(ex0, ex1))
+        y_min, y_max = float(min(ey0, ey1)), float(max(ey0, ey1))
+
+        self._view_xlim = self._clamp_axis_limits(nx0, nx1, x_min, x_max)
+        self._view_ylim = self._clamp_axis_limits(ny0, ny1, y_min, y_max)
+
+        self._ax.set_xlim(*self._view_xlim)
+        self._ax.set_ylim(*self._view_ylim)
+        self._canvas_mpl.draw_idle()
 
     def _on_axes_leave(self, event):
         if self._vline: self._vline.set_visible(False)
@@ -614,9 +849,11 @@ class GprProfileViewer(QDialog):
     def _update_dial(self):
         if self._cursor_z is None or self.plugin is None:
             return
-        try:
-            dial = self.plugin.dlg.dial
-        except AttributeError:
+        dlg = getattr(self.plugin, "dlg", None)
+        if dlg is None:
+            return
+        dial = getattr(dlg, "Dial", None) or getattr(dlg, "dial", None)
+        if dial is None:
             return
         try:
             from .project_catalog import load_catalog

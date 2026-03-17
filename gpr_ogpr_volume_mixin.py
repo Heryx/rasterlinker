@@ -8,7 +8,7 @@ Viene chiamato da GprProfileViewer tramite:
 
 Flusso:
   1. Dialog parametri (canale/combinazione, z_min/max, z_step, risoluzione, radius, gruppo)
-  2. slice_ogpr_to_tifs()  -> lista di dict {path, z_from, z_to, ...}
+  2. compute_ogpr_slice_grids() + write_grids_to_tifs()
   3. _register_las_slices_in_catalog()  (riusa GprVolumeMixin)
   4. Aggiorna lista gruppi nel Project Manager
 """
@@ -24,7 +24,7 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsProject
-from .project_catalog import parse_depth_from_filename, parse_depth_from_raster_metadata
+from .project_catalog import parse_depth_from_filename
 
 
 class GprOgprVolumeMixin:
@@ -175,7 +175,11 @@ class GprOgprVolumeMixin:
     # Entry point pubblico
     # ------------------------------------------------------------------
 
-    def import_ogpr_as_slices(self, profiles: list) -> None:
+    def import_ogpr_as_slices(
+        self,
+        profiles: list,
+        slice_params: dict | None = None,
+    ) -> None:
         """
         Punto di ingresso chiamato da GprProfileViewer._open_slice_dialog().
 
@@ -183,9 +187,9 @@ class GprOgprVolumeMixin:
         """
         from .gpr_ogpr_slicer import (
             compute_ogpr_slice_grids,
-            write_grids_to_tifs,
-            save_ogpr_slicer_params,
             load_ogpr_slicer_params,
+            save_ogpr_slicer_params,
+            write_grids_to_tifs,
         )
 
         if not profiles:
@@ -220,10 +224,12 @@ class GprOgprVolumeMixin:
         n_channels = max(p.n_channels  for p in profiles)
 
         params = self._ask_ogpr_slice_params(
+            profiles=profiles,
             n_channels  = n_channels,
             depth_max_m = depth_max,
             default_group = default_group,
             saved = saved,
+            slice_params=slice_params,
         )
         if params is None:
             return
@@ -246,18 +252,23 @@ class GprOgprVolumeMixin:
                 duration=60,
             )
 
+        extra_slice_params = dict(slice_params or {})
         try:
-            slices = slice_ogpr_to_tifs(
-                profiles       = profiles,
-                output_dir     = output_dir,
-                channel        = params["channel"],
-                combine_method = params["combine_method"],
-                resolution     = params["resolution"],
-                z_step         = params["z_step"],
-                z_min          = params["z_min"],
-                z_max          = params["z_max"],
-                radius         = params["radius"],
-                epsg           = epsg,
+            grids, meta = compute_ogpr_slice_grids(
+                profiles=profiles,
+                channel=params["channel"],
+                combine_method=params["combine_method"],
+                resolution=params["resolution"],
+                z_step=params["z_step"],
+                z_min=params["z_min"],
+                z_max=params["z_max"],
+                radius=params["radius"],
+                normalize_channels=bool(extra_slice_params.get("normalize_channels", True)),
+                amplitude_sigma=extra_slice_params.get("amplitude_sigma"),
+                use_anisotropic_idw=bool(extra_slice_params.get("use_anisotropic_idw", False)),
+                auto_radius=bool(extra_slice_params.get("auto_radius", False)),
+                fill_nodata=bool(extra_slice_params.get("fill_nodata", False)),
+                smooth_sigma=float(extra_slice_params.get("smooth_sigma", 0.0) or 0.0),
             )
         except Exception as exc:
             QMessageBox.critical(
@@ -274,6 +285,14 @@ class GprOgprVolumeMixin:
             )
             return
 
+        try:
+            slices = write_grids_to_tifs(grids, meta, output_dir, epsg=epsg)
+        except Exception as exc:
+            QMessageBox.critical(
+                getattr(self, "dlg", None), "Errore scrittura TIFF", str(exc)
+            )
+            return
+
         # --- salva parametri sidecar ---
         save_ogpr_slicer_params(output_dir, {
             "source_profiles": [p.path for p in profiles],
@@ -287,6 +306,12 @@ class GprOgprVolumeMixin:
             "radius":          params["radius"],
             "epsg":            epsg,
             "n_slices":        len(slices),
+            "normalize_channels": bool(extra_slice_params.get("normalize_channels", True)),
+            "amplitude_sigma": extra_slice_params.get("amplitude_sigma"),
+            "use_anisotropic_idw": bool(extra_slice_params.get("use_anisotropic_idw", False)),
+            "auto_radius": bool(extra_slice_params.get("auto_radius", False)),
+            "fill_nodata": bool(extra_slice_params.get("fill_nodata", False)),
+            "smooth_sigma": float(extra_slice_params.get("smooth_sigma", 0.0) or 0.0),
         })
 
         # --- registra nel catalogo (riusa GprVolumeMixin) ---

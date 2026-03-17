@@ -21,13 +21,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
 GEO_DOUBLES_PER_CHANNEL = 8   # east, north, alt, heading, pitch, roll, spare x2
 _UTM_MIN = 1_000.0            # soglia minima plausibile per coordinate proiettate (m)
+_MAX_PLAUSIBILITY_SAMPLE = 250_000
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +83,14 @@ class OgprProfile:
     value_type:        str
     channels:          list
     header_raw:        dict
+    value_type_raw:    str = ""
+    raw_dtype:         str = ""
+    byte_order:        str = "<"
+    geo_raw_dtype:     str = ""
+    geo_byte_order:    str = "<"
+    md5_verified:      bool = False
+    md5_scope:         str = ""
+    parse_warnings:    list[str] = field(default_factory=list)
 
     @property
     def dt_ns(self) -> float:
@@ -102,6 +112,268 @@ class OgprProfile:
 
 class OgprReadError(Exception):
     pass
+
+
+# ---------------------------------------------------------------------------
+# Helper: value type and radar decoding
+# ---------------------------------------------------------------------------
+
+def _normalize_value_type(value_type_raw: str) -> tuple[str, np.dtype, list[str]]:
+    txt = str(value_type_raw or "").strip().lower()
+    key = txt.replace(" ", "").replace("_", "")
+    warnings = []
+
+    if key in {"float", "float32", "single", "f4"}:
+        return "float32", np.dtype("f4"), warnings
+    if key in {"double", "float64", "f8"}:
+        return "float64", np.dtype("f8"), warnings
+    if key in {"int16", "short", "signedshort", "i2"}:
+        return "int16", np.dtype("i2"), warnings
+    if key in {"int32", "integer32", "i4"}:
+        return "int32", np.dtype("i4"), warnings
+
+    warnings.append(
+        f"valueType non riconosciuto '{value_type_raw}', uso fallback int16."
+    )
+    return "int16", np.dtype("i2"), warnings
+
+
+def _radar_data_is_suspicious(arr: np.ndarray, kind: str) -> bool:
+    if arr.size == 0:
+        return True
+
+    sample = arr
+    if sample.size > _MAX_PLAUSIBILITY_SAMPLE:
+        step = max(1, sample.size // _MAX_PLAUSIBILITY_SAMPLE)
+        sample = sample[::step]
+
+    finite = np.isfinite(sample)
+    finite_ratio = float(finite.mean()) if finite.size else 0.0
+    if finite_ratio < 0.999:
+        return True
+    sample = sample[finite]
+    if sample.size == 0:
+        return True
+
+    if np.count_nonzero(sample) == 0:
+        return True
+
+    abs_sample = np.abs(sample.astype(np.float64))
+    p99 = float(np.percentile(abs_sample, 99))
+    if not np.isfinite(p99):
+        return True
+    if kind == "f" and p99 > 1e12:
+        return True
+
+    # Heuristic: dati int16 endian-swapped possono risultare quasi tutti multipli di 256.
+    if kind in {"i", "u"} and sample.size >= 1024:
+        as_int = sample.astype(np.int64, copy=False)
+        mult256_ratio = float(np.mean(np.mod(as_int, 256) == 0))
+        if mult256_ratio > 0.97:
+            return True
+
+    return False
+
+
+def _decode_radar_volume(
+    radar_raw: bytes,
+    exp_count: int,
+    value_type_raw: str,
+) -> tuple[np.ndarray, str, str, str, list[str]]:
+    value_type_norm, base_dtype, warnings = _normalize_value_type(value_type_raw)
+
+    # Dichiara fallback più comuni, senza forzare override se il tipo dichiarato è valido.
+    fallback_bases = [np.dtype("i2"), np.dtype("f4"), np.dtype("i4"), np.dtype("f8")]
+    base_candidates = [base_dtype]
+    for fb in fallback_bases:
+        if fb != base_dtype:
+            base_candidates.append(fb)
+
+    candidates = []
+    for base in base_candidates:
+        for byte_order in ("<", ">"):
+            dtype = base.newbyteorder(byte_order)
+            arr = np.frombuffer(radar_raw, dtype=dtype)
+            if arr.size != exp_count:
+                continue
+            arr_f32 = arr.astype(np.float32, copy=False)
+            suspicious = _radar_data_is_suspicious(arr_f32, base.kind)
+            candidates.append({
+                "arr": arr_f32,
+                "raw_dtype": dtype.str,
+                "byte_order": byte_order,
+                "base": base,
+                "suspicious": suspicious,
+            })
+
+    if not candidates:
+        raise OgprReadError(
+            f"Radar: attesi {exp_count} valori, byteSize={len(radar_raw)} "
+            f"(valueType='{value_type_raw}')."
+        )
+
+    # 1) preferisci il tipo dichiarato little-endian se plausibile
+    for cand in candidates:
+        if cand["base"] == base_dtype and cand["byte_order"] == "<" and not cand["suspicious"]:
+            return cand["arr"], value_type_norm, cand["raw_dtype"], cand["byte_order"], warnings
+
+    # 2) altrimenti prova tipo dichiarato big-endian se è l'unico plausibile
+    little_declared = None
+    big_declared = None
+    for cand in candidates:
+        if cand["base"] != base_dtype:
+            continue
+        if cand["byte_order"] == "<":
+            little_declared = cand
+        elif cand["byte_order"] == ">":
+            big_declared = cand
+    if little_declared and big_declared and little_declared["suspicious"] and not big_declared["suspicious"]:
+        warnings.append(
+            f"Endian fallback applicato per Radar Volume: valueType='{value_type_raw}' letto come big-endian."
+        )
+        return (
+            big_declared["arr"],
+            value_type_norm,
+            big_declared["raw_dtype"],
+            big_declared["byte_order"],
+            warnings,
+        )
+
+    # 3) usa il primo candidato non sospetto (fallback su tipo alternativo)
+    for cand in candidates:
+        if not cand["suspicious"]:
+            if cand["base"] != base_dtype:
+                warnings.append(
+                    f"valueType='{value_type_raw}' non coerente; usato fallback dtype {cand['raw_dtype']}."
+                )
+            return cand["arr"], value_type_norm, cand["raw_dtype"], cand["byte_order"], warnings
+
+    # 4) ultimo fallback: tipo dichiarato little-endian (comportamento storico)
+    if little_declared is not None:
+        # Se little e big sono entrambi "sospetti", il check e' inconclusivo:
+        # evita warning allarmistici e usa il tipo dichiarato.
+        if not (big_declared is not None and bool(big_declared["suspicious"])):
+            warnings.append(
+                f"Controllo plausibilita' radar inconclusivo; mantenuta lettura dichiarata {little_declared['raw_dtype']}."
+            )
+        return (
+            little_declared["arr"],
+            value_type_norm,
+            little_declared["raw_dtype"],
+            little_declared["byte_order"],
+            warnings,
+        )
+
+    first = candidates[0]
+    warnings.append(
+        f"Dati radar plausibilita' bassa; usato fallback dtype {first['raw_dtype']}."
+    )
+    return first["arr"], value_type_norm, first["raw_dtype"], first["byte_order"], warnings
+
+
+def _is_valid_md5_hex(txt: str) -> bool:
+    if len(txt) != 32:
+        return False
+    hexdigits = set("0123456789abcdefABCDEF")
+    return all(ch in hexdigits for ch in txt)
+
+
+def _geo_data_score(geo_ch: np.ndarray) -> float:
+    if geo_ch.size == 0:
+        return -1e9
+    east = geo_ch[:, 0, 0].astype(np.float64, copy=False)
+    north = geo_ch[:, 0, 1].astype(np.float64, copy=False)
+    finite_mask = np.isfinite(east) & np.isfinite(north)
+    if not finite_mask.any():
+        return -1e9
+
+    east = east[finite_mask]
+    north = north[finite_mask]
+    if east.size == 0:
+        return -1e9
+
+    mean_abs_e = float(np.mean(np.abs(east)))
+    mean_abs_n = float(np.mean(np.abs(north)))
+    std_e = float(np.std(east))
+    std_n = float(np.std(north))
+
+    score = 8.0 * float(finite_mask.mean())
+    if mean_abs_e >= _UTM_MIN:
+        score += 2.5
+    if mean_abs_n >= _UTM_MIN:
+        score += 2.5
+    if std_e + std_n > 1e-6:
+        score += 1.0
+    if mean_abs_e < 1.0 and mean_abs_n < 1.0:
+        score -= 2.0
+    if mean_abs_e > 1e9 or mean_abs_n > 1e9:
+        score -= 3.0
+
+    if east.size > 2:
+        de = np.diff(east)
+        dn = np.diff(north)
+        step95 = float(np.percentile(np.sqrt(de ** 2 + dn ** 2), 95))
+        if step95 > 1e6:
+            score -= 2.0
+    return score
+
+
+def _decode_geo_volume(
+    geo_raw: bytes,
+    n_slices: int,
+    n_channels: int,
+    extra_doubles: int,
+    dps: int,
+) -> tuple[np.ndarray, str, str, list[str]]:
+    expected_count = n_slices * dps
+    warnings_list = []
+    candidates = []
+    for byte_order in ("<", ">"):
+        dtype = np.dtype("f8").newbyteorder(byte_order)
+        arr = np.frombuffer(geo_raw, dtype=dtype)
+        if arr.size != expected_count:
+            continue
+        geo_array = arr.reshape((n_slices, dps))
+        geo_ch = _extract_geo_channels(geo_array, n_slices, n_channels, extra_doubles)
+        score = _geo_data_score(geo_ch)
+        candidates.append({
+            "geo_ch": geo_ch,
+            "raw_dtype": dtype.str,
+            "byte_order": byte_order,
+            "score": score,
+            "suspicious": score < 8.0,
+        })
+
+    if not candidates:
+        raise OgprReadError(
+            f"Sample Geolocations: attesi {expected_count} double, trovati {len(geo_raw) // 8}."
+        )
+
+    little = next((c for c in candidates if c["byte_order"] == "<"), None)
+    big = next((c for c in candidates if c["byte_order"] == ">"), None)
+
+    if little and not little["suspicious"]:
+        return little["geo_ch"], little["raw_dtype"], little["byte_order"], warnings_list
+
+    if little and big and little["suspicious"] and not big["suspicious"]:
+        warnings_list.append(
+            "Endian fallback applicato per Sample Geolocations: letto come big-endian."
+        )
+        return big["geo_ch"], big["raw_dtype"], big["byte_order"], warnings_list
+
+    best = max(candidates, key=lambda c: c["score"])
+    if best["byte_order"] == ">" and (little is None or best["score"] > little["score"] + 0.5):
+        warnings_list.append(
+            "Sample Geolocations decodificato come big-endian (plausibilita' coordinate superiore)."
+        )
+
+    if best["suspicious"]:
+        warnings_list.append(
+            f"Sample Geolocations con plausibilita' bassa (score={best['score']:.2f}); "
+            f"usato dtype {best['raw_dtype']}."
+        )
+
+    return best["geo_ch"], best["raw_dtype"], best["byte_order"], warnings_list
 
 
 # ---------------------------------------------------------------------------
@@ -140,8 +412,7 @@ def _extract_geo_channels(
     Strategia:
       1. Prova extra all'INIZIO  (offset = extra_doubles)
       2. Prova extra alla FINE   (offset = 0)
-      Sceglie la versione in cui l'easting del canale 0 è plausibile (> _UTM_MIN).
-      Se nessuna delle due è plausibile usa offset=0 come fallback silenzioso.
+      Sceglie la versione con score di plausibilita' piu' alto.
     """
     ch_len = n_channels * GEO_DOUBLES_PER_CHANNEL
 
@@ -153,21 +424,14 @@ def _extract_geo_channels(
     if extra_doubles == 0:
         return _try(0)
 
-    # Testa offset=extra (extra all'inizio)
+    # Testa entrambe le disposizioni e usa il layout più plausibile.
     geo_extra_start = _try(extra_doubles)
-    east_start = np.abs(geo_extra_start[:, 0, 0]).mean()
-
-    # Testa offset=0 (extra alla fine)
     geo_extra_end = _try(0)
-    east_end = np.abs(geo_extra_end[:, 0, 0]).mean()
-
-    # Scegli la versione con easting più plausibile
-    if east_start >= _UTM_MIN and east_start > east_end:
+    score_start = _geo_data_score(geo_extra_start)
+    score_end = _geo_data_score(geo_extra_end)
+    if score_start >= score_end:
         return geo_extra_start
-    if east_end >= _UTM_MIN:
-        return geo_extra_end
-    # Fallback: extra all'inizio (il più comune dai file testati)
-    return geo_extra_start
+    return geo_extra_end
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +450,8 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
     with open(p, "rb") as f:
         raw = f.read()
 
+    parse_warnings: list[str] = []
+
     # Magic
     if raw[:6] == b"ogpr\r\n":
         pos = 6
@@ -193,28 +459,52 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
         pos = 5
     else:
         raise OgprReadError(f"Magic non valido: {raw[:8]!r}")
+    pos_after_magic = pos
 
-    md5_line, pos  = _read_line(raw, pos)
-    md5_stored     = md5_line.decode("ascii").strip()
-    len_line, pos  = _read_line(raw, pos)
-    json_len       = int(len_line.decode("ascii").strip())
-    json_bytes     = raw[pos: pos + json_len]
-    hdr            = json.loads(json_bytes.decode("utf-8"))
-    pos           += json_len
+    md5_line, pos = _read_line(raw, pos)
+    pos_after_md5_line = pos
+    try:
+        md5_stored = md5_line.decode("ascii").strip()
+    except Exception as exc:
+        raise OgprReadError(f"Riga MD5 non ASCII o corrotta: {exc}") from exc
+    if not _is_valid_md5_hex(md5_stored):
+        msg = (
+            f"MD5 header non valido ('{md5_stored}'). "
+            "Possibile file OGPR corrotto/troncato."
+        )
+        if verify_md5:
+            raise OgprReadError(msg)
+        parse_warnings.append(msg)
 
-    if verify_md5:
-        computed = hashlib.md5(raw[pos:]).hexdigest()
-        if computed != md5_stored:
-            raise OgprReadError(f"MD5 non valido (stored={md5_stored}, computed={computed})")
+    len_line, pos = _read_line(raw, pos)
+    pos_after_len_line = pos
+    try:
+        json_len = int(len_line.decode("ascii").strip())
+    except Exception as exc:
+        raise OgprReadError(f"Lunghezza JSON non valida: {exc}") from exc
+    if json_len <= 0:
+        raise OgprReadError(f"Lunghezza JSON non valida: {json_len}")
+    if pos + json_len > len(raw):
+        raise OgprReadError(
+            f"Header JSON troncato: attesi {json_len} byte, disponibili {len(raw) - pos}."
+        )
+
+    json_bytes = raw[pos: pos + json_len]
+    try:
+        hdr = json.loads(json_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise OgprReadError(f"Header JSON non parseabile: {exc}") from exc
+    pos += json_len
 
     # Metadati
     md         = hdr["mainDescriptor"]
+    md_meta    = md.get("metadata") if isinstance(md.get("metadata"), dict) else {}
     n_samples  = int(md["samplesCount"])
     n_channels = int(md["channelsCount"])
     n_slices   = int(md["slicesCount"])
-    swath_name = md["metadata"].get("swathName", "")
-    swath_id   = md["metadata"].get("swathId",   "")
-    array_id   = int(md["metadata"].get("arrayId", 0))
+    swath_name = md_meta.get("swathName", "")
+    swath_id   = md_meta.get("swathId",   "")
+    array_id   = int(md_meta.get("arrayId", 0))
     v_major    = int(hdr["version"]["major"])
     v_minor    = int(hdr["version"]["minor"])
 
@@ -235,35 +525,102 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
     frequency     = float(radar_info.get("fequency_MHz",
                            radar_info.get("frequency_MHz", 600.0)))
     polarization  = str(radar_info.get("polarization", "horizontal"))
-    value_type    = str(radar_desc.get("valueType", "int16"))
+    value_type_raw = str(radar_desc.get("valueType", "int16"))
     epsg          = int(geo_desc.get("srs", {}).get("value", 32633))
 
     # Radar Volume
     r_offset   = int(radar_desc["byteOffset"])
     r_bytesize = int(radar_desc["byteSize"])
+    if r_offset < 0 or r_bytesize <= 0 or (r_offset + r_bytesize) > len(raw):
+        raise OgprReadError(
+            f"Radar Volume fuori range: offset={r_offset}, size={r_bytesize}, file={len(raw)}."
+        )
     radar_raw  = raw[r_offset: r_offset + r_bytesize]
 
     exp = n_samples * n_channels * n_slices
-    if value_type == "float":
-        radar_flat = np.frombuffer(radar_raw, dtype="<f4")
-    else:
-        radar_flat = np.frombuffer(radar_raw, dtype="<i2").astype(np.float32)
-
-    if radar_flat.size != exp:
-        raise OgprReadError(
-            f"Radar: attesi {exp} valori, trovati {radar_flat.size}"
-        )
+    radar_flat, value_type, raw_dtype, byte_order, radar_warnings = _decode_radar_volume(
+        radar_raw=radar_raw,
+        exp_count=exp,
+        value_type_raw=value_type_raw,
+    )
+    parse_warnings.extend(radar_warnings)
     radar_3d = radar_flat.reshape((n_slices, n_channels, n_samples))
 
     # Sample Geolocations
     g_offset      = int(geo_desc["byteOffset"])
     g_bytesize    = int(geo_desc["byteSize"])
+    if g_offset < 0 or g_bytesize <= 0 or (g_offset + g_bytesize) > len(raw):
+        raise OgprReadError(
+            f"Sample Geolocations fuori range: offset={g_offset}, size={g_bytesize}, file={len(raw)}."
+        )
     geo_raw       = raw[g_offset: g_offset + g_bytesize]
+    md5_verified = False
+    md5_scope = ""
+    if _is_valid_md5_hex(md5_stored):
+        md5_candidates = {
+            "payload_after_json": hashlib.md5(raw[pos:]).hexdigest(),
+            "full_file": hashlib.md5(raw).hexdigest(),
+            "after_magic": hashlib.md5(raw[pos_after_magic:]).hexdigest(),
+            "after_md5_line": hashlib.md5(raw[pos_after_md5_line:]).hexdigest(),
+            "after_len_line": hashlib.md5(raw[pos_after_len_line:]).hexdigest(),
+            "radar_volume": hashlib.md5(radar_raw).hexdigest(),
+            "sample_geolocations": hashlib.md5(geo_raw).hexdigest(),
+            "radar_plus_geo": hashlib.md5(radar_raw + geo_raw).hexdigest(),
+            "geo_plus_radar": hashlib.md5(geo_raw + radar_raw).hexdigest(),
+        }
+        block_spans = []
+        for blk in hdr.get("dataBlockDescriptors", []):
+            try:
+                bo = int(blk.get("byteOffset"))
+                bs = int(blk.get("byteSize"))
+            except Exception:
+                continue
+            if bo < 0 or bs <= 0 or (bo + bs) > len(raw):
+                continue
+            block_spans.append((bo, bo + bs))
+        if block_spans:
+            block_spans.sort(key=lambda t: t[0])
+            concat_blocks = b"".join(raw[s:e] for s, e in block_spans)
+            md5_candidates["all_blocks_sorted"] = hashlib.md5(concat_blocks).hexdigest()
+
+        matched_scopes = [k for k, v in md5_candidates.items() if v == md5_stored]
+        if matched_scopes:
+            md5_verified = True
+            md5_scope = matched_scopes[0]
+            if md5_scope != "payload_after_json":
+                parse_warnings.append(
+                    f"MD5 verificato con scope '{md5_scope}' (non payload_after_json)."
+                )
+        else:
+            short = ", ".join(
+                f"{k}={v}" for k, v in md5_candidates.items() if k in {
+                    "payload_after_json",
+                    "full_file",
+                    "after_md5_line",
+                    "radar_volume",
+                    "sample_geolocations",
+                }
+            )
+            msg = (
+                f"MD5 mismatch: stored={md5_stored}. "
+                f"Candidati principali: {short}."
+            )
+            if verify_md5:
+                raise OgprReadError(
+                    msg + " Il file potrebbe essere corrotto/troncato oppure usare uno schema MD5 non standard."
+                )
+            parse_warnings.append(msg)
     extra_doubles = _parse_geo_layout(g_bytesize, n_slices, n_channels)
     dps           = n_channels * GEO_DOUBLES_PER_CHANNEL + extra_doubles
 
-    geo_array = np.frombuffer(geo_raw, dtype="<f8").reshape((n_slices, dps))
-    geo_ch    = _extract_geo_channels(geo_array, n_slices, n_channels, extra_doubles)
+    geo_ch, geo_raw_dtype, geo_byte_order, geo_warnings = _decode_geo_volume(
+        geo_raw=geo_raw,
+        n_slices=n_slices,
+        n_channels=n_channels,
+        extra_doubles=extra_doubles,
+        dps=dps,
+    )
+    parse_warnings.extend(geo_warnings)
 
     # Costruisci canali
     channels = []
@@ -274,12 +631,27 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
         alt_ch   = geo_ch[:, ch_i, 2].copy()
         head_ch  = geo_ch[:, ch_i, 3].copy()
 
+        # Sanitize coordinate arrays to avoid NaN/Inf propagation in distance axis.
+        finite_xy = np.isfinite(east_ch) & np.isfinite(north_ch)
+        if not np.all(finite_xy):
+            if finite_xy.any():
+                idx = np.arange(n_slices, dtype=np.float64)
+                idx_ok = np.where(finite_xy)[0].astype(np.float64)
+                east_ch = np.interp(idx, idx_ok, east_ch[finite_xy]).astype(np.float64)
+                north_ch = np.interp(idx, idx_ok, north_ch[finite_xy]).astype(np.float64)
+            else:
+                east_ch = np.zeros(n_slices, dtype=np.float64)
+                north_ch = np.zeros(n_slices, dtype=np.float64)
+            parse_warnings.append(
+                f"Coordinate non finite nel canale {ch_i}: applicato fallback/interpolazione per asse distanza."
+            )
+
         dx   = np.diff(east_ch,  prepend=east_ch[0])
         dy   = np.diff(north_ch, prepend=north_ch[0])
         dist = np.cumsum(np.sqrt(dx ** 2 + dy ** 2))
 
         # Fallback: se le coordinate sono zero o costanti usa sampling_step_m
-        if dist[-1] < 1e-3:
+        if (not np.isfinite(dist).all()) or (dist[-1] < 1e-3):
             dist = np.arange(n_slices, dtype=np.float64) * sampling_step
 
         channels.append(OgprChannel(
@@ -291,6 +663,9 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
             heading     = head_ch,
             distances   = dist,
         ))
+
+    for msg in parse_warnings:
+        warnings.warn(f"[OGPR] {p.name}: {msg}", RuntimeWarning)
 
     return OgprProfile(
         path             = str(path),
@@ -311,4 +686,12 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
         value_type       = value_type,
         channels         = channels,
         header_raw       = hdr,
+        value_type_raw   = value_type_raw,
+        raw_dtype        = raw_dtype,
+        byte_order       = byte_order,
+        geo_raw_dtype    = geo_raw_dtype,
+        geo_byte_order   = geo_byte_order,
+        md5_verified     = md5_verified,
+        md5_scope        = md5_scope,
+        parse_warnings   = parse_warnings,
     )
