@@ -282,6 +282,9 @@ class GprProfileViewer(QDialog):
 
         self._rb_point: Optional[QgsRubberBand] = None
         self._rb_line:  Optional[QgsRubberBand] = None
+        self._rb_crosshair_h: Optional[QgsRubberBand] = None
+        self._rb_crosshair_v: Optional[QgsRubberBand] = None
+        self._crosshair_size_m: float = 5.0
 
         self._canvas_timer = QTimer(self)
         self._canvas_timer.setSingleShot(True)
@@ -946,6 +949,34 @@ class GprProfileViewer(QDialog):
         )
         btn_view3d.clicked.connect(self._open_3d_viewer)
         fl_slice.addRow(btn_view3d)
+
+        self._chk_timeslice_sync = QCheckBox()
+        self._chk_timeslice_sync.setChecked(False)
+        self._chk_timeslice_sync.setToolTip(
+            "Sincronizza la timeslice visibile nel canvas QGIS con la profondita' "
+            "del cursore sul radargramma e mostra un crosshair rosso X/Y."
+        )
+        self._spin_crosshair_size = QDoubleSpinBox()
+        self._spin_crosshair_size.setRange(0.5, 100.0)
+        self._spin_crosshair_size.setSingleStep(0.5)
+        self._spin_crosshair_size.setValue(5.0)
+        self._spin_crosshair_size.setEnabled(False)
+        self._spin_crosshair_size.setToolTip("Dimensione del crosshair (metri, semi-lunghezza).")
+
+        def _on_toggle_timeslice_sync(checked):
+            self._spin_crosshair_size.setEnabled(bool(checked))
+            if checked:
+                self._canvas_timer.start()
+            else:
+                self._clear_timeslice_crosshair()
+
+        self._chk_timeslice_sync.toggled.connect(_on_toggle_timeslice_sync)
+        self._spin_crosshair_size.valueChanged.connect(
+            lambda v: setattr(self, "_crosshair_size_m", float(v))
+        )
+
+        fl_slice.addRow("Sync timeslice canvas:", self._chk_timeslice_sync)
+        fl_slice.addRow("  crosshair size (m):", self._spin_crosshair_size)
 
         from qgis.PyQt.QtWidgets import QScrollArea, QWidget
         scroll_content = QWidget()
@@ -2462,6 +2493,8 @@ class GprProfileViewer(QDialog):
     def _flush_canvas_update(self):
         self._update_rubber_band()
         self._update_dial()
+        self._update_timeslice_visibility_in_canvas()
+        self._update_timeslice_crosshair()
         self._emit_cursor_moved()
 
     def _to_canvas_point(self, prof, east: float, north: float) -> QgsPointXY:
@@ -2554,6 +2587,18 @@ class GprProfileViewer(QDialog):
                 i == len(e_use) - 1
             )
 
+    def _clear_timeslice_crosshair(self):
+        for rb in (self._rb_crosshair_h, self._rb_crosshair_v):
+            if rb is not None:
+                try:
+                    rb.setVisible(False)
+                except Exception:
+                    pass
+                try:
+                    rb.reset(QgsWkbTypes.LineGeometry)
+                except Exception:
+                    pass
+
     def _get_cached_catalog(self, project_root: str):
         if not project_root:
             return None
@@ -2575,6 +2620,115 @@ class GprProfileViewer(QDialog):
             self._cached_catalog_mtime = mtime
         return self._cached_catalog
 
+    def _active_group_timeslices_context(self):
+        if self.plugin is None:
+            return None, None
+        settings = getattr(self.plugin, "settings", None)
+        settings_key = getattr(self.plugin, "settings_key_active_project", None)
+        if settings is None or not settings_key:
+            return None, None
+        try:
+            pr = (settings.value(settings_key, "", type=str) or "").strip()
+        except Exception:
+            pr = ""
+        if not pr:
+            return None, None
+        catalog = self._get_cached_catalog(pr)
+        if not isinstance(catalog, dict):
+            return None, None
+
+        groups = [g for g in catalog.get("raster_groups", []) if isinstance(g, dict)]
+        if not groups:
+            return None, None
+
+        active_group = None
+        active_group_id = str(getattr(self.plugin, "_active_group_id", "") or "").strip()
+        if active_group_id:
+            active_group = next((g for g in groups if str(g.get("id") or "").strip() == active_group_id), None)
+
+        if active_group is None:
+            dlg = getattr(self.plugin, "dlg", None)
+            glw = getattr(dlg, "groupListWidget", None)
+            current_item = None
+            try:
+                current_item = glw.currentItem() if glw is not None else None
+                if current_item is None and glw is not None:
+                    selected_items = list(glw.selectedItems() or [])
+                    current_item = selected_items[0] if selected_items else None
+            except Exception:
+                current_item = None
+            if current_item is not None:
+                gid = str(current_item.data(Qt.UserRole) or "").strip()
+                gname = str(current_item.text() or "").strip()
+                if gid:
+                    active_group = next((g for g in groups if str(g.get("id") or "").strip() == gid), None)
+                if active_group is None and gname:
+                    active_group = next(
+                        (g for g in groups if str(g.get("name") or "").strip().lower() == gname.lower()),
+                        None,
+                    )
+
+        if active_group is None and hasattr(self.plugin, "_selected_group_names"):
+            try:
+                selected_names = list(getattr(self.plugin, "_selected_group_names")() or [])
+            except Exception:
+                selected_names = []
+            for name in selected_names:
+                key = str(name or "").strip().lower()
+                if not key:
+                    continue
+                active_group = next(
+                    (g for g in groups if str(g.get("name") or "").strip().lower() == key),
+                    None,
+                )
+                if active_group is not None:
+                    break
+
+        if active_group is None:
+            active_group = next((g for g in groups if g.get("timeslice_ids")), None)
+        if active_group is None:
+            return None, None
+
+        tids = [str(tid).strip() for tid in (active_group.get("timeslice_ids") or []) if str(tid).strip()]
+        if not tids:
+            return active_group, []
+        ts_by_id = {
+            str(t.get("id") or "").strip(): t
+            for t in catalog.get("timeslices", [])
+            if isinstance(t, dict) and str(t.get("id") or "").strip()
+        }
+        slices = [ts_by_id[tid] for tid in tids if tid in ts_by_id]
+        if not slices:
+            tids_set = set(tids)
+            slices = [
+                t for t in catalog.get("timeslices", [])
+                if isinstance(t, dict) and str(t.get("id") or "").strip() in tids_set
+            ]
+        return active_group, slices
+
+    def _nearest_timeslice_index(self, slices, depth_m: float):
+        if not slices:
+            return None
+        centers = []
+        for t in slices:
+            try:
+                d0 = float(t.get("depth_from", 0.0) or 0.0)
+                d1 = float(t.get("depth_to", d0) or d0)
+            except Exception:
+                d0 = 0.0
+                d1 = 0.0
+            centers.append((d0 + d1) * 0.5)
+        depth_arr = np.asarray(centers, dtype=np.float64)
+        if depth_arr.size <= 0 or not np.isfinite(depth_arr).any():
+            return None
+        try:
+            target = float(depth_m)
+        except Exception:
+            return None
+        if not np.isfinite(target):
+            return None
+        return int(np.nanargmin(np.abs(depth_arr - target)))
+
     def _update_dial(self):
         if self._cursor_z is None or self.plugin is None:
             return
@@ -2589,35 +2743,123 @@ class GprProfileViewer(QDialog):
         if dial is None:
             return
         try:
-            pr = (settings.value(settings_key, "", type=str) or "").strip()
-            if not pr:
-                return
-            catalog = self._get_cached_catalog(pr)
-            if not isinstance(catalog, dict):
-                return
-            group_id = getattr(self.plugin, "_active_group_id", None)
-            if group_id is None:
-                return
-            grp = next(
-                (g for g in catalog.get("raster_groups", [])
-                 if g.get("id") == group_id), None
-            )
-            if grp is None:
-                return
-            slices = [
-                t for t in catalog.get("timeslices", [])
-                if t.get("id") in grp.get("timeslice_ids", [])
-            ]
+            _grp, slices = self._active_group_timeslices_context()
             if not slices:
                 return
-            depths = np.array([
-                (t.get("depth_from", 0) + t.get("depth_to", 0)) / 2.0
-                for t in slices
-            ])
-            idx = int(np.argmin(np.abs(depths - self._cursor_z)))
-            dial_val = int(round(idx / max(len(slices) - 1, 1) * dial.maximum()))
+            idx = self._nearest_timeslice_index(slices, float(self._cursor_z))
+            if idx is None:
+                return
+            dial_val = int(np.clip(idx, 0, int(dial.maximum())))
             if dial.value() != dial_val:
                 dial.setValue(dial_val)
+        except Exception:
+            pass
+
+    def _update_timeslice_visibility_in_canvas(self):
+        if not bool(getattr(self, "_chk_timeslice_sync", None) and self._chk_timeslice_sync.isChecked()):
+            return
+        if self._cursor_z is None or self.plugin is None:
+            return
+        grp, slices = self._active_group_timeslices_context()
+        if grp is None or not slices:
+            return
+        idx = self._nearest_timeslice_index(slices, float(self._cursor_z))
+        if idx is None:
+            return
+        group_name = str(grp.get("name") or "").strip()
+        if not group_name:
+            return
+        try:
+            if hasattr(self.plugin, "_sync_qgis_group_visibility_with_selection"):
+                self.plugin._sync_qgis_group_visibility_with_selection()
+        except Exception:
+            pass
+        try:
+            get_group = getattr(self.plugin, "_get_or_create_plugin_qgis_group", None)
+            if not callable(get_group):
+                return
+            qgis_group = get_group(group_name)
+            if qgis_group is None:
+                return
+            raster_nodes = []
+            for child in qgis_group.children():
+                if not hasattr(child, "setItemVisibilityChecked"):
+                    continue
+                layer = child.layer() if hasattr(child, "layer") else None
+                if layer is None:
+                    continue
+                if not hasattr(layer, "bandCount"):
+                    continue
+                raster_nodes.append(child)
+            if not raster_nodes:
+                return
+            index = int(np.clip(idx, 0, len(raster_nodes) - 1))
+            for i, node in enumerate(raster_nodes):
+                node.setItemVisibilityChecked(i == index)
+        except Exception:
+            pass
+
+    def _update_timeslice_crosshair(self):
+        if not bool(getattr(self, "_chk_timeslice_sync", None) and self._chk_timeslice_sync.isChecked()):
+            self._clear_timeslice_crosshair()
+            return
+        if self.iface is None or not self._profiles:
+            self._clear_timeslice_crosshair()
+            return
+        m = self._cursor_metrics()
+        if not m:
+            self._clear_timeslice_crosshair()
+            return
+        east = m.get("east")
+        north = m.get("north")
+        if east is None or north is None:
+            self._clear_timeslice_crosshair()
+            return
+        try:
+            east_f = float(east)
+            north_f = float(north)
+        except Exception:
+            self._clear_timeslice_crosshair()
+            return
+        if not (np.isfinite(east_f) and np.isfinite(north_f)):
+            self._clear_timeslice_crosshair()
+            return
+        prof = self._profiles[self._prof_idx]
+        canvas = self.iface.mapCanvas()
+        if canvas is None:
+            self._clear_timeslice_crosshair()
+            return
+        try:
+            size = float(getattr(self, "_spin_crosshair_size").value())
+        except Exception:
+            size = float(getattr(self, "_crosshair_size_m", 5.0) or 5.0)
+        size = float(np.clip(size, 0.5, 1000.0))
+
+        if self._rb_crosshair_h is None:
+            self._rb_crosshair_h = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
+            self._rb_crosshair_h.setColor(QColor(255, 50, 50))
+            self._rb_crosshair_h.setWidth(2)
+        if self._rb_crosshair_v is None:
+            self._rb_crosshair_v = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
+            self._rb_crosshair_v.setColor(QColor(255, 50, 50))
+            self._rb_crosshair_v.setWidth(2)
+
+        try:
+            self._rb_crosshair_h.reset(QgsWkbTypes.LineGeometry)
+            p_left = self._to_canvas_point(prof, east_f - size, north_f)
+            p_right = self._to_canvas_point(prof, east_f + size, north_f)
+            self._rb_crosshair_h.addPoint(p_left, False)
+            self._rb_crosshair_h.addPoint(p_right, True)
+            self._rb_crosshair_h.setVisible(True)
+        except Exception:
+            pass
+        try:
+            self._rb_crosshair_v.reset(QgsWkbTypes.LineGeometry)
+            p_bottom = self._to_canvas_point(prof, east_f, north_f - size)
+            p_top = self._to_canvas_point(prof, east_f, north_f + size)
+            self._rb_crosshair_v.addPoint(p_bottom, False)
+            self._rb_crosshair_v.addPoint(p_top, True)
+            self._rb_crosshair_v.setVisible(True)
         except Exception:
             pass
 
@@ -2887,7 +3129,7 @@ class GprProfileViewer(QDialog):
             except Exception:
                 pass
             self._gpr_3d_viewer = None
-        for rb in (self._rb_point, self._rb_line):
+        for rb in (self._rb_point, self._rb_line, self._rb_crosshair_h, self._rb_crosshair_v):
             if rb is not None:
                 try:
                     rb.reset()

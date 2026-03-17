@@ -69,11 +69,22 @@ def _depth_to_sample_range(
     depth_max_m: float,
     n_samples: int,
 ) -> tuple[int, int]:
+    if n_samples <= 0:
+        return 0, 0
     if depth_max_m <= 0:
         return 0, n_samples
-    s_lo = int(np.floor(max(z_from, 0.0) / depth_max_m * (n_samples - 1)))
-    s_hi = int(np.ceil(min(z_to, depth_max_m) / depth_max_m * (n_samples - 1))) + 1
-    return max(0, s_lo), min(n_samples, s_hi)
+
+    z0 = float(np.clip(min(z_from, z_to), 0.0, depth_max_m))
+    z1 = float(np.clip(max(z_from, z_to), 0.0, depth_max_m))
+    scale = float(n_samples) / max(float(depth_max_m), 1e-12)
+    s_lo = int(np.floor(z0 * scale))
+    s_hi = int(np.ceil(z1 * scale))
+    s_lo = int(np.clip(s_lo, 0, n_samples))
+    s_hi = int(np.clip(s_hi, 0, n_samples))
+    # Ensure at least one sample when a positive depth window collapses by rounding.
+    if z1 > z0 and s_hi <= s_lo:
+        s_hi = min(n_samples, s_lo + 1)
+    return s_lo, s_hi
 
 
 def _normalize_channels(ampl_3d: np.ndarray) -> np.ndarray:
@@ -821,11 +832,27 @@ def _build_grid_params(
     y_max = float(all_n.max())
     n_x = max(2, int(np.round((x_max - x_min) / resolution)) + 1)
     n_y = max(2, int(np.round((y_max - y_min) / resolution)) + 1)
-    if radius is None:
-        radius = resolution * (2.0 ** 0.5)
     _aniso_info = None
-    if auto_radius or (use_anisotropic_idw and (anisotropy_ratio is None or anisotropy_angle is None)):
-        _aniso_info = _estimate_interline_radius(all_e, all_n)
+    need_spacing_estimate = bool(
+        radius is None
+        or auto_radius
+        or (use_anisotropic_idw and (anisotropy_ratio is None or anisotropy_angle is None))
+    )
+    if need_spacing_estimate:
+        try:
+            _aniso_info = _estimate_interline_radius(all_e, all_n)
+        except Exception:
+            _aniso_info = None
+
+    if radius is None:
+        try:
+            radius_est = float((_aniso_info or {}).get("radius", np.nan))
+        except Exception:
+            radius_est = float("nan")
+        if np.isfinite(radius_est) and radius_est > 0.0:
+            radius = radius_est
+        else:
+            radius = resolution * (2.0 ** 0.5)
     if auto_radius and _aniso_info is not None:
         radius = _aniso_info["radius"]
     eff_ratio = anisotropy_ratio
@@ -882,9 +909,10 @@ def _interpolate_z_level(
     amplitude_sigma: float | None,
     use_anisotropic_idw: bool,
     idw_power: float, min_points: int,
-    fill_nodata: bool, fill_nodata_max_distance: int,
+    fill_nodata: bool, fill_nodata_max_distance: float,
     smooth_sigma: float,
     balance_profiles: bool = True,
+    per_slice_balance: bool = False,
     amplitude_hist_bins: int = 10,
     topographic_correction: bool = False,
     topo_reference_elevation: float | None = None,
@@ -941,9 +969,10 @@ def _interpolate_z_level(
     if not profile_rows:
         return None, 0, {"amp_pre": {"count": 0}, "amp_post": {"count": 0}}
 
-    # Compatibilita' legacy: bilanciamento residuo per-slice tra profili.
+    # Optional residual balancing per-slice (OFF by default to avoid double scaling
+    # when global inter-profile normalization is already applied in _process_profiles).
     target_mean = float("nan")
-    if balance_profiles:
+    if balance_profiles and per_slice_balance:
         valid_means = [m for _, _, _, m in profile_rows if np.isfinite(m) and m > 1e-12]
         if valid_means:
             target_mean = float(np.nanmedian(np.asarray(valid_means, dtype=np.float64)))
@@ -1001,7 +1030,13 @@ def _interpolate_z_level(
             power=idw_power, min_points=min_points,
         )
     if fill_nodata:
-        grid = _fill_nodata_grid(grid, max_distance=fill_nodata_max_distance)
+        try:
+            fill_m = float(fill_nodata_max_distance)
+        except Exception:
+            fill_m = 0.0
+        if np.isfinite(fill_m) and fill_m > 0.0 and resolution > 0.0:
+            fill_px = max(1, int(round(fill_m / float(resolution))))
+            grid = _fill_nodata_grid(grid, max_distance=fill_px)
     if smooth_sigma > 0:
         grid = _smooth_grid_gaussian(grid, sigma=smooth_sigma)
     return grid, n_pts, diag
@@ -1032,10 +1067,11 @@ def compute_preview_slice(
     idw_power: float = 2.0,
     min_points: int = 1,
     fill_nodata: bool = False,
-    fill_nodata_max_distance: int = 5,
+    fill_nodata_max_distance: float = 5.0,
     smooth_sigma: float = 0.0,
     depth_radius_factor: float = 0.6,
     balance_profiles: bool = True,
+    per_slice_balance: bool = False,
     amplitude_hist_bins: int = 10,
     pre_slice_bg_removal: bool = False,
     pre_slice_bg_mode: str = "line_by_line",
@@ -1098,6 +1134,7 @@ def compute_preview_slice(
         idw_power, min_points,
         fill_nodata, fill_nodata_max_distance, smooth_sigma,
         balance_profiles=balance_profiles,
+        per_slice_balance=per_slice_balance,
         amplitude_hist_bins=amplitude_hist_bins,
         topographic_correction=bool(topographic_correction),
         topo_reference_elevation=topo_ref,
@@ -1160,11 +1197,12 @@ def compute_ogpr_slice_grids(
     idw_power: float = 2.0,
     min_points: int = 1,
     fill_nodata: bool = False,
-    fill_nodata_max_distance: int = 5,
+    fill_nodata_max_distance: float = 5.0,
     smooth_sigma: float = 0.0,
     emit_diagnostics: bool = True,
     depth_radius_factor: float = 0.6,
     balance_profiles: bool = True,
+    per_slice_balance: bool = False,
     amplitude_hist_bins: int = 10,
     pre_slice_bg_removal: bool = False,
     pre_slice_bg_mode: str = "line_by_line",
@@ -1285,6 +1323,8 @@ def compute_ogpr_slice_grids(
         use_anisotropic_idw=bool(use_anisotropic_idw),
         min_points=int(min_points),
         balance_profiles=bool(balance_profiles),
+        per_slice_balance=bool(per_slice_balance),
+        fill_nodata_max_distance_m=float(fill_nodata_max_distance),
         pre_slice_bg_removal=bool(pre_slice_bg_removal),
         pre_slice_bg_mode=str(pre_slice_bg_mode or "line_by_line"),
         pre_slice_bg_window=int(pre_slice_bg_window or 0),
@@ -1315,6 +1355,7 @@ def compute_ogpr_slice_grids(
             resolution, amplitude_sigma, use_anisotropic_idw,
             idw_power, min_points, fill_nodata, fill_nodata_max_distance, smooth_sigma,
             balance_profiles=balance_profiles,
+            per_slice_balance=per_slice_balance,
             amplitude_hist_bins=amplitude_hist_bins,
             topographic_correction=bool(topographic_correction),
             topo_reference_elevation=topo_ref,
