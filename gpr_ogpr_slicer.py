@@ -90,6 +90,43 @@ def _normalize_channels(ampl_3d: np.ndarray) -> np.ndarray:
     return out
 
 
+def _normalize_inter_profile_processed(processed: list[tuple]) -> list[tuple]:
+    """Normalize amplitudes across profiles using robust global median scaling.
+
+    Each profile cube (samples, traces, channels) is scaled so that its median
+    absolute amplitude matches the global median across all profiles.
+    """
+    if not processed:
+        return processed
+
+    prof_medians = []
+    for _, _, _, ampl_3d in processed:
+        arr = np.asarray(ampl_3d, dtype=np.float64)
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            prof_medians.append(float("nan"))
+            continue
+        prof_medians.append(float(np.nanmedian(np.abs(finite))))
+
+    valid = [m for m in prof_medians if np.isfinite(m) and m > 1e-12]
+    if not valid:
+        return processed
+    global_med = float(np.nanmedian(np.asarray(valid, dtype=np.float64)))
+    if not np.isfinite(global_med) or global_med <= 1e-12:
+        return processed
+
+    out = []
+    for (prof, x_ref, y_ref, ampl_3d), prof_med in zip(processed, prof_medians):
+        scale = 1.0
+        if np.isfinite(prof_med) and prof_med > 1e-12:
+            scale = global_med / prof_med
+            if not np.isfinite(scale) or scale <= 0:
+                scale = 1.0
+        ampl_scaled = (np.asarray(ampl_3d, dtype=np.float64) * scale).astype(np.float32)
+        out.append((prof, x_ref, y_ref, ampl_scaled))
+    return out
+
+
 def _has_plausible_geo_xy(x: np.ndarray, y: np.ndarray) -> bool:
     if x.size == 0 or y.size == 0:
         return False
@@ -435,6 +472,7 @@ def _process_profiles(
     normalize_channels: bool,
     extraction_mode: str = "las_like",
     use_processing: bool = False,
+    balance_profiles: bool = True,
 ) -> list[tuple]:
     """Process profiles and return list of (prof, x_ref, y_ref, ampl_3d).
 
@@ -443,6 +481,7 @@ def _process_profiles(
       - las_like: abs(amplitude), no envelope
       - envelope: Hilbert envelope
       - signed: keep signed processed trace
+    Optionally applies robust inter-profile balancing using global median.
     """
     from .gpr_processing import apply_pipeline, apply_pre_bg_pipeline
 
@@ -541,6 +580,8 @@ def _process_profiles(
         if normalize_channels and ampl_3d.shape[2] > 1:
             ampl_3d = _normalize_channels(ampl_3d)
         processed.append((prof, x_ref, y_ref, ampl_3d))
+    if balance_profiles:
+        processed = _normalize_inter_profile_processed(processed)
     return processed
 
 
@@ -625,6 +666,7 @@ def _interpolate_z_level(
     if not profile_rows:
         return None, 0, {"amp_pre": {"count": 0}, "amp_post": {"count": 0}}
 
+    # Compatibilita' legacy: bilanciamento residuo per-slice tra profili.
     target_mean = float("nan")
     if balance_profiles:
         valid_means = [m for _, _, _, m in profile_rows if np.isfinite(m) and m > 1e-12]
@@ -734,6 +776,7 @@ def compute_preview_slice(
         normalize_channels,
         extraction_mode=extraction_mode,
         use_processing=use_processing,
+        balance_profiles=balance_profiles,
     )
     if not processed:
         return None
@@ -837,6 +880,7 @@ def compute_ogpr_slice_grids(
         normalize_channels,
         extraction_mode=extraction_mode,
         use_processing=use_processing,
+        balance_profiles=balance_profiles,
     )
     if not processed:
         return [], {}
