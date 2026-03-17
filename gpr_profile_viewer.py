@@ -771,6 +771,20 @@ class GprProfileViewer(QDialog):
         grp_slice = QGroupBox("Timeslice")
         fl_slice  = QFormLayout(grp_slice)
 
+        self._cb_slice_preset = QComboBox()
+        self._cb_slice_preset.addItem("Base (default)", "base")
+        self._cb_slice_preset.addItem("Qualita'", "quality")
+        self._cb_slice_preset.addItem("Aggressivo", "aggressive")
+        self._cb_slice_preset.setCurrentIndex(0)
+        self._cb_slice_preset.setToolTip(
+            "Preset rapido parametri timeslice.\n"
+            "Base: stabile e veloce.\n"
+            "Qualita': migliore continuita' e contrasto.\n"
+            "Aggressivo: massimo recupero, piu' smoothing."
+        )
+        self._btn_slice_preset_apply = QPushButton("Apply preset")
+        self._btn_slice_preset_apply.clicked.connect(self._apply_selected_timeslice_preset)
+
         self._cb_slice_extraction = QComboBox()
         self._cb_slice_extraction.addItem("LAS-like (abs)", "las_like")
         self._cb_slice_extraction.addItem("Envelope (Hilbert)", "envelope")
@@ -913,6 +927,8 @@ class GprProfileViewer(QDialog):
         self._spin_smooth_sigma.setValue(1.0); self._spin_smooth_sigma.setEnabled(False)
         self._chk_smooth.toggled.connect(self._spin_smooth_sigma.setEnabled)
 
+        fl_slice.addRow("Preset:",            self._cb_slice_preset)
+        fl_slice.addRow("  azione:",          self._btn_slice_preset_apply)
         fl_slice.addRow("Estrazione:",         self._cb_slice_extraction)
         fl_slice.addRow("Processing pre-slice:", self._chk_slice_use_processing)
         fl_slice.addRow("BG pre-slice:",       self._chk_slice_bg)
@@ -2869,6 +2885,154 @@ class GprProfileViewer(QDialog):
     # ------------------------------------------------------------------
     # Timeslice
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _set_combo_to_data(combo: QComboBox, value) -> None:
+        if combo is None:
+            return
+        idx = combo.findData(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _apply_selected_timeslice_preset(self):
+        key = str(self._cb_slice_preset.currentData() or "base").strip().lower()
+        self._apply_timeslice_preset(key)
+
+    def _apply_timeslice_preset(self, preset_key: str):
+        key = str(preset_key or "base").strip().lower()
+        if key not in {"base", "quality", "aggressive"}:
+            key = "base"
+
+        if key == "quality":
+            cfg = {
+                "extraction_mode": "envelope",
+                "use_processing": True,
+                "pre_slice_bg_removal": True,
+                "pre_slice_bg_mode": "line_by_line",
+                "pre_slice_bg_auto": True,
+                "pre_slice_bg_window": 200,
+                "pre_slice_bg_sample_start": 0,
+                "pre_slice_bg_sample_end": 0,
+                "stack_n": 3,
+                "stack_kernel": "triangular",
+                "flip_traces_mode": "none",
+                "topographic_correction": False,
+                "topo_reference_mode": "median",
+                "topo_reference_elevation": 0.0,
+                "normalize_channels": False,
+                "amplitude_filter": True,
+                "amplitude_sigma": 3.0,
+                "use_anisotropic_idw": True,
+                "auto_radius": True,
+                "balance_profiles": True,
+                "depth_radius_factor": 0.8,
+                "min_points": 2,
+                "fill_nodata": True,
+                "smooth": True,
+                "smooth_sigma": 1.0,
+            }
+            lbl = "Preset timeslice: Qualita' applicato."
+        elif key == "aggressive":
+            cfg = {
+                "extraction_mode": "envelope",
+                "use_processing": True,
+                "pre_slice_bg_removal": True,
+                "pre_slice_bg_mode": "grid_by_grid",
+                "pre_slice_bg_auto": False,
+                "pre_slice_bg_window": 300,
+                "pre_slice_bg_sample_start": 0,
+                "pre_slice_bg_sample_end": 0,
+                "stack_n": 5,
+                "stack_kernel": "triangular",
+                "flip_traces_mode": "none",
+                "topographic_correction": False,
+                "topo_reference_mode": "median",
+                "topo_reference_elevation": 0.0,
+                "normalize_channels": False,
+                "amplitude_filter": True,
+                "amplitude_sigma": 2.5,
+                "use_anisotropic_idw": True,
+                "auto_radius": True,
+                "balance_profiles": True,
+                "depth_radius_factor": 1.0,
+                "min_points": 3,
+                "fill_nodata": True,
+                "smooth": True,
+                "smooth_sigma": 1.5,
+            }
+            lbl = "Preset timeslice: Aggressivo applicato."
+        else:
+            cfg = {
+                "extraction_mode": "las_like",
+                "use_processing": False,
+                "pre_slice_bg_removal": True,
+                "pre_slice_bg_mode": "line_by_line",
+                "pre_slice_bg_auto": True,
+                "pre_slice_bg_window": 200,
+                "pre_slice_bg_sample_start": 0,
+                "pre_slice_bg_sample_end": 0,
+                "stack_n": 1,
+                "stack_kernel": "boxcar",
+                "flip_traces_mode": "none",
+                "topographic_correction": False,
+                "topo_reference_mode": "median",
+                "topo_reference_elevation": 0.0,
+                "normalize_channels": False,
+                "amplitude_filter": False,
+                "amplitude_sigma": 3.0,
+                "use_anisotropic_idw": False,
+                "auto_radius": False,
+                "balance_profiles": True,
+                "depth_radius_factor": 0.6,
+                "min_points": 1,
+                "fill_nodata": False,
+                "smooth": False,
+                "smooth_sigma": 1.0,
+            }
+            lbl = "Preset timeslice: Base applicato."
+
+        self._set_combo_to_data(self._cb_slice_extraction, cfg["extraction_mode"])
+        self._chk_slice_use_processing.setChecked(bool(cfg["use_processing"]))
+        self._chk_slice_bg.setChecked(bool(cfg["pre_slice_bg_removal"]))
+        self._set_combo_to_data(self._cb_slice_bg_mode, cfg["pre_slice_bg_mode"])
+        self._chk_slice_bg_auto.setChecked(bool(cfg["pre_slice_bg_auto"]))
+        self._spin_slice_bg_window.setValue(int(cfg["pre_slice_bg_window"]))
+        self._spin_slice_bg_sample_start.setValue(int(cfg["pre_slice_bg_sample_start"]))
+        self._spin_slice_bg_sample_end.setValue(int(cfg["pre_slice_bg_sample_end"]))
+        self._spin_slice_stack_n.setValue(int(cfg["stack_n"]))
+        self._set_combo_to_data(self._cb_slice_stack_kernel, cfg["stack_kernel"])
+        self._set_combo_to_data(self._cb_slice_flip_mode, cfg["flip_traces_mode"])
+        self._chk_slice_topographic.setChecked(bool(cfg["topographic_correction"]))
+        self._set_combo_to_data(self._cb_slice_topo_ref_mode, cfg["topo_reference_mode"])
+        self._spin_slice_topo_ref_custom.setValue(float(cfg["topo_reference_elevation"]))
+        self._chk_normalize_ch.setChecked(bool(cfg["normalize_channels"]))
+        self._chk_amplitude_filter.setChecked(bool(cfg["amplitude_filter"]))
+        self._spin_amplitude_sigma.setValue(float(cfg["amplitude_sigma"]))
+        self._chk_anisotropic_idw.setChecked(bool(cfg["use_anisotropic_idw"]))
+        self._chk_auto_radius.setChecked(bool(cfg["auto_radius"]))
+        self._chk_slice_balance_profiles.setChecked(bool(cfg["balance_profiles"]))
+        self._spin_slice_depth_radius_factor.setValue(float(cfg["depth_radius_factor"]))
+        self._spin_slice_min_points.setValue(int(cfg["min_points"]))
+        self._chk_fill_nodata.setChecked(bool(cfg["fill_nodata"]))
+        self._chk_smooth.setChecked(bool(cfg["smooth"]))
+        self._spin_smooth_sigma.setValue(float(cfg["smooth_sigma"]))
+
+        # Sync dependent controls if state has not emitted toggles.
+        self._spin_slice_bg_window.setEnabled(
+            bool(self._chk_slice_bg.isChecked()) and (not bool(self._chk_slice_bg_auto.isChecked()))
+        )
+        self._cb_slice_bg_mode.setEnabled(bool(self._chk_slice_bg.isChecked()))
+        self._chk_slice_bg_auto.setEnabled(bool(self._chk_slice_bg.isChecked()))
+        self._spin_slice_bg_sample_start.setEnabled(bool(self._chk_slice_bg.isChecked()))
+        self._spin_slice_bg_sample_end.setEnabled(bool(self._chk_slice_bg.isChecked()))
+        topo_on = bool(self._chk_slice_topographic.isChecked())
+        self._cb_slice_topo_ref_mode.setEnabled(topo_on)
+        self._spin_slice_topo_ref_custom.setEnabled(
+            topo_on and (str(self._cb_slice_topo_ref_mode.currentData() or "") == "custom")
+        )
+        self._spin_amplitude_sigma.setEnabled(bool(self._chk_amplitude_filter.isChecked()))
+        self._spin_smooth_sigma.setEnabled(bool(self._chk_smooth.isChecked()))
+        self._lbl_status.setText(lbl)
 
     def get_slice_params(self) -> dict:
         slice_bg_auto = bool(self._chk_slice_bg_auto.isChecked())
