@@ -276,6 +276,9 @@ class GprProfileViewer(QDialog):
         self._trim_start_traces = 0
         self._trim_end_traces = 0
         self._trace_source_indices: Optional[np.ndarray] = None
+        self._bp_figure = None
+        self._bp_ax = None
+        self._bp_canvas = None
 
         self._rb_point: Optional[QgsRubberBand] = None
         self._rb_line:  Optional[QgsRubberBand] = None
@@ -388,10 +391,20 @@ class GprProfileViewer(QDialog):
         self._lbl_xpan = None
 
         if HAS_MPL:
-            self._fig        = Figure(figsize=(9, 4), tight_layout=True)
-            gs = self._fig.add_gridspec(1, 2, width_ratios=[4.8, 1.2], wspace=0.08)
+            self._fig = Figure(figsize=(9, 4), tight_layout=False)
+            gs = self._fig.add_gridspec(
+                1,
+                2,
+                width_ratios=[3.0, 1.0],
+                wspace=0.06,
+                left=0.07,
+                right=0.98,
+                top=0.94,
+                bottom=0.11,
+            )
             self._ax         = self._fig.add_subplot(gs[0, 0])
-            self._ax_wiggle  = self._fig.add_subplot(gs[0, 1])
+            self._ax_wiggle  = self._fig.add_subplot(gs[0, 1], sharey=self._ax)
+            self._ax_wiggle.tick_params(axis="y", left=False, labelleft=False)
             self._canvas_mpl = FigureCanvasQTAgg(self._fig)
             self._canvas_mpl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self._canvas_mpl.mpl_connect("motion_notify_event", self._on_mouse_move)
@@ -564,6 +577,9 @@ class GprProfileViewer(QDialog):
         self._chk_bp     = QCheckBox(); self._chk_bp.setChecked(False)
         self._spin_bp_lo = QDoubleSpinBox(); self._spin_bp_lo.setRange(1, 3000); self._spin_bp_lo.setValue(200)
         self._spin_bp_hi = QDoubleSpinBox(); self._spin_bp_hi.setRange(1, 3000); self._spin_bp_hi.setValue(1200)
+        self._chk_bp.toggled.connect(self._on_bp_controls_changed)
+        self._spin_bp_lo.valueChanged.connect(self._on_bp_spin_changed)
+        self._spin_bp_hi.valueChanged.connect(self._on_bp_spin_changed)
 
         # Display
         self._spin_clip = QDoubleSpinBox()
@@ -698,6 +714,26 @@ class GprProfileViewer(QDialog):
         fl.addRow("Bandpass:",           self._chk_bp)
         fl.addRow("  low (MHz):",        self._spin_bp_lo)
         fl.addRow("  high (MHz):",       self._spin_bp_hi)
+        if HAS_MPL:
+            self._bp_figure = Figure(figsize=(3.2, 1.8), tight_layout=True)
+            self._bp_ax = self._bp_figure.add_subplot(111)
+            self._bp_canvas = FigureCanvasQTAgg(self._bp_figure)
+            self._bp_canvas.setMinimumHeight(170)
+            self._bp_canvas.setToolTip(
+                "Bandpass spectrum:\n"
+                "click sinistro = low (MHz)\n"
+                "click destro = high (MHz)\n"
+                "click centrale = handle piu' vicino"
+            )
+            try:
+                self._bp_canvas.mpl_connect("button_press_event", self._on_bp_hist_click)
+            except Exception:
+                pass
+            fl.addRow("  spettro:", self._bp_canvas)
+        else:
+            self._bp_figure = None
+            self._bp_ax = None
+            self._bp_canvas = None
         fl.addRow("Trim start traces:",  self._spin_trim_start)
         fl.addRow("Trim end traces:",    self._spin_trim_end)
         fl.addRow("  apply trim:",       self._btn_apply_trim)
@@ -926,6 +962,178 @@ class GprProfileViewer(QDialog):
         scroll.setMaximumWidth(300)
         return scroll
 
+    def _current_dt_ns(self) -> float:
+        if not self._profiles:
+            return 0.117
+        try:
+            dt_ns = float(getattr(self._profiles[self._prof_idx], "dt_ns", 0.117) or 0.117)
+        except Exception:
+            dt_ns = 0.117
+        if not np.isfinite(dt_ns) or dt_ns <= 0.0:
+            dt_ns = 0.117
+        return dt_ns
+
+    def _current_bp_source_data(self) -> Optional[np.ndarray]:
+        src = self._raw_data if self._raw_data is not None else self._proc_data
+        if src is None:
+            return None
+        arr = np.asarray(src, dtype=np.float64)
+        if arr.ndim != 2 or arr.size <= 0:
+            return None
+        if not np.isfinite(arr).any():
+            return None
+        return arr
+
+    def _bandpass_limits(self) -> tuple[float, float]:
+        lo = float(self._spin_bp_lo.value())
+        hi = float(self._spin_bp_hi.value())
+        if not np.isfinite(lo):
+            lo = 1.0
+        if not np.isfinite(hi):
+            hi = lo + 1.0
+        if hi <= lo:
+            hi = lo + 1.0
+        return lo, hi
+
+    def _refresh_bp_histogram(self):
+        if (not HAS_MPL) or self._bp_ax is None or self._bp_canvas is None:
+            return
+        ax = self._bp_ax
+        ax.clear()
+
+        arr = self._current_bp_source_data()
+        if arr is None:
+            ax.text(0.5, 0.5, "Nessun dato", ha="center", va="center", transform=ax.transAxes)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            self._bp_canvas.draw_idle()
+            return
+
+        n_s, n_t = int(arr.shape[0]), int(arr.shape[1])
+        if n_s <= 4 or n_t <= 0:
+            ax.text(0.5, 0.5, "Dati insufficienti", ha="center", va="center", transform=ax.transAxes)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            self._bp_canvas.draw_idle()
+            return
+
+        dt_s = self._current_dt_ns() * 1e-9
+        if dt_s <= 0:
+            dt_s = 0.117e-9
+
+        # Limit trace count for responsiveness on long profiles.
+        if n_t > 64:
+            idx = np.linspace(0, n_t - 1, 64, dtype=np.int64)
+            arr_fft = arr[:, idx]
+        else:
+            arr_fft = arr
+
+        freqs_mhz = np.fft.rfftfreq(n_s, d=dt_s) / 1e6
+        spec = np.mean(np.abs(np.fft.rfft(arr_fft, axis=0)), axis=1)
+        if not np.isfinite(spec).any():
+            spec = np.zeros_like(freqs_mhz)
+        else:
+            spec = np.nan_to_num(spec, nan=0.0, posinf=0.0, neginf=0.0)
+
+        max_mhz = float(self._spin_bp_hi.maximum())
+        finite_f = np.isfinite(freqs_mhz)
+        valid = finite_f & (freqs_mhz >= 0.0) & (freqs_mhz <= max_mhz)
+        if not valid.any():
+            ax.text(0.5, 0.5, "Spettro non disponibile", ha="center", va="center", transform=ax.transAxes)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            self._bp_canvas.draw_idle()
+            return
+
+        fx = freqs_mhz[valid]
+        sy = spec[valid]
+        ax.plot(fx, sy, color="#3d7ab5", lw=1.0)
+        ax.fill_between(fx, sy, color="#3d7ab5", alpha=0.18)
+
+        lo, hi = self._bandpass_limits()
+        is_on = bool(self._chk_bp.isChecked())
+        c_lo = "#e74c3c" if is_on else "#9aa0a6"
+        c_hi = "#e74c3c" if is_on else "#9aa0a6"
+        c_band = "#f39c12" if is_on else "#c8ccd2"
+        ax.axvline(lo, color=c_lo, lw=1.4, ls="--")
+        ax.axvline(hi, color=c_hi, lw=1.4, ls="--")
+        ax.axvspan(lo, hi, color=c_band, alpha=0.12)
+
+        ax.set_xlim(float(np.nanmin(fx)), float(np.nanmax(fx)))
+        ax.set_xlabel("Freq (MHz)")
+        ax.set_ylabel("Amp")
+        ax.set_title("Bandpass")
+        ax.grid(True, ls=":", lw=0.4, alpha=0.6)
+        try:
+            self._bp_canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _on_bp_controls_changed(self, _checked: bool):
+        self._refresh_bp_histogram()
+        if self._raw_data is not None:
+            self._apply_processing()
+
+    def _on_bp_spin_changed(self, _value: float):
+        lo = float(self._spin_bp_lo.value())
+        hi = float(self._spin_bp_hi.value())
+        if hi <= lo:
+            if self.sender() is self._spin_bp_lo:
+                hi = lo + 1.0
+                self._spin_bp_hi.blockSignals(True)
+                try:
+                    self._spin_bp_hi.setValue(hi)
+                finally:
+                    self._spin_bp_hi.blockSignals(False)
+            else:
+                lo = hi - 1.0
+                self._spin_bp_lo.blockSignals(True)
+                try:
+                    self._spin_bp_lo.setValue(max(float(self._spin_bp_lo.minimum()), lo))
+                finally:
+                    self._spin_bp_lo.blockSignals(False)
+        self._refresh_bp_histogram()
+        if self._raw_data is not None and bool(self._chk_bp.isChecked()):
+            self._apply_processing()
+
+    def _on_bp_hist_click(self, event):
+        if event is None or event.xdata is None:
+            return
+        if self._bp_ax is None or event.inaxes != self._bp_ax:
+            return
+
+        freq = float(event.xdata)
+        fmin = float(self._spin_bp_lo.minimum())
+        fmax = float(self._spin_bp_hi.maximum())
+        freq = float(np.clip(freq, fmin, fmax))
+        lo, hi = self._bandpass_limits()
+        btn = int(getattr(event, "button", 0) or 0)
+
+        if btn == 1:
+            lo = min(freq, hi - 1.0)
+        elif btn == 3:
+            hi = max(freq, lo + 1.0)
+        elif btn == 2:
+            if abs(freq - lo) <= abs(freq - hi):
+                lo = min(freq, hi - 1.0)
+            else:
+                hi = max(freq, lo + 1.0)
+        else:
+            return
+
+        self._spin_bp_lo.blockSignals(True)
+        self._spin_bp_hi.blockSignals(True)
+        try:
+            self._spin_bp_lo.setValue(float(np.clip(lo, fmin, fmax)))
+            self._spin_bp_hi.setValue(float(np.clip(hi, fmin, fmax)))
+        finally:
+            self._spin_bp_lo.blockSignals(False)
+            self._spin_bp_hi.blockSignals(False)
+
+        self._refresh_bp_histogram()
+        if self._raw_data is not None:
+            self._apply_processing()
+
     # ------------------------------------------------------------------
     # Import
     # ------------------------------------------------------------------
@@ -1126,6 +1334,7 @@ class GprProfileViewer(QDialog):
         """Return current processing controls as pipeline params."""
         bg_auto = bool(self._chk_bg_auto.isChecked())
         bg_window = 0 if bg_auto else int(self._spin_bg_window.value())
+        bp_lo, bp_hi = self._bandpass_limits()
         return {
             "dewow": bool(self._chk_dewow.isChecked()),
             "dewow_win": int(self._spin_dewow.value()),
@@ -1142,8 +1351,8 @@ class GprProfileViewer(QDialog):
             "agc": bool(self._chk_agc.isChecked()),
             "agc_win": int(self._spin_agc.value()),
             "bandpass": bool(self._chk_bp.isChecked()),
-            "bp_low_mhz": float(self._spin_bp_lo.value()),
-            "bp_high_mhz": float(self._spin_bp_hi.value()),
+            "bp_low_mhz": float(bp_lo),
+            "bp_high_mhz": float(bp_hi),
             "clip_pct": float(self._spin_clip.value()),
         }
 
@@ -1177,6 +1386,7 @@ class GprProfileViewer(QDialog):
             except Exception:
                 pass
 
+        self._refresh_bp_histogram()
         self._apply_gain_only()
 
     def _sanitize_range_gain_breakpoints(self, points):
