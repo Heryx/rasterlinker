@@ -1699,18 +1699,30 @@ class Gpr3dViewerDialog(QDialog):
         z = -float(depth)
         clip_lo, clip_hi = self._effective_clim()
         try:
-            slice_poly = self._volume_grid.slice(
-                normal=(0.0, 0.0, 1.0),
-                origin=(float(east_local), float(north_local), z),
-            )
-            self._plotter.add_mesh(
-                slice_poly,
-                cmap=self._section_cmap,
-                clim=(clip_lo, clip_hi),
-                opacity=0.95,
-                name=self._cursor_slice_name,
-                show_scalar_bar=False,
-            )
+            if self._z_axis.size > 0:
+                iz = int(np.argmin(np.abs(self._z_axis.astype(np.float64) - float(depth))))
+            else:
+                n_z = int(self._spatial.get("n_z", self._volume.shape[0] if self._volume is not None else 1))
+                z_step = float(self._spatial.get("z_step", self._spatial.get("res", 1.0)) or 1.0)
+                z_min = float(self._spatial.get("z_min", 0.0) or 0.0)
+                iz = int(np.rint((float(depth) - z_min) / max(z_step, 1e-9)))
+                iz = int(np.clip(iz, 0, max(0, n_z - 1)))
+            iz = int(np.clip(iz, 0, max(0, int(self._spatial.get("n_z", 1)) - 1)))
+
+            slice_mesh = self._build_section_sheet("cscan", iz)
+            if slice_mesh is not None:
+                self._plotter.add_mesh(
+                    slice_mesh,
+                    scalars="amplitude",
+                    cmap=self._section_cmap,
+                    clim=(clip_lo, clip_hi),
+                    opacity=0.95,
+                    name=self._cursor_slice_name,
+                    show_scalar_bar=False,
+                    lighting=False,
+                    interpolate_before_map=False,
+                    nan_opacity=0.0,
+                )
         except Exception:
             pass
 
