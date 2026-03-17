@@ -214,7 +214,21 @@ class Gpr3dViewerDialog(QDialog):
         self._disp_origin_x = 0.0
         self._disp_origin_y = 0.0
         self._section_cmap = "RdBu_r"
+        self._radargram_cmap = "gray"
         self._profile_color_mode = "solid_yellow"
+        self._max_profile_channels = 1
+        self._selected_channel_idx = 0
+        try:
+            self._max_profile_channels = self._detect_max_profile_channels(self._profiles)
+        except Exception:
+            self._max_profile_channels = 1
+        try:
+            init_ch = int(self._meta.get("channel", 0) or 0)
+        except Exception:
+            init_ch = 0
+        self._selected_channel_idx = int(
+            np.clip(init_ch, 0, max(0, int(self._max_profile_channels) - 1))
+        )
         self._hist_figure = None
         self._hist_ax = None
         self._hist_canvas = None
@@ -252,8 +266,9 @@ class Gpr3dViewerDialog(QDialog):
 
         self._section_combo = QComboBox()
         self._section_combo.addItem("C-scan (horizontal)", "cscan")
-        self._section_combo.addItem("B-scan inline (Y)", "inline")
-        self._section_combo.addItem("B-scan crossline (X)", "crossline")
+        self._section_combo.addItem("B-scan inline (Y, interpolated)", "inline")
+        self._section_combo.addItem("B-scan crossline (X, interpolated)", "crossline")
+        self._section_combo.addItem("Radargram profile (real)", "profile")
         self._section_combo.currentIndexChanged.connect(self._on_section_mode_changed)
         form.addRow("Section:", self._section_combo)
 
@@ -274,6 +289,16 @@ class Gpr3dViewerDialog(QDialog):
         slice_row_l.addWidget(self._lbl_slice, 0)
         form.addRow("Slice index:", slice_row)
 
+        self._chk_follow_profile_depth = QCheckBox()
+        self._chk_follow_profile_depth.setChecked(True)
+        self._chk_follow_profile_depth.setText("Follow Profile Viewer depth (C-scan)")
+        self._chk_follow_profile_depth.setToolTip(
+            "Se attivo, la profondita' del cursore nel Profile Viewer "
+            "aggiorna l'indice Z solo in C-scan."
+        )
+        self._chk_follow_profile_depth.toggled.connect(self._on_follow_profile_toggled)
+        form.addRow("Depth sync:", self._chk_follow_profile_depth)
+
         self._cmap_combo = QComboBox()
         self._cmap_combo.addItems(
             [
@@ -290,6 +315,37 @@ class Gpr3dViewerDialog(QDialog):
         self._cmap_combo.setCurrentText(self._section_cmap)
         self._cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
         form.addRow("Timeslice cmap:", self._cmap_combo)
+
+        self._radargram_cmap_combo = QComboBox()
+        self._radargram_cmap_combo.addItems(
+            [
+                "gray",
+                "Greys_r",
+                "seismic",
+                "RdBu_r",
+                "viridis",
+                "plasma",
+                "magma",
+                "turbo",
+                "Spectral_r",
+            ]
+        )
+        self._radargram_cmap_combo.setCurrentText(self._radargram_cmap)
+        self._radargram_cmap_combo.currentTextChanged.connect(self._on_radargram_cmap_changed)
+        form.addRow("Radargram cmap:", self._radargram_cmap_combo)
+
+        ch_row = QWidget()
+        ch_row_l = QHBoxLayout(ch_row)
+        ch_row_l.setContentsMargins(0, 0, 0, 0)
+        self._channel_spin = QSpinBox()
+        self._channel_spin.setMinimumWidth(72)
+        self._channel_spin.valueChanged.connect(self._on_profile_channel_changed)
+        self._lbl_channel_count = QLabel("/ 1")
+        self._lbl_channel_count.setMinimumWidth(48)
+        ch_row_l.addWidget(self._channel_spin, 0)
+        ch_row_l.addWidget(self._lbl_channel_count, 0)
+        ch_row_l.addStretch(1)
+        form.addRow("Radargram channel:", ch_row)
 
         self._profile_color_combo = QComboBox()
         self._profile_color_combo.addItem("Solid Yellow", "solid_yellow")
@@ -454,6 +510,7 @@ class Gpr3dViewerDialog(QDialog):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([980, 300])
 
+        self._refresh_channel_controls()
         self._replace_volume(self._volume, self._meta, reset_camera=True)
 
     def _grid_spatial_info(self, vol: np.ndarray, meta: dict) -> dict:
@@ -663,6 +720,50 @@ class Gpr3dViewerDialog(QDialog):
         self._refresh_isosurface()
         self._render_now()
 
+    def _detect_max_profile_channels(self, profiles=None) -> int:
+        seq = self._profiles if profiles is None else list(profiles or [])
+        max_ch = 1
+        for prof in seq:
+            try:
+                n_ch = int(getattr(prof, "n_channels", 1) or 1)
+            except Exception:
+                n_ch = 1
+            if n_ch > max_ch:
+                max_ch = n_ch
+        try:
+            meta_ch = int(self._meta.get("channel", 0) or 0) + 1
+            if meta_ch > max_ch:
+                max_ch = meta_ch
+        except Exception:
+            pass
+        return max(1, int(max_ch))
+
+    def _refresh_channel_controls(self, profiles=None):
+        self._max_profile_channels = self._detect_max_profile_channels(profiles)
+        self._selected_channel_idx = int(
+            np.clip(self._selected_channel_idx, 0, max(0, self._max_profile_channels - 1))
+        )
+        self._updating_controls = True
+        try:
+            self._channel_spin.setRange(1, self._max_profile_channels)
+            self._channel_spin.setValue(self._selected_channel_idx + 1)
+            self._lbl_channel_count.setText(f"/ {self._max_profile_channels}")
+        finally:
+            self._updating_controls = False
+
+    def _on_profile_channel_changed(self, value: int):
+        if self._updating_controls:
+            return
+        idx = int(value) - 1
+        idx = int(np.clip(idx, 0, max(0, self._max_profile_channels - 1)))
+        if idx == self._selected_channel_idx:
+            return
+        self._selected_channel_idx = idx
+        self._meta["channel"] = int(idx)
+        self._load_profiles(self._profiles)
+        self._refresh_section_plane()
+        self._render_now()
+
     def _on_cmap_changed(self, text: str):
         self._section_cmap = str(text or "RdBu_r")
         self._draw_volume_actor()
@@ -670,9 +771,20 @@ class Gpr3dViewerDialog(QDialog):
         self._refresh_isosurface()
         self._render_now()
 
+    def _on_radargram_cmap_changed(self, text: str):
+        self._radargram_cmap = str(text or "gray")
+        self._load_profiles(self._profiles)
+        self._refresh_section_plane()
+        self._render_now()
+
     def _on_profile_color_changed(self, _idx: int):
         self._profile_color_mode = str(self._profile_color_combo.currentData() or "solid_yellow")
         self._load_profiles(self._profiles)
+        self._render_now()
+
+    def _on_follow_profile_toggled(self, checked: bool):
+        if not bool(checked):
+            self._remove_actor(self._cursor_slice_name)
         self._render_now()
 
     def _palette_color(self, palette_name: str, ratio: float) -> tuple[float, float, float]:
@@ -717,10 +829,7 @@ class Gpr3dViewerDialog(QDialog):
             n_ch = int(getattr(prof, "n_channels", 1) or 1)
         except Exception:
             n_ch = 1
-        try:
-            idx = int(self._meta.get("channel", 0) or 0)
-        except Exception:
-            idx = 0
+        idx = int(getattr(self, "_selected_channel_idx", 0) or 0)
         if idx < 0:
             idx = 0
         return int(np.clip(idx, 0, max(0, n_ch - 1)))
@@ -774,22 +883,45 @@ class Gpr3dViewerDialog(QDialog):
                     out,
                     params,
                     dt_ns=float(getattr(prof, "dt_ns", 0.117) or 0.117),
-                    normalize_output=True,
+                    normalize_output=False,
                 )
             except Exception:
                 out = raw.copy()
-        elif normalize_display is not None:
+        if normalize_display is not None:
             try:
                 clip_pct = float(params.get("clip_pct", 98.0) if params else 98.0)
                 out = normalize_display(out, clip_pct=clip_pct)
             except Exception:
-                out = raw.copy()
+                pass
 
         arr = np.asarray(out, dtype=np.float32)
         if arr.ndim != 2 or arr.size <= 0:
             return None
         self._profile_curtain_cache[cache_key] = arr
         return arr
+
+    @staticmethod
+    def _curtain_clim(radar: np.ndarray) -> tuple[float, float]:
+        arr = np.asarray(radar, dtype=np.float64)
+        finite = arr[np.isfinite(arr)]
+        if finite.size <= 0:
+            return -1.0, 1.0
+        mn = float(np.nanmin(finite))
+        mx = float(np.nanmax(finite))
+        if not np.isfinite(mn) or not np.isfinite(mx) or mx <= mn:
+            return -1.0, 1.0
+
+        abs99 = float(np.nanpercentile(np.abs(finite), 99.0))
+        if np.isfinite(abs99) and abs99 <= 1.25 and mn < 0.0 and mx > 0.0:
+            return -1.0, 1.0
+
+        lo = float(np.nanpercentile(finite, 2.0))
+        hi = float(np.nanpercentile(finite, 98.0))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            lo, hi = mn, mx
+        if hi <= lo:
+            hi = lo + 1e-6
+        return lo, hi
 
     def _scene_bounds_local(self) -> tuple[float, float, float, float, float, float]:
         n_x = max(1, int(self._spatial.get("n_x", 1)))
@@ -834,6 +966,15 @@ class Gpr3dViewerDialog(QDialog):
         if self._volume_grid is None:
             return
         md = str(mode or self._current_section_mode() or "cscan").strip().lower()
+        if md == "profile":
+            try:
+                self._plotter.reset_camera()
+            except Exception:
+                pass
+            self._apply_projection_mode()
+            self._apply_z_scale()
+            self._render_now()
+            return
         x0, x1, y0, y1, z0, z1 = self._scene_bounds_local()
         cx, cy, cz = (0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1))
         span = max((x1 - x0), (y1 - y0), (z1 - z0), 1.0)
@@ -1092,6 +1233,12 @@ class Gpr3dViewerDialog(QDialog):
         self._meta = dict(meta or {})
         self._profile_curtain_cache = {}
         try:
+            meta_ch = int(self._meta.get("channel", self._selected_channel_idx) or 0)
+        except Exception:
+            meta_ch = int(getattr(self, "_selected_channel_idx", 0) or 0)
+        self._selected_channel_idx = int(max(0, meta_ch))
+        self._refresh_channel_controls(self._profiles)
+        try:
             self._plotter.clear()
         except Exception:
             pass
@@ -1137,6 +1284,8 @@ class Gpr3dViewerDialog(QDialog):
             n = int(self._spatial.get("n_y", 1))
         elif mode == "crossline":
             n = int(self._spatial.get("n_x", 1))
+        elif mode == "profile":
+            n = int(max(1, len(self._profiles)))
         else:
             n = int(self._spatial.get("n_z", 1))
         n = max(1, n)
@@ -1157,6 +1306,23 @@ class Gpr3dViewerDialog(QDialog):
             self._lbl_slice.setText(f"Y={self._y_at_index(idx):.3f} m")
         elif mode == "crossline":
             self._lbl_slice.setText(f"X={self._x_at_index(idx):.3f} m")
+        elif mode == "profile":
+            n = int(max(1, len(self._profiles)))
+            i = int(np.clip(idx, 0, n - 1))
+            if self._profiles and i < len(self._profiles):
+                try:
+                    name = os.path.basename(str(getattr(self._profiles[i], "path", "") or ""))
+                except Exception:
+                    name = ""
+                try:
+                    ch_idx = int(self._profile_channel_index(self._profiles[i]))
+                except Exception:
+                    ch_idx = int(getattr(self, "_selected_channel_idx", 0) or 0)
+            else:
+                name = ""
+                ch_idx = int(getattr(self, "_selected_channel_idx", 0) or 0)
+            suffix = f" {name}" if name else ""
+            self._lbl_slice.setText(f"P{i + 1}/{n} Ch{ch_idx + 1}{suffix}")
         else:
             self._lbl_slice.setText(f"Z={self._depth_at_index(idx):.3f} m")
 
@@ -1171,11 +1337,19 @@ class Gpr3dViewerDialog(QDialog):
 
         section = self._build_section_sheet(mode, idx)
         if section is not None:
+            cmap = self._section_cmap
+            if mode == "profile":
+                try:
+                    vals = np.asarray(section["amplitude"], dtype=np.float32)
+                except Exception:
+                    vals = np.zeros(0, dtype=np.float32)
+                clip_lo, clip_hi = self._curtain_clim(vals)
+                cmap = self._radargram_cmap
             try:
                 self._plotter.add_mesh(
                     section,
                     scalars="amplitude",
-                    cmap=self._section_cmap,
+                    cmap=cmap,
                     clim=(clip_lo, clip_hi),
                     opacity=0.98,
                     name=self._section_actor_name,
@@ -1189,7 +1363,7 @@ class Gpr3dViewerDialog(QDialog):
             self._render_now()
             return
 
-        if mode in {"inline", "crossline"}:
+        if mode in {"inline", "crossline", "profile"}:
             # Fallback safety: if dedicated sheet creation failed, avoid stale actor.
             self._remove_actor(self._section_actor_name)
             self._render_now()
@@ -1216,6 +1390,8 @@ class Gpr3dViewerDialog(QDialog):
         """Build a section sheet directly from volume array values."""
         if self._volume is None or self._volume.ndim != 3:
             return None
+        if mode == "profile":
+            return self._build_profile_sheet(idx)
         try:
             from .gpr_volume_3d import (
                 extract_b_scan_crossline,
@@ -1282,6 +1458,45 @@ class Gpr3dViewerDialog(QDialog):
         """Backward-compatible alias for old call-sites."""
         return self._build_section_sheet(mode, idx)
 
+    def _build_profile_sheet(self, idx: int):
+        if not self._profiles:
+            return None
+        i = int(np.clip(idx, 0, max(0, len(self._profiles) - 1)))
+        prof = self._profiles[i]
+        try:
+            ch = prof.channel(self._profile_channel_index(prof))
+        except Exception:
+            return None
+        radar = self._radargram_for_profile(prof, ch)
+        if radar is None:
+            return None
+        n_s, n_t = int(radar.shape[0]), int(radar.shape[1])
+        if n_s <= 1 or n_t <= 1:
+            return None
+
+        e = self._resample_profile_vec(getattr(ch, "easting", []), n_t)
+        n = self._resample_profile_vec(getattr(ch, "northing", []), n_t)
+        finite = np.isfinite(e) & np.isfinite(n)
+        if int(np.count_nonzero(finite)) < 2:
+            return None
+        if not np.all(finite):
+            idx_arr = np.arange(n_t, dtype=np.float64)
+            idx_ok = np.where(finite)[0].astype(np.float64)
+            e = np.interp(idx_arr, idx_ok, e[finite]).astype(np.float64)
+            n = np.interp(idx_arr, idx_ok, n[finite]).astype(np.float64)
+
+        depth_max = float(getattr(prof, "depth_max_m", 0.0) or 0.0)
+        if not np.isfinite(depth_max) or depth_max <= 0:
+            depth_max = max(float(n_s - 1), 1.0)
+        depth = np.linspace(0.0, depth_max, n_s, dtype=np.float64)
+
+        xg = np.tile((e - float(self._disp_origin_x))[np.newaxis, :], (n_s, 1))
+        yg = np.tile((n - float(self._disp_origin_y))[np.newaxis, :], (n_s, 1))
+        zg = -np.tile(depth[:, np.newaxis], (1, n_t))
+        curtain = pv.StructuredGrid(xg, yg, zg)
+        curtain["amplitude"] = np.asarray(radar, dtype=np.float32).ravel(order="F")
+        return curtain
+
     def _refresh_isosurface(self):
         if self._volume_grid is None:
             return
@@ -1337,7 +1552,9 @@ class Gpr3dViewerDialog(QDialog):
         self._render_now()
 
     def _on_section_mode_changed(self, _idx: int):
+        self._refresh_channel_controls(self._profiles)
         self._update_slice_slider_range()
+        self._load_profiles(self._profiles)
         self._refresh_section_plane()
         self._apply_camera_for_mode(self._current_section_mode())
 
@@ -1615,10 +1832,12 @@ class Gpr3dViewerDialog(QDialog):
 
     def _load_profiles(self, profiles):
         self._clear_profile_lines()
+        self._refresh_channel_controls(profiles)
         if not bool(self._chk_show_profiles.isChecked()):
             return
         if not profiles:
             return
+        draw_curtains = self._current_section_mode() != "profile"
         n_profiles = max(1, len(profiles))
         for i, prof in enumerate(profiles):
             try:
@@ -1654,21 +1873,22 @@ class Gpr3dViewerDialog(QDialog):
             curtain = pv.StructuredGrid(xg, yg, zg)
             curtain["amplitude"] = np.asarray(radar, dtype=np.float32).ravel(order="F")
 
-            clip_lo, clip_hi = self._effective_clim()
-            try:
-                self._plotter.add_mesh(
-                    curtain,
-                    scalars="amplitude",
-                    cmap=self._section_cmap,
-                    clim=(clip_lo, clip_hi),
-                    opacity=0.92,
-                    name=f"{self._profile_curtain_prefix}{i}",
-                    show_scalar_bar=False,
-                    lighting=False,
-                    nan_opacity=0.0,
-                )
-            except Exception:
-                pass
+            if draw_curtains:
+                clip_lo, clip_hi = self._curtain_clim(radar)
+                try:
+                    self._plotter.add_mesh(
+                        curtain,
+                        scalars="amplitude",
+                        cmap=self._radargram_cmap,
+                        clim=(clip_lo, clip_hi),
+                        opacity=0.92,
+                        name=f"{self._profile_curtain_prefix}{i}",
+                        show_scalar_bar=False,
+                        lighting=False,
+                        nan_opacity=0.0,
+                    )
+                except Exception:
+                    pass
 
             # Keep acquisition trajectory as thin reference line over the curtain.
             try:
@@ -1697,6 +1917,7 @@ class Gpr3dViewerDialog(QDialog):
 
         east_local, north_local = self._world_to_local_xy(float(east), float(north))
         z = -float(depth)
+        follow_depth = bool(self._chk_follow_profile_depth.isChecked())
         clip_lo, clip_hi = self._effective_clim()
         try:
             if self._z_axis.size > 0:
@@ -1709,20 +1930,25 @@ class Gpr3dViewerDialog(QDialog):
                 iz = int(np.clip(iz, 0, max(0, n_z - 1)))
             iz = int(np.clip(iz, 0, max(0, int(self._spatial.get("n_z", 1)) - 1)))
 
-            slice_mesh = self._build_section_sheet("cscan", iz)
-            if slice_mesh is not None:
-                self._plotter.add_mesh(
-                    slice_mesh,
-                    scalars="amplitude",
-                    cmap=self._section_cmap,
-                    clim=(clip_lo, clip_hi),
-                    opacity=0.95,
-                    name=self._cursor_slice_name,
-                    show_scalar_bar=False,
-                    lighting=False,
-                    interpolate_before_map=False,
-                    nan_opacity=0.0,
-                )
+            # Show cursor-linked cscan overlay only when depth sync is enabled and
+            # current section is not already a cscan.
+            if follow_depth and self._current_section_mode() != "cscan":
+                slice_mesh = self._build_section_sheet("cscan", iz)
+                if slice_mesh is not None:
+                    self._plotter.add_mesh(
+                        slice_mesh,
+                        scalars="amplitude",
+                        cmap=self._section_cmap,
+                        clim=(clip_lo, clip_hi),
+                        opacity=0.95,
+                        name=self._cursor_slice_name,
+                        show_scalar_bar=False,
+                        lighting=False,
+                        interpolate_before_map=False,
+                        nan_opacity=0.0,
+                    )
+            else:
+                self._remove_actor(self._cursor_slice_name)
         except Exception:
             pass
 
@@ -1752,12 +1978,14 @@ class Gpr3dViewerDialog(QDialog):
             return
         if self._z_axis.size <= 0:
             return
+        if not bool(self._chk_follow_profile_depth.isChecked()):
+            return
+        if self._current_section_mode() != "cscan":
+            return
         idx = int(np.argmin(np.abs(self._z_axis.astype(np.float64) - float(depth))))
         idx = int(np.clip(idx, 0, max(0, self._z_axis.size - 1)))
         self._suppress_depth_emit = True
         try:
-            if self._current_section_mode() != "cscan":
-                self._section_combo.setCurrentIndex(0)
             if self._slice_slider.value() != idx:
                 self._slice_slider.setValue(idx)
             else:
