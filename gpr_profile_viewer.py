@@ -1180,14 +1180,25 @@ class GprProfileViewer(QDialog):
             )
             return
 
+        z_levels = []
+        for g in grids:
+            try:
+                z_levels.append(float(g.get("z_lev")))
+            except Exception:
+                continue
+        z_levels = [z for z in z_levels if np.isfinite(z)]
+        z_min_view = float(min(z_levels)) if z_levels else float(params["z_min"])
+        z_max_view = float(max(z_levels)) if z_levels else float(params["z_max"])
+
         meta_3d = dict(meta or {})
         meta_3d.update({
             "n_z": int(volume.shape[0]),
             "n_y": int(volume.shape[1]),
             "n_x": int(volume.shape[2]),
             "z_step": float(params["z_step"]),
-            "z_min": float(params["z_min"]),
-            "z_max": float(params["z_max"]),
+            "z_min": z_min_view,
+            "z_max": z_max_view,
+            "z_levels": [float(z) for z in z_levels] if z_levels else None,
         })
 
         if self._gpr_3d_viewer is not None:
@@ -1206,6 +1217,7 @@ class GprProfileViewer(QDialog):
                 volume=volume,
                 meta=meta_3d,
                 profiles=self._profiles,
+                grids=grids,
                 parent=self,
             )
         except Exception as exc:

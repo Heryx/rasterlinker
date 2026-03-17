@@ -6,7 +6,15 @@ from __future__ import annotations
 import numpy as np
 
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QDialog, QVBoxLayout, QLabel
+from qgis.PyQt.QtWidgets import (
+    QDialog,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+)
 
 try:
     import pyvista as pv
@@ -31,7 +39,7 @@ except Exception as _qtint_exc:  # pragma: no cover - optional dependency
 class Gpr3dViewerDialog(QDialog):
     """3D volume viewer based on pyvistaqt embedded in a QDialog."""
 
-    def __init__(self, volume, meta, profiles=None, parent=None):
+    def __init__(self, volume, meta, profiles=None, grids=None, parent=None):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("GPR 3D Volume Viewer")
         self.resize(1100, 760)
@@ -51,6 +59,7 @@ class Gpr3dViewerDialog(QDialog):
 
         self._meta = dict(meta or {})
         self._profiles = list(profiles or [])
+        self._grids = list(grids or [])
 
         self._volume_grid = None
         self._cursor_slice_name = "cursor_slice"
@@ -63,13 +72,23 @@ class Gpr3dViewerDialog(QDialog):
         else:
             layout.addWidget(self._plotter)
 
+        btn_row = QHBoxLayout()
+        self._btn_export_vti = QPushButton("Export .vti")
+        self._btn_export_npz = QPushButton("Export .npz")
+        self._btn_load = QPushButton("Load .vti/.npz")
+        self._btn_export_vti.clicked.connect(self._on_export_vti)
+        self._btn_export_npz.clicked.connect(self._on_export_npz)
+        self._btn_load.clicked.connect(self._on_load_volume)
+        btn_row.addWidget(self._btn_export_vti)
+        btn_row.addWidget(self._btn_export_npz)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self._btn_load)
+        layout.addLayout(btn_row)
+
         self._status = QLabel("Volume loaded")
         layout.addWidget(self._status)
 
-        self._load_volume(self._volume, self._meta)
-        self._load_profiles(self._profiles)
-        self._plotter.reset_camera()
-        self._plotter.render()
+        self._replace_volume(self._volume, self._meta, reset_camera=True)
 
     def _grid_spatial_info(self, vol: np.ndarray, meta: dict) -> dict:
         n_z, n_y, n_x = [int(v) for v in vol.shape]
@@ -108,6 +127,14 @@ class Gpr3dViewerDialog(QDialog):
         # Reorder from (z, y, x) to image cells expected in Fortran order.
         values = np.transpose(vol[::-1, :, :], (2, 1, 0)).ravel(order="F")
         image.cell_data["amplitude"] = values.astype(np.float32, copy=False)
+        finite = values[np.isfinite(values)]
+        if finite.size > 0:
+            vmin = float(np.nanpercentile(finite, 2.0))
+            vmax = float(np.nanpercentile(finite, 98.0))
+            if vmax <= vmin:
+                vmax = vmin + 1e-6
+        else:
+            vmin, vmax = 0.0, 1.0
 
         self._volume_grid = image
         self._plotter.add_axes()
@@ -116,7 +143,8 @@ class Gpr3dViewerDialog(QDialog):
             image,
             scalars="amplitude",
             cmap="RdBu_r",
-            opacity="sigmoid",
+            opacity="linear",
+            clim=(vmin, vmax),
             shade=False,
             blending="composite",
             show_scalar_bar=True,
@@ -125,6 +153,97 @@ class Gpr3dViewerDialog(QDialog):
             f"Volume: {info['n_x']}x{info['n_y']}x{info['n_z']}  "
             f"res={info['res']:.3f}m  z_step={info['z_step']:.3f}m"
         )
+
+    def _replace_volume(self, volume: np.ndarray, meta: dict, reset_camera: bool = False):
+        self._volume = np.asarray(volume, dtype=np.float32)
+        self._meta = dict(meta or {})
+        try:
+            self._plotter.clear()
+        except Exception:
+            pass
+        self._load_volume(self._volume, self._meta)
+        self._load_profiles(self._profiles)
+        if reset_camera:
+            self._plotter.reset_camera()
+        self._plotter.render()
+
+    def _on_export_npz(self):
+        try:
+            from .gpr_volume_3d import export_volume_to_npz
+        except Exception as exc:
+            QMessageBox.warning(self, "Export NPZ", f"Modulo export non disponibile:\n{exc}")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export volume NPZ",
+            "gpr_volume.npz",
+            "NumPy Archive (*.npz)",
+        )
+        if not path:
+            return
+        try:
+            info = export_volume_to_npz(self._volume, self._grids, self._meta, path)
+            self._status.setText(
+                f"NPZ salvato: {info.get('path', path)}  voxels={info.get('n_voxels', 0)}"
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Export NPZ", f"Errore export NPZ:\n{exc}")
+
+    def _on_export_vti(self):
+        try:
+            from .gpr_volume_3d import export_volume_to_vti
+        except Exception as exc:
+            QMessageBox.warning(self, "Export VTI", f"Modulo export non disponibile:\n{exc}")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export volume VTI",
+            "gpr_volume.vti",
+            "VTK ImageData (*.vti)",
+        )
+        if not path:
+            return
+        epsg = self._meta.get("epsg")
+        try:
+            epsg = int(epsg) if epsg is not None else None
+        except Exception:
+            epsg = None
+        try:
+            info = export_volume_to_vti(self._volume, self._grids, self._meta, path, epsg=epsg)
+            self._status.setText(
+                f"VTI salvato: {info.get('path', path)}  spacing={info.get('spacing', ())}"
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Export VTI", f"Errore export VTI:\n{exc}")
+
+    def _on_load_volume(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load volume",
+            "",
+            "Volume files (*.npz *.vti);;NumPy Archive (*.npz);;VTK ImageData (*.vti)",
+        )
+        if not path:
+            return
+
+        try:
+            if path.lower().endswith(".npz"):
+                from .gpr_volume_3d import load_volume_from_npz
+
+                vol, meta = load_volume_from_npz(path)
+            elif path.lower().endswith(".vti"):
+                from .gpr_volume_3d import load_volume_from_vti
+
+                vol, meta = load_volume_from_vti(path)
+            else:
+                raise ValueError("Formato non supportato. Usa .npz o .vti.")
+            self._grids = []
+            self._replace_volume(vol, meta, reset_camera=True)
+            self._status.setText(f"Volume caricato: {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Load volume", f"Errore caricamento volume:\n{exc}")
 
     def _load_profiles(self, profiles):
         if not profiles:

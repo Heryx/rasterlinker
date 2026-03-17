@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 """Unit tests for 3D volume helpers built from OGPR timeslice grids."""
 
+import os
+import tempfile
 import unittest
 
 import numpy as np
 
 from gpr_volume_3d import (
     build_3d_volume,
+    export_volume_to_npz,
     extract_b_scan_crossline,
     extract_b_scan_inline,
     extract_c_scan,
+    load_volume_from_npz,
     volume_axes,
 )
 
@@ -48,6 +52,24 @@ class GprVolume3DTest(unittest.TestCase):
         self.assertEqual(inline.shape, (2, 2))
         self.assertEqual(crossline.shape, (2, 2))
         self.assertTrue(np.allclose(cscan, np.array([[10, 20], [30, 40]], dtype=np.float32)))
+
+    def test_npz_roundtrip(self):
+        grids, meta = self._sample()
+        vol = build_3d_volume(grids)
+        meta_in = dict(meta)
+        meta_in.update({"z_min": 0.0, "z_max": 1.0, "z_step": 1.0})
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_path = os.path.join(tmp_dir, "volume_test.npz")
+            info = export_volume_to_npz(vol, grids, meta_in, out_path)
+            self.assertTrue(os.path.isfile(info["path"]))
+
+            loaded_vol, loaded_meta = load_volume_from_npz(info["path"])
+            self.assertEqual(loaded_vol.shape, vol.shape)
+            self.assertTrue(np.allclose(loaded_vol, vol, equal_nan=True))
+            self.assertEqual(int(loaded_meta.get("n_z", -1)), 2)
+            self.assertEqual(int(loaded_meta.get("n_y", -1)), 2)
+            self.assertEqual(int(loaded_meta.get("n_x", -1)), 2)
 
 
 if __name__ == "__main__":

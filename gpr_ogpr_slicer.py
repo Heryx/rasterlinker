@@ -930,6 +930,9 @@ def compute_ogpr_slice_grids(
         n_x=n_x,
         n_y=n_y,
         resolution=resolution,
+        z_min=float(z_min),
+        z_max=float(z_max),
+        z_step=float(z_step),
         radius=float(base_radius),
         effective_radius=float(effective_radius_base),
         depth_radius_factor=float(depth_radius_factor),
@@ -1003,6 +1006,16 @@ def compute_ogpr_slice_grids(
     if grids:
         fill_vals = np.asarray([g.get("fill_pct", 0.0) for g in grids], dtype=np.float64)
         low_fill_count = int(np.count_nonzero(fill_vals < 60.0))
+        meta["n_z"] = int(len(grids))
+        try:
+            z_vals = np.asarray([float(g.get("z_lev")) for g in grids], dtype=np.float64)
+            if z_vals.size > 0 and np.isfinite(z_vals).any():
+                z_finite = z_vals[np.isfinite(z_vals)]
+                meta["z_first"] = float(z_finite.min())
+                meta["z_last"] = float(z_finite.max())
+                meta["z_levels"] = [float(v) for v in z_finite.tolist()]
+        except Exception:
+            pass
         meta["fill_pct_mean"] = float(np.nanmean(fill_vals))
         meta["fill_pct_min"] = float(np.nanmin(fill_vals))
         meta["fill_pct_low_count"] = low_fill_count
