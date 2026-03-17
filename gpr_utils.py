@@ -1,9 +1,20 @@
 """Utility checks for 3D/GPR import dependencies."""
 
+import importlib
 import os
 import re
 import subprocess
 import sys
+
+
+RUNTIME_PYTHON_DEPENDENCIES = (
+    {"name": "matplotlib", "import_name": "matplotlib", "pip_spec": "matplotlib"},
+    {"name": "scipy", "import_name": "scipy", "pip_spec": "scipy"},
+    {"name": "laspy", "import_name": "laspy", "pip_spec": "laspy[lazrs]"},
+    {"name": "netCDF4", "import_name": "netCDF4", "pip_spec": "netCDF4"},
+    {"name": "pyvista", "import_name": "pyvista", "pip_spec": "pyvista"},
+    {"name": "pyvistaqt", "import_name": "pyvistaqt", "pip_spec": "pyvistaqt"},
+)
 
 
 def check_pdal() -> dict:
@@ -35,9 +46,10 @@ def check_pdal() -> dict:
 def _install_hint(package: str) -> str:
     """Return OS-appropriate manual install instructions."""
     import platform
+
     if platform.system() == "Windows":
         return (
-            f"Apri 'OSGeo4W Shell' dal menu Start e digita:\n"
+            "Apri 'OSGeo4W Shell' dal menu Start e digita:\n"
             f"  pip install {package}\n"
         )
     return f"Installa nel Python di QGIS:\n  {sys.executable} -m pip install {package}"
@@ -49,6 +61,7 @@ def _find_python_for_pip() -> str:
     Search exec_prefix and exe dir for a real Python interpreter.
     """
     import platform
+
     exe_dir = os.path.dirname(os.path.abspath(sys.executable))
     exec_prefix = os.path.abspath(sys.exec_prefix)
 
@@ -67,9 +80,9 @@ def _find_python_for_pip() -> str:
             os.path.join(exe_dir, "python"),
         ]
 
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
     return sys.executable
 
 
@@ -78,12 +91,13 @@ def _try_pip_install(package_spec: str) -> tuple:
     Try to install a package. Returns (success: bool, error_msg: str).
 
     Strategy:
-      1. pip programmatic API  – no subprocess, works inside QGIS Python.
+      1. pip programmatic API - no subprocess, works inside QGIS Python.
       2. subprocess with real python.exe (not qgis-bin.exe on OSGeo4W).
     """
     # Method 1: pip programmatic (preferred in QGIS plugins)
     try:
         from pip._internal.cli.main import main as _pip_main
+
         ret = _pip_main(["install", package_spec, "--quiet", "--no-warn-script-location"])
         if ret == 0:
             return True, ""
@@ -93,6 +107,7 @@ def _try_pip_install(package_spec: str) -> tuple:
 
     try:
         import pip as _pip_mod
+
         if hasattr(_pip_mod, "main"):
             ret = _pip_mod.main(["install", package_spec, "--quiet"])
             if ret == 0:
@@ -105,8 +120,15 @@ def _try_pip_install(package_spec: str) -> tuple:
     python_exe = _find_python_for_pip()
     try:
         proc = subprocess.run(
-            [python_exe, "-m", "pip", "install", package_spec,
-             "--quiet", "--no-warn-script-location"],
+            [
+                python_exe,
+                "-m",
+                "pip",
+                "install",
+                package_spec,
+                "--quiet",
+                "--no-warn-script-location",
+            ],
             capture_output=True,
             text=True,
             timeout=120,
@@ -121,21 +143,31 @@ def _try_pip_install(package_spec: str) -> tuple:
         return False, str(e)
 
 
-def _check_and_install(import_name: str, pip_spec: str) -> dict:
-    """Generic check + auto-install pattern for optional dependencies."""
-    import importlib
-
-    # Fast path: already importable
+def check_python_dependency(import_name: str, pip_spec: str, auto_install: bool = False) -> dict:
+    """Check an importable Python dependency and optionally install it."""
     try:
-        m = importlib.import_module(import_name)
-        return {"ok": True, "version": str(getattr(m, "__version__", "sconosciuta"))}
-    except ImportError:
-        pass
+        module = importlib.import_module(import_name)
+        return {
+            "ok": True,
+            "version": str(getattr(module, "__version__", "sconosciuta")),
+            "import_name": import_name,
+            "pip_spec": pip_spec,
+        }
+    except ImportError as e:
+        if not auto_install:
+            return {
+                "ok": False,
+                "import_name": import_name,
+                "pip_spec": pip_spec,
+                "error": f"{import_name} non installato ({e})",
+            }
 
     success, err_msg = _try_pip_install(pip_spec)
     if not success:
         return {
             "ok": False,
+            "import_name": import_name,
+            "pip_spec": pip_spec,
             "error": (
                 f"{import_name} non installato e auto-install fallito:\n{err_msg}\n\n"
                 + _install_hint(pip_spec)
@@ -143,15 +175,19 @@ def _check_and_install(import_name: str, pip_spec: str) -> dict:
         }
 
     try:
-        m = importlib.import_module(import_name)
+        module = importlib.import_module(import_name)
         return {
             "ok": True,
-            "version": str(getattr(m, "__version__", "sconosciuta")),
+            "version": str(getattr(module, "__version__", "sconosciuta")),
             "just_installed": True,
+            "import_name": import_name,
+            "pip_spec": pip_spec,
         }
     except ImportError as e:
         return {
             "ok": False,
+            "import_name": import_name,
+            "pip_spec": pip_spec,
             "error": (
                 f"{import_name} installato ma non importabile in questa sessione ({e}).\n"
                 "Riavvia QGIS e riprova."
@@ -159,30 +195,62 @@ def _check_and_install(import_name: str, pip_spec: str) -> dict:
         }
 
 
-def check_laspy() -> dict:
-    """Check if laspy is importable; auto-install if missing."""
-    return _check_and_install("laspy", "laspy[lazrs]")
+def check_laspy(auto_install: bool = False) -> dict:
+    """Check if laspy is importable."""
+    return check_python_dependency("laspy", "laspy[lazrs]", auto_install=auto_install)
 
 
-def check_netcdf4() -> dict:
-    """Check if netCDF4 is importable; auto-install if missing."""
-    return _check_and_install("netCDF4", "netCDF4")
+def check_netcdf4(auto_install: bool = False) -> dict:
+    """Check if netCDF4 is importable."""
+    return check_python_dependency("netCDF4", "netCDF4", auto_install=auto_install)
 
 
-def check_environment() -> str:
-    """Return a multiline status report for all GPR dependencies."""
-    pdal = check_pdal()
-    laspy = check_laspy()
-    nc4 = check_netcdf4()
+def check_runtime_dependencies(auto_install: bool = False) -> dict:
+    """Check all known runtime dependencies and optionally install Python ones."""
+    python_results = []
+    for spec in RUNTIME_PYTHON_DEPENDENCIES:
+        result = check_python_dependency(
+            spec["import_name"],
+            spec["pip_spec"],
+            auto_install=auto_install,
+        )
+        result["name"] = spec["name"]
+        python_results.append(result)
 
-    def line(name, result):
-        if result.get("ok"):
-            suffix = " (appena installato — riavvia QGIS)" if result.get("just_installed") else ""
-            return f"\u2705 {name} {result.get('version','')}{suffix}"
-        return f"\u274c {name}: {result.get('error', '')}"
+    missing_python = [res for res in python_results if not res.get("ok")]
+    pdal_result = check_pdal()
 
-    return "\n".join([
-        line("PDAL", pdal),
-        line("laspy", laspy),
-        line("netCDF4", nc4),
-    ])
+    return {
+        "python": python_results,
+        "missing_python": missing_python,
+        "pdal": pdal_result,
+        "has_failures": bool(missing_python) or not pdal_result.get("ok"),
+    }
+
+
+def format_runtime_dependency_report(report: dict) -> str:
+    """Build a multiline human-readable dependency status report."""
+    lines = []
+
+    for item in report.get("python", []):
+        name = item.get("name") or item.get("import_name") or "unknown"
+        if item.get("ok"):
+            suffix = " (appena installato - riavvia QGIS)" if item.get("just_installed") else ""
+            lines.append(f"OK {name} {item.get('version', '')}{suffix}".rstrip())
+        else:
+            lines.append(f"MISSING {name}: {item.get('error', '')}")
+
+    pdal = report.get("pdal", {})
+    if pdal.get("ok"):
+        lines.append(f"OK PDAL {pdal.get('version', '')}".rstrip())
+    else:
+        lines.append(f"MISSING PDAL: {pdal.get('error', '')}")
+
+    return "\n".join(lines)
+
+
+def check_environment(auto_install: bool = False) -> str:
+    """Backward-compatible environment report helper."""
+    return format_runtime_dependency_report(
+        check_runtime_dependencies(auto_install=auto_install)
+    )

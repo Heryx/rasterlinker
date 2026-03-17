@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import importlib
+import os
+import sys
 import numpy as np
 
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -34,26 +37,125 @@ except Exception:  # pragma: no cover - optional dependency
     Figure = None
     _HAS_MPL = False
 
-try:
-    import pyvista as pv
+pv = None
+QtInteractor = None
+_HAS_PYVISTA = False
+_HAS_QTINTERACTOR = False
+_PYVISTA_IMPORT_ERROR = None
+_QTINTERACTOR_IMPORT_ERROR = None
+_PYVISTA_BOOTSTRAP_DIAG = ""
+_PYVISTA_BOOTSTRAPPED = False
 
-    _HAS_PYVISTA = True
-except Exception as _pv_exc:  # pragma: no cover - optional dependency
-    pv = None
+
+def _candidate_site_packages() -> list[str]:
+    """Best-effort site-packages candidates for OSGeo4W/QGIS runtime."""
+    ver_tag = f"Python{sys.version_info.major}{sys.version_info.minor}"
+    roots = set()
+    for key in ("OSGEO4W_ROOT", "QGIS_PREFIX_PATH"):
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            roots.add(val)
+    roots.update(
+        {
+            sys.prefix,
+            sys.exec_prefix,
+            sys.base_prefix,
+            os.path.dirname(sys.executable),
+        }
+    )
+
+    candidates = []
+    for root in list(roots):
+        if not root:
+            continue
+        root = os.path.abspath(root)
+        parent = os.path.dirname(root)
+        candidates.extend(
+            [
+                os.path.join(root, "Lib", "site-packages"),
+                os.path.join(root, "apps", ver_tag, "Lib", "site-packages"),
+                os.path.join(parent, "apps", ver_tag, "Lib", "site-packages"),
+            ]
+        )
+    out = []
+    seen = set()
+    for c in candidates:
+        c = os.path.abspath(c)
+        if c in seen:
+            continue
+        seen.add(c)
+        if os.path.isdir(c):
+            out.append(c)
+    return out
+
+
+def _bootstrap_pyvista_runtime() -> bool:
+    """Import pyvista/pyvistaqt, trying path fallback and storing diagnostics."""
+    global pv, QtInteractor
+    global _HAS_PYVISTA, _HAS_QTINTERACTOR
+    global _PYVISTA_IMPORT_ERROR, _QTINTERACTOR_IMPORT_ERROR
+    global _PYVISTA_BOOTSTRAP_DIAG, _PYVISTA_BOOTSTRAPPED
+
+    if _PYVISTA_BOOTSTRAPPED:
+        return bool(_HAS_PYVISTA and _HAS_QTINTERACTOR)
+
+    attempted_paths = []
+
+    def _try_import():
+        try:
+            mod = importlib.import_module("pyvista")
+        except Exception as exc:
+            return False, ("pyvista", exc)
+        try:
+            # Force QtPy to use PyQt5 under QGIS runtime.
+            if not os.environ.get("QT_API"):
+                os.environ["QT_API"] = "pyqt5"
+            mod_qt = importlib.import_module("pyvistaqt")
+            qt_interactor = getattr(mod_qt, "QtInteractor", None)
+            if qt_interactor is None:
+                raise ImportError("pyvistaqt imported but QtInteractor is missing")
+        except Exception as exc:
+            return False, ("pyvistaqt", exc, mod)
+        return True, (mod, qt_interactor)
+
+    ok, result = _try_import()
+    if not ok:
+        for p in _candidate_site_packages():
+            if p not in sys.path:
+                sys.path.append(p)
+                attempted_paths.append(p)
+        ok, result = _try_import()
+
+    if ok:
+        pv, qt_interactor = result
+        QtInteractor = qt_interactor
+        _HAS_PYVISTA = True
+        _HAS_QTINTERACTOR = True
+        _PYVISTA_IMPORT_ERROR = None
+        _QTINTERACTOR_IMPORT_ERROR = None
+        _PYVISTA_BOOTSTRAPPED = True
+        _PYVISTA_BOOTSTRAP_DIAG = (
+            f"Python={sys.executable}\n"
+            f"sys.prefix={sys.prefix}\n"
+            f"added_site_packages={attempted_paths}"
+        )
+        return True
+
     _HAS_PYVISTA = False
-    _PYVISTA_IMPORT_ERROR = _pv_exc
-else:  # pragma: no cover - optional dependency
-    _PYVISTA_IMPORT_ERROR = None
-
-try:  # pragma: no cover - optional dependency
-    from pyvistaqt import QtInteractor
-
-    _HAS_QTINTERACTOR = True
-    _QTINTERACTOR_IMPORT_ERROR = None
-except Exception as _qtint_exc:  # pragma: no cover - optional dependency
-    QtInteractor = None
     _HAS_QTINTERACTOR = False
-    _QTINTERACTOR_IMPORT_ERROR = _qtint_exc
+    if isinstance(result, tuple) and len(result) >= 2 and result[0] == "pyvistaqt":
+        _QTINTERACTOR_IMPORT_ERROR = result[1]
+        _PYVISTA_IMPORT_ERROR = None
+    else:
+        _PYVISTA_IMPORT_ERROR = result[1] if isinstance(result, tuple) and len(result) >= 2 else result
+    _PYVISTA_BOOTSTRAPPED = True
+    _PYVISTA_BOOTSTRAP_DIAG = (
+        f"Python={sys.executable}\n"
+        f"sys.prefix={sys.prefix}\n"
+        f"added_site_packages={attempted_paths}\n"
+        f"sys.path_tail={sys.path[-6:]}"
+    )
+    return False
 
 
 class Gpr3dViewerDialog(QDialog):
@@ -65,13 +167,24 @@ class Gpr3dViewerDialog(QDialog):
         self.setWindowTitle("GPR 3D Volume Viewer")
         self.resize(1280, 800)
 
+        _bootstrap_pyvista_runtime()
         if not _HAS_PYVISTA:
             raise ImportError(
-                "pyvista not available. Install with: pip install pyvista pyvistaqt"
+                "pyvista non disponibile nel runtime QGIS.\n"
+                "Dettaglio: "
+                f"{_PYVISTA_IMPORT_ERROR}\n\n"
+                "Installa nel Python usato da QGIS (non in un env diverso):\n"
+                "python -m pip install pyvista pyvistaqt\n\n"
+                f"{_PYVISTA_BOOTSTRAP_DIAG}"
             ) from _PYVISTA_IMPORT_ERROR
         if not _HAS_QTINTERACTOR:
             raise ImportError(
-                "pyvistaqt not available. Install with: pip install pyvistaqt"
+                "pyvistaqt / QtInteractor non disponibile nel runtime QGIS.\n"
+                "Dettaglio: "
+                f"{_QTINTERACTOR_IMPORT_ERROR}\n\n"
+                "Installa nel Python usato da QGIS:\n"
+                "python -m pip install pyvista pyvistaqt\n\n"
+                f"{_PYVISTA_BOOTSTRAP_DIAG}"
             ) from _QTINTERACTOR_IMPORT_ERROR
 
         self._volume = np.asarray(volume, dtype=np.float32)

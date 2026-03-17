@@ -5,7 +5,7 @@ import os.path
 
 from qgis.PyQt.QtCore import QSettings, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from qgis.core import QgsMessageLog, Qgis
 from .trace_tools_mixin import TraceToolsMixin
 from .trace_info_mixin import TraceInfoMixin
@@ -89,9 +89,11 @@ class GeoSurveyStudioPlugin(
         self.settings_group = "GeoSurveyStudio"
         self.settings_key_active_project = "GeoSurveyStudio/active_project_root"
         self.settings_key_default_import_crs = "GeoSurveyStudio/default_import_crs_authid"
+        self.settings_key_deps_checked_version = "GeoSurveyStudio/deps_checked_version"
         self.plugin_layer_root_name = "GeoSurvey Studio"
         self.project_manager_dialog = None
         self.pending_vector_storage_mode = None
+        self._deps_checked_this_session = False
 
         # GPR Profile Viewer (finestra indipendente)
         self._gpr_profile_viewer = None
@@ -179,7 +181,133 @@ class GeoSurveyStudioPlugin(
         refresh_icon = self._qgis_theme_icon("mActionRefresh.svg", "mActionReload.svg")
         if refresh_icon is not None and not refresh_icon.isNull():
             self.check_updates_action.setIcon(refresh_icon)
+        self.check_dependencies_action = self.add_action(
+            icon_path,
+            text=self.tr(u'Riesegui check dipendenze'),
+            callback=self.run_dependency_check_manual,
+            parent=self.iface.mainWindow(),
+        )
+        deps_icon = self._qgis_theme_icon("mActionOptions.svg", "mActionRefresh.svg")
+        if deps_icon is not None and not deps_icon.isNull():
+            self.check_dependencies_action.setIcon(deps_icon)
         self.first_start = True
+        self._maybe_run_startup_dependency_check()
+
+    def _plugin_version(self) -> str:
+        """Read plugin version from metadata.txt."""
+        metadata_path = os.path.join(self.plugin_dir, "metadata.txt")
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if line.lower().startswith("version="):
+                        value = line.split("=", 1)[1].strip()
+                        if value:
+                            return value
+        except Exception:
+            pass
+        return "unknown"
+
+    def _maybe_run_startup_dependency_check(self):
+        """Run dependency check once per plugin version and ask before install."""
+        if self._deps_checked_this_session:
+            return
+        self._deps_checked_this_session = True
+
+        current_version = self._plugin_version()
+        checked_version = (
+            self.settings.value(self.settings_key_deps_checked_version, "", type=str) or ""
+        ).strip()
+        if checked_version == current_version:
+            return
+
+        self._run_dependency_check_flow(manual=False)
+        self.settings.setValue(self.settings_key_deps_checked_version, current_version)
+
+    def run_dependency_check_manual(self):
+        """User-triggered dependency check from plugin menu/toolbar."""
+        self._run_dependency_check_flow(manual=True)
+
+    def _run_dependency_check_flow(self, manual: bool = False):
+        """Shared dependency check flow with optional install prompt."""
+        try:
+            from .gpr_utils import check_runtime_dependencies, format_runtime_dependency_report
+
+            initial_report = check_runtime_dependencies(auto_install=False)
+            missing_python = initial_report.get("missing_python", [])
+            initial_text = format_runtime_dependency_report(initial_report)
+            if not missing_python:
+                if manual:
+                    QMessageBox.information(
+                        self.iface.mainWindow(),
+                        "GeoSurvey Studio - Check dipendenze",
+                        "Risultato controllo dipendenze:\n\n" + initial_text,
+                    )
+                elif not initial_report.get("pdal", {}).get("ok"):
+                    QMessageBox.information(
+                        self.iface.mainWindow(),
+                        "GeoSurvey Studio - PDAL non trovato",
+                        "Le librerie Python risultano disponibili, ma PDAL non e' nel PATH.\n"
+                        "Le funzioni point-cloud che dipendono da PDAL potrebbero non funzionare.",
+                    )
+                return
+
+            missing_lines = []
+            for item in missing_python:
+                name = item.get("name") or item.get("import_name") or "unknown"
+                pip_spec = item.get("pip_spec") or name
+                missing_lines.append(f"- {name} (pip: {pip_spec})")
+
+            prompt_text = (
+                "Sono state trovate librerie Python mancanti richieste dal plugin:\n\n"
+                + "\n".join(missing_lines)
+                + "\n\nVuoi procedere con l'installazione automatica adesso?"
+            )
+
+            answer = QMessageBox.question(
+                self.iface.mainWindow(),
+                "GeoSurvey Studio - Dipendenze mancanti",
+                prompt_text,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+
+            if answer == QMessageBox.Yes:
+                final_report = check_runtime_dependencies(auto_install=True)
+                report_text = format_runtime_dependency_report(final_report)
+                if final_report.get("missing_python"):
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "GeoSurvey Studio - Installazione incompleta",
+                        "Alcune librerie non sono state installate correttamente.\n\n"
+                        + report_text,
+                    )
+                else:
+                    QMessageBox.information(
+                        self.iface.mainWindow(),
+                        "GeoSurvey Studio - Dipendenze",
+                        "Controllo dipendenze completato.\n"
+                        "Se alcune librerie sono state appena installate, riavvia QGIS.\n\n"
+                        + report_text,
+                    )
+            else:
+                manual_hint = "\n".join(
+                    f"pip install {item.get('pip_spec') or item.get('name')}"
+                    for item in missing_python
+                )
+                QMessageBox.information(
+                    self.iface.mainWindow(),
+                    "GeoSurvey Studio - Installazione rimandata",
+                    "Installazione automatica annullata.\n"
+                    "Potrai installare manualmente da OSGeo4W Shell:\n\n"
+                    + manual_hint,
+                )
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"Dependency check startup error: {e}",
+                "GeoSurvey Studio",
+                level=Qgis.Warning,
+            )
 
     def open_gpr_profile_viewer(self):
         """Apre (o porta in primo piano) il GPR Profile Viewer."""

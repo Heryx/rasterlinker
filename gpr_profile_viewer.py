@@ -19,6 +19,8 @@ from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QToolBar,
     QAction, QLabel, QComboBox,
     QCheckBox, QDoubleSpinBox, QSpinBox,
+    QSlider,
+    QWidget,
     QInputDialog,
     QFileDialog, QMessageBox, QSizePolicy,
     QGroupBox, QFormLayout, QPushButton, QDialogButtonBox,
@@ -282,6 +284,7 @@ class GprProfileViewer(QDialog):
         self._canvas_timer.setSingleShot(True)
         self._canvas_timer.setInterval(50)
         self._canvas_timer.timeout.connect(self._flush_canvas_update)
+        self._updating_xpan = False
 
         self._build_ui()
 
@@ -381,6 +384,8 @@ class GprProfileViewer(QDialog):
         root.addWidget(tb)
 
         center = QHBoxLayout()
+        self._xpan_slider = None
+        self._lbl_xpan = None
 
         if HAS_MPL:
             self._fig        = Figure(figsize=(9, 4), tight_layout=True)
@@ -393,7 +398,35 @@ class GprProfileViewer(QDialog):
             self._canvas_mpl.mpl_connect("button_press_event",  self._on_mouse_press)
             self._canvas_mpl.mpl_connect("axes_leave_event",    self._on_axes_leave)
             self._canvas_mpl.mpl_connect("scroll_event",        self._on_scroll_zoom)
-            center.addWidget(self._canvas_mpl, stretch=4)
+
+            left_host = QWidget()
+            left_lay = QVBoxLayout(left_host)
+            left_lay.setContentsMargins(0, 0, 0, 0)
+            left_lay.setSpacing(4)
+            left_lay.addWidget(self._canvas_mpl, stretch=1)
+
+            pan_row = QWidget()
+            pan_row_l = QHBoxLayout(pan_row)
+            pan_row_l.setContentsMargins(4, 0, 4, 0)
+            pan_row_l.setSpacing(6)
+            pan_row_l.addWidget(QLabel("Scorri profilo:"))
+            self._xpan_slider = QSlider(Qt.Horizontal)
+            self._xpan_slider.setRange(0, 1000)
+            self._xpan_slider.setValue(0)
+            self._xpan_slider.setEnabled(False)
+            self._xpan_slider.setToolTip(
+                "Slider orizzontale sotto il profilo per navigare profili molto lunghi.\n"
+                "Si attiva automaticamente quando lo zoom X e' < 100%."
+            )
+            self._xpan_slider.valueChanged.connect(self._on_xpan_slider_changed)
+            pan_row_l.addWidget(self._xpan_slider, 1)
+            self._lbl_xpan = QLabel("Full")
+            self._lbl_xpan.setMinimumWidth(90)
+            self._lbl_xpan.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            pan_row_l.addWidget(self._lbl_xpan, 0)
+            left_lay.addWidget(pan_row, stretch=0)
+
+            center.addWidget(left_host, stretch=4)
             self._im    = None
             self._vline = None
             self._hline = None
@@ -1691,6 +1724,71 @@ class GprProfileViewer(QDialog):
         self._view_ylim = None
         self._redraw()
 
+    def _full_x_limits(self) -> tuple[float, float]:
+        if self._disp_data is None or not self._profiles:
+            return 0.0, 1.0
+        prof = self._profiles[self._prof_idx]
+        dist_arr = self._display_distance_axis(prof, int(self._disp_data.shape[1]))
+        if dist_arr.size and np.isfinite(dist_arr).any():
+            x_full_min = float(np.nanmin(dist_arr))
+            x_full_max = float(np.nanmax(dist_arr))
+        else:
+            x_full_min = 0.0
+            x_full_max = float(max(1.0, prof.sampling_step_m * max(self._disp_data.shape[1] - 1, 1)))
+        if not (np.isfinite(x_full_min) and np.isfinite(x_full_max)) or x_full_max <= x_full_min:
+            x_full_min, x_full_max = 0.0, 1.0
+        return x_full_min, x_full_max
+
+    def _sync_xpan_slider(self):
+        if not hasattr(self, "_xpan_slider") or self._xpan_slider is None:
+            return
+        x_full_min, x_full_max = self._full_x_limits()
+        full_w = float(max(x_full_max - x_full_min, 1e-9))
+        x_view = self._view_xlim if self._view_xlim is not None else (x_full_min, x_full_max)
+        x_view = self._clamp_axis_limits(x_view[0], x_view[1], x_full_min, x_full_max)
+        view_w = float(max(abs(x_view[1] - x_view[0]), 1e-9))
+
+        can_pan = view_w < (full_w - 1e-6)
+        self._updating_xpan = True
+        try:
+            self._xpan_slider.setEnabled(can_pan)
+            if not can_pan:
+                self._xpan_slider.setValue(0)
+                if self._lbl_xpan is not None:
+                    self._lbl_xpan.setText("Full")
+                return
+            movable = full_w - view_w
+            ratio = (float(min(x_view)) - x_full_min) / max(movable, 1e-9)
+            ratio = float(np.clip(ratio, 0.0, 1.0))
+            self._xpan_slider.setValue(int(round(ratio * 1000.0)))
+            if self._lbl_xpan is not None:
+                self._lbl_xpan.setText(f"{min(x_view):.1f}-{max(x_view):.1f} m")
+        finally:
+            self._updating_xpan = False
+
+    def _on_xpan_slider_changed(self, value: int):
+        if bool(getattr(self, "_updating_xpan", False)):
+            return
+        if self._disp_data is None or self._ax is None:
+            return
+        x_full_min, x_full_max = self._full_x_limits()
+        full_w = float(max(x_full_max - x_full_min, 1e-9))
+        x_view = self._view_xlim if self._view_xlim is not None else (x_full_min, x_full_max)
+        x_view = self._clamp_axis_limits(x_view[0], x_view[1], x_full_min, x_full_max)
+        view_w = float(max(abs(x_view[1] - x_view[0]), 1e-9))
+        movable = full_w - view_w
+        if movable <= 1e-9:
+            self._sync_xpan_slider()
+            return
+        ratio = float(np.clip(float(value) / 1000.0, 0.0, 1.0))
+        lo = x_full_min + ratio * movable
+        hi = lo + view_w
+        self._view_xlim = (lo, hi)
+        self._ax.set_xlim(*self._view_xlim)
+        if self._canvas_mpl is not None:
+            self._canvas_mpl.draw_idle()
+        self._sync_xpan_slider()
+
     def _export_radargram_image(self):
         if not HAS_MPL or self._disp_data is None or not self._profiles:
             QMessageBox.information(self, "Export Radargram", "Nessun radargramma da esportare.")
@@ -1850,6 +1948,7 @@ class GprProfileViewer(QDialog):
         self._draw_hyperbola_overlay(prof, dist_max, depth_max)
         self._vline = self._ax.axvline(x=0, color="yellow", lw=1, visible=False)
         self._hline = self._ax.axhline(y=0, color="cyan",   lw=1, linestyle="--", visible=False)
+        self._sync_xpan_slider()
         self._update_wiggle_plot(draw=False)
         self._canvas_mpl.draw_idle()
 
@@ -2048,6 +2147,7 @@ class GprProfileViewer(QDialog):
 
         self._ax.set_xlim(*self._view_xlim)
         self._ax.set_ylim(*self._view_ylim)
+        self._sync_xpan_slider()
         self._canvas_mpl.draw_idle()
 
     def _on_axes_leave(self, event):

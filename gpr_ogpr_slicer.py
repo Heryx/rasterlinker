@@ -209,6 +209,39 @@ def _resample_vec_to_n(vec: np.ndarray, n: int) -> np.ndarray:
     return np.interp(dst, src, arr).astype(np.float64)
 
 
+def _align_2d_arrays_for_stack(arrays: list[np.ndarray]) -> tuple[list[np.ndarray], tuple[int, int], bool]:
+    """Normalize a list of 2D arrays so they can be stacked safely.
+
+    Returns:
+      - list of arrays cropped to common (min_samples, min_traces)
+      - common shape tuple
+      - boolean flag indicating whether any crop/resample was applied
+    """
+    mats = []
+    for arr in arrays:
+        a = np.asarray(arr, dtype=np.float32)
+        if a.ndim != 2 or a.size <= 0:
+            continue
+        mats.append(a)
+    if not mats:
+        return [], (0, 0), False
+
+    min_s = int(min(m.shape[0] for m in mats))
+    min_t = int(min(m.shape[1] for m in mats))
+    if min_s <= 0 or min_t <= 0:
+        return [], (0, 0), False
+
+    changed = False
+    out = []
+    for m in mats:
+        if m.shape[0] != min_s or m.shape[1] != min_t:
+            changed = True
+            out.append(m[:min_s, :min_t].astype(np.float32, copy=False))
+        else:
+            out.append(m.astype(np.float32, copy=False))
+    return out, (min_s, min_t), changed
+
+
 def _normalize_flip_mode(mode: str | None) -> str:
     m = str(mode or "none").strip().lower()
     if m in {"all", "odd", "even"}:
@@ -669,7 +702,24 @@ def _process_profiles(
             else:
                 # LAS-like: usa ampiezza assoluta direttamente dai campioni.
                 ampl = np.abs(proc).astype(np.float32, copy=False)
+            if ampl.ndim != 2 or ampl.size <= 0:
+                print(f"[OGPR slicer] skip invalid channel matrix ch{ci} in {getattr(prof, 'path', '')}")
+                continue
             proc_channels.append(ampl)
+
+        if not proc_channels:
+            print(f"[OGPR slicer] no valid channels for profile: {getattr(prof, 'path', '')}")
+            continue
+
+        proc_channels, common_shape, cropped = _align_2d_arrays_for_stack(proc_channels)
+        if not proc_channels:
+            print(f"[OGPR slicer] no stackable channels for profile: {getattr(prof, 'path', '')}")
+            continue
+        if cropped:
+            print(
+                f"[OGPR slicer][WARN] channel shapes differ in {getattr(prof, 'path', '')}; "
+                f"cropped to common shape {common_shape[0]}x{common_shape[1]}"
+            )
 
         ampl_3d = np.stack(proc_channels, axis=2)
         n_traces = int(ampl_3d.shape[1])

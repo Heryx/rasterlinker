@@ -25,12 +25,13 @@ class CallbackTask(QgsTask):
         self.error_message = ""
 
     def set_completion_callback(self, callback):
-        self._completion_callback = callback
+        setattr(self, "_completion_callback", callback)
 
     def _notify_completion(self, ok):
-        if callable(self._completion_callback):
+        callback = getattr(self, "_completion_callback", None)
+        if callable(callback):
             try:
-                self._completion_callback(self, bool(ok))
+                callback(self, bool(ok))
             except Exception:
                 pass
 
