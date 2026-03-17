@@ -396,6 +396,7 @@ def apply_pipeline(
     params: dict,
     dt_ns: float = 0.117,
     bg_reference_trace: np.ndarray | None = None,
+    normalize_output: bool = True,
 ) -> np.ndarray:
     """
     Applica la pipeline di processing completa.
@@ -464,6 +465,10 @@ def apply_pipeline(
         )
         _log(f"bandpass({p['bp_low_mhz']}-{p['bp_high_mhz']}MHz)", out)
 
-    out = normalize_display(out, clip_pct=float(p["clip_pct"]))
-    _log("normalize (finale)", out)
+    if normalize_output:
+        out = normalize_display(out, clip_pct=float(p["clip_pct"]))
+        _log("normalize (finale)", out)
+    else:
+        out = out.astype(np.float32, copy=False)
+        _log("finale (no normalize)", out)
     return out

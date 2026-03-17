@@ -262,6 +262,106 @@ class RadargramImportTask(CallbackTask):
         self._notify_completion(bool(result) and not self.cancelled)
 
 
+class OgprSliceBuildTask(CallbackTask):
+    """Background task: compute OGPR slice grids and write GeoTIFF files."""
+
+    def __init__(
+        self,
+        profiles,
+        params,
+        extra_slice_params,
+        output_dir,
+        epsg=None,
+        description="GeoSurvey Studio: Building OGPR timeslices",
+    ):
+        super().__init__(description)
+        self.profiles = list(profiles or [])
+        self.params = dict(params or {})
+        self.extra_slice_params = dict(extra_slice_params or {})
+        self.output_dir = output_dir
+        self.epsg = epsg
+
+        self.meta = {}
+        self.grids = []
+        self.slices = []
+        self.no_grids = False
+
+    def run(self):
+        try:
+            from .gpr_ogpr_slicer import compute_ogpr_slice_grids, write_grids_to_tifs
+        except Exception as e:
+            self.error_message = str(e)
+            return False
+
+        if not self.profiles:
+            self.error_message = "Nessun profilo OGPR disponibile."
+            return False
+
+        self.setProgress(5.0)
+        if self.isCanceled():
+            self.cancelled = True
+            return False
+
+        try:
+            grids, meta = compute_ogpr_slice_grids(
+                profiles=self.profiles,
+                channel=self.params["channel"],
+                combine_method=self.params["combine_method"],
+                resolution=self.params["resolution"],
+                z_step=self.params["z_step"],
+                z_min=self.params["z_min"],
+                z_max=self.params["z_max"],
+                radius=self.params["radius"],
+                normalize_channels=bool(self.extra_slice_params.get("normalize_channels", False)),
+                extraction_mode=str(self.extra_slice_params.get("extraction_mode", "las_like") or "las_like"),
+                use_processing=bool(self.extra_slice_params.get("use_processing", False)),
+                amplitude_sigma=self.extra_slice_params.get("amplitude_sigma"),
+                use_anisotropic_idw=bool(self.extra_slice_params.get("use_anisotropic_idw", False)),
+                auto_radius=bool(self.extra_slice_params.get("auto_radius", False)),
+                min_points=int(self.extra_slice_params.get("min_points", 1) or 1),
+                fill_nodata=bool(self.extra_slice_params.get("fill_nodata", False)),
+                smooth_sigma=float(self.extra_slice_params.get("smooth_sigma", 0.0) or 0.0),
+                depth_radius_factor=float(self.extra_slice_params.get("depth_radius_factor", 0.6) or 0.0),
+                balance_profiles=bool(self.extra_slice_params.get("balance_profiles", True)),
+            )
+        except Exception as e:
+            self.error_message = str(e)
+            return False
+
+        self.meta = meta or {}
+        self.grids = list(grids or [])
+        self.setProgress(70.0)
+
+        if self.isCanceled():
+            self.cancelled = True
+            return False
+
+        if not self.grids:
+            self.no_grids = True
+            self.setProgress(100.0)
+            return True
+
+        try:
+            self.slices = write_grids_to_tifs(
+                self.grids,
+                self.meta,
+                self.output_dir,
+                epsg=self.epsg,
+            )
+        except Exception as e:
+            self.error_message = str(e)
+            return False
+
+        if self.isCanceled():
+            self.cancelled = True
+            return False
+        self.setProgress(100.0)
+        return True
+
+    def finished(self, result):
+        self._notify_completion(bool(result) and not self.cancelled)
+
+
 class CatalogCleanupTask(CallbackTask):
     """
     Background task for catalog cleanup:

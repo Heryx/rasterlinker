@@ -12,7 +12,7 @@ from typing import Optional
 
 import numpy as np
 
-from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QToolBar,
@@ -22,7 +22,11 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox, QFormLayout, QPushButton,
 )
 from qgis.core import (
-    QgsPointXY, QgsWkbTypes,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsPointXY,
+    QgsProject,
+    QgsWkbTypes,
 )
 from qgis.gui import QgsRubberBand
 
@@ -42,6 +46,7 @@ DEFAULT_CMAP = "RdBu_r"
 
 
 class GprProfileViewer(QDialog):
+    cursor_moved = pyqtSignal(float, float, float)  # easting, northing, depth
 
     def __init__(self, iface, plugin=None, parent=None):
         super().__init__(parent, Qt.Window)
@@ -60,6 +65,10 @@ class GprProfileViewer(QDialog):
         self._cursor_z:    Optional[float] = None
         self._view_xlim:   Optional[tuple[float, float]] = None
         self._view_ylim:   Optional[tuple[float, float]] = None
+        self._gpr_3d_viewer = None
+        self._cached_catalog = None
+        self._cached_catalog_pr: Optional[str] = None
+        self._cached_catalog_mtime: Optional[float] = None
 
         self._rb_point: Optional[QgsRubberBand] = None
         self._rb_line:  Optional[QgsRubberBand] = None
@@ -355,8 +364,25 @@ class GprProfileViewer(QDialog):
         grp_slice = QGroupBox("Timeslice")
         fl_slice  = QFormLayout(grp_slice)
 
-        self._chk_normalize_ch = QCheckBox(); self._chk_normalize_ch.setChecked(True)
-        self._chk_normalize_ch.setToolTip("Bilancia ampiezza inter-canale.")
+        self._cb_slice_extraction = QComboBox()
+        self._cb_slice_extraction.addItem("LAS-like (abs)", "las_like")
+        self._cb_slice_extraction.addItem("Envelope (Hilbert)", "envelope")
+        self._cb_slice_extraction.addItem("Signed amplitude", "signed")
+        self._cb_slice_extraction.setCurrentIndex(0)
+        self._cb_slice_extraction.setToolTip(
+            "Metodo di estrazione ampiezza per creare le timeslice.\n"
+            "LAS-like usa abs(dato) e si comporta in modo piu' simile al flusso LAS."
+        )
+
+        self._chk_slice_use_processing = QCheckBox()
+        self._chk_slice_use_processing.setChecked(False)
+        self._chk_slice_use_processing.setToolTip(
+            "Applica dewow/time-zero/bg/agc/bandpass prima della creazione slice.\n"
+            "Disattivato = comportamento piu' vicino al LAS."
+        )
+
+        self._chk_normalize_ch = QCheckBox(); self._chk_normalize_ch.setChecked(False)
+        self._chk_normalize_ch.setToolTip("Bilancia ampiezza inter-canale (LAS-like: normalmente OFF).")
 
         self._chk_amplitude_filter = QCheckBox(); self._chk_amplitude_filter.setChecked(False)
         self._spin_amplitude_sigma = QDoubleSpinBox()
@@ -367,6 +393,23 @@ class GprProfileViewer(QDialog):
         self._chk_anisotropic_idw = QCheckBox(); self._chk_anisotropic_idw.setChecked(False)
         self._chk_auto_radius     = QCheckBox(); self._chk_auto_radius.setChecked(False)
         self._chk_fill_nodata     = QCheckBox(); self._chk_fill_nodata.setChecked(False)
+        self._chk_slice_balance_profiles = QCheckBox(); self._chk_slice_balance_profiles.setChecked(True)
+        self._chk_slice_balance_profiles.setToolTip(
+            "Bilancia l'ampiezza media tra profili prima dell'IDW per ridurre le strisce."
+        )
+        self._spin_slice_depth_radius_factor = QDoubleSpinBox()
+        self._spin_slice_depth_radius_factor.setRange(0.0, 2.0)
+        self._spin_slice_depth_radius_factor.setSingleStep(0.1)
+        self._spin_slice_depth_radius_factor.setValue(0.6)
+        self._spin_slice_depth_radius_factor.setToolTip(
+            "Aumenta progressivamente il raggio IDW con la profondita'. 0 = disattivo."
+        )
+        self._spin_slice_min_points = QSpinBox()
+        self._spin_slice_min_points.setRange(1, 12)
+        self._spin_slice_min_points.setValue(1)
+        self._spin_slice_min_points.setToolTip(
+            "Punti minimi per stimare una cella IDW (LAS default = 1)."
+        )
 
         self._chk_smooth = QCheckBox(); self._chk_smooth.setChecked(False)
         self._spin_smooth_sigma = QDoubleSpinBox()
@@ -374,11 +417,16 @@ class GprProfileViewer(QDialog):
         self._spin_smooth_sigma.setValue(1.0); self._spin_smooth_sigma.setEnabled(False)
         self._chk_smooth.toggled.connect(self._spin_smooth_sigma.setEnabled)
 
+        fl_slice.addRow("Estrazione:",         self._cb_slice_extraction)
+        fl_slice.addRow("Processing pre-slice:", self._chk_slice_use_processing)
         fl_slice.addRow("Normalizza canali:",  self._chk_normalize_ch)
         fl_slice.addRow("Filtro ampiezza:",    self._chk_amplitude_filter)
         fl_slice.addRow("  sigma:",            self._spin_amplitude_sigma)
         fl_slice.addRow("IDW anisotropo:",     self._chk_anisotropic_idw)
         fl_slice.addRow("  raggio auto:",      self._chk_auto_radius)
+        fl_slice.addRow("Bilancia profili:",   self._chk_slice_balance_profiles)
+        fl_slice.addRow("Raggio vs profondita':", self._spin_slice_depth_radius_factor)
+        fl_slice.addRow("  min points:",       self._spin_slice_min_points)
         fl_slice.addRow("Fill NoData:",        self._chk_fill_nodata)
         fl_slice.addRow("Smooth gaussiano:",   self._chk_smooth)
         fl_slice.addRow("  sigma:",            self._spin_smooth_sigma)
@@ -386,6 +434,13 @@ class GprProfileViewer(QDialog):
         btn_slice = QPushButton("\U0001f5fa  Crea Timeslice\u2026")
         btn_slice.clicked.connect(self._open_slice_dialog)
         fl_slice.addRow(btn_slice)
+
+        btn_view3d = QPushButton("Apri Viewer 3D...")
+        btn_view3d.setToolTip(
+            "Costruisce un volume 3D dalle timeslice interpolate e apre il viewer PyVista."
+        )
+        btn_view3d.clicked.connect(self._open_3d_viewer)
+        fl_slice.addRow(btn_view3d)
 
         from qgis.PyQt.QtWidgets import QScrollArea, QWidget
         scroll_content = QWidget()
@@ -727,6 +782,7 @@ class GprProfileViewer(QDialog):
         if event.inaxes == self._ax and event.button == 1:
             self._cursor_z = event.ydata
             self._update_dial()
+            self._emit_cursor_moved()
 
     def _on_scroll_zoom(self, event):
         if event.inaxes != self._ax or self._im is None:
@@ -781,22 +837,50 @@ class GprProfileViewer(QDialog):
     def _update_status(self):
         if not self._profiles:
             return
-        prof  = self._profiles[self._prof_idx]
-        ch    = prof.channel(self._ch_idx)
-        east = north = np.nan
-        if (self._cursor_x is not None
-                and len(ch.distances) > 1
-                and self._cursor_x >= 0):
-            idx_t = int(np.searchsorted(ch.distances, self._cursor_x))
-            idx_t = min(idx_t, len(ch.distances) - 1)
-            east  = ch.easting[idx_t]
-            north = ch.northing[idx_t]
+        east, north, _ = self._cursor_world_position()
+        east = float(east) if east is not None else np.nan
+        north = float(north) if north is not None else np.nan
         z_str = f"{self._cursor_z:.3f} m" if self._cursor_z is not None else "\u2014"
         x_str = f"{self._cursor_x:.2f} m" if self._cursor_x is not None else "\u2014"
         self._lbl_status.setText(
             f"Dist: {x_str}  |  Profondit\u00e0: {z_str}  "
             f"|  E {east:.1f}  N {north:.1f}"
         )
+
+    def _cursor_world_position(self):
+        if (
+            not self._profiles
+            or self._cursor_x is None
+            or self._cursor_z is None
+        ):
+            return None, None, None
+        try:
+            prof = self._profiles[self._prof_idx]
+            ch = prof.channel(self._ch_idx)
+        except Exception:
+            return None, None, None
+        if len(ch.distances) < 1:
+            return None, None, None
+        try:
+            idx_t = int(np.searchsorted(ch.distances, self._cursor_x))
+            idx_t = min(max(idx_t, 0), len(ch.distances) - 1)
+            east = float(ch.easting[idx_t])
+            north = float(ch.northing[idx_t])
+            depth = float(self._cursor_z)
+        except Exception:
+            return None, None, None
+        if not (np.isfinite(east) and np.isfinite(north) and np.isfinite(depth)):
+            return None, None, None
+        return east, north, depth
+
+    def _emit_cursor_moved(self):
+        east, north, depth = self._cursor_world_position()
+        if east is None or north is None or depth is None:
+            return
+        try:
+            self.cursor_moved.emit(float(east), float(north), float(depth))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Bridge QGIS
@@ -805,6 +889,39 @@ class GprProfileViewer(QDialog):
     def _flush_canvas_update(self):
         self._update_rubber_band()
         self._update_dial()
+        self._emit_cursor_moved()
+
+    def _to_canvas_point(self, prof, east: float, north: float) -> QgsPointXY:
+        pt = QgsPointXY(float(east), float(north))
+        if self.iface is None:
+            return pt
+        canvas = self.iface.mapCanvas()
+        if canvas is None:
+            return pt
+        try:
+            epsg = int(getattr(prof, "epsg", 0) or 0)
+        except Exception:
+            epsg = 0
+        if epsg <= 0:
+            # Fallback: prova CRS progetto QGIS quando l'EPSG profilo manca.
+            try:
+                src = QgsProject.instance().crs()
+                dst = canvas.mapSettings().destinationCrs()
+                if src.isValid() and dst.isValid() and src != dst:
+                    tr = QgsCoordinateTransform(src, dst, QgsProject.instance())
+                    return tr.transform(pt)
+            except Exception:
+                pass
+            return pt
+        try:
+            src = QgsCoordinateReferenceSystem.fromEpsgId(epsg)
+            dst = canvas.mapSettings().destinationCrs()
+            if not src.isValid() or not dst.isValid() or src == dst:
+                return pt
+            tr = QgsCoordinateTransform(src, dst, QgsProject.instance())
+            return tr.transform(pt)
+        except Exception:
+            return pt
 
     def _update_rubber_band(self):
         if self._cursor_x is None or not self._profiles or self.iface is None:
@@ -821,11 +938,13 @@ class GprProfileViewer(QDialog):
         if self._rb_point is None:
             self._rb_point = QgsRubberBand(canvas, QgsWkbTypes.PointGeometry)
             self._rb_point.setColor(QColor(255, 220, 0))
-            self._rb_point.setIconSize(12)
-            self._rb_point.setWidth(3)
+        self._rb_point.setIconSize(12)
+        self._rb_point.setWidth(3)
+        self._rb_point.setVisible(True)
         self._rb_point.reset(QgsWkbTypes.PointGeometry)
+        pt_canvas = self._to_canvas_point(prof, ch.easting[idx_t], ch.northing[idx_t])
         self._rb_point.addPoint(
-            QgsPointXY(ch.easting[idx_t], ch.northing[idx_t]), True
+            pt_canvas, True
         )
 
     def _draw_profile_line_on_canvas(self):
@@ -838,16 +957,43 @@ class GprProfileViewer(QDialog):
             self._rb_line = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
             self._rb_line.setColor(QColor(255, 165, 0))
             self._rb_line.setWidth(2)
+            self._rb_line.setVisible(True)
         else:
             self._rb_line.reset(QgsWkbTypes.LineGeometry)
         for i in range(len(ch.easting)):
+            pt_canvas = self._to_canvas_point(prof, ch.easting[i], ch.northing[i])
             self._rb_line.addPoint(
-                QgsPointXY(ch.easting[i], ch.northing[i]),
+                pt_canvas,
                 i == len(ch.easting) - 1
             )
 
+    def _get_cached_catalog(self, project_root: str):
+        if not project_root:
+            return None
+        cat_path = os.path.join(project_root, "metadata", "project_catalog.json")
+        try:
+            mtime = float(os.path.getmtime(cat_path))
+        except Exception:
+            mtime = None
+        needs_reload = (
+            self._cached_catalog is None
+            or self._cached_catalog_pr != project_root
+            or self._cached_catalog_mtime != mtime
+        )
+        if needs_reload:
+            from .project_catalog import load_catalog
+
+            self._cached_catalog = load_catalog(project_root)
+            self._cached_catalog_pr = project_root
+            self._cached_catalog_mtime = mtime
+        return self._cached_catalog
+
     def _update_dial(self):
         if self._cursor_z is None or self.plugin is None:
+            return
+        settings = getattr(self.plugin, "settings", None)
+        settings_key = getattr(self.plugin, "settings_key_active_project", None)
+        if settings is None or not settings_key:
             return
         dlg = getattr(self.plugin, "dlg", None)
         if dlg is None:
@@ -856,12 +1002,12 @@ class GprProfileViewer(QDialog):
         if dial is None:
             return
         try:
-            from .project_catalog import load_catalog
-            pr = (self.plugin.settings.value(
-                self.plugin.settings_key_active_project, "", type=str) or "").strip()
+            pr = (settings.value(settings_key, "", type=str) or "").strip()
             if not pr:
                 return
-            catalog  = load_catalog(pr)
+            catalog = self._get_cached_catalog(pr)
+            if not isinstance(catalog, dict):
+                return
             group_id = getattr(self.plugin, "_active_group_id", None)
             if group_id is None:
                 return
@@ -895,12 +1041,17 @@ class GprProfileViewer(QDialog):
     def get_slice_params(self) -> dict:
         return {
             "normalize_channels":  self._chk_normalize_ch.isChecked(),
+            "extraction_mode":     str(self._cb_slice_extraction.currentData() or "las_like"),
+            "use_processing":      self._chk_slice_use_processing.isChecked(),
             "amplitude_sigma":     (
                 float(self._spin_amplitude_sigma.value())
                 if self._chk_amplitude_filter.isChecked() else None
             ),
             "use_anisotropic_idw": self._chk_anisotropic_idw.isChecked(),
             "auto_radius":         self._chk_auto_radius.isChecked(),
+            "balance_profiles":    self._chk_slice_balance_profiles.isChecked(),
+            "depth_radius_factor": float(self._spin_slice_depth_radius_factor.value()),
+            "min_points":          int(self._spin_slice_min_points.value()),
             "fill_nodata":         self._chk_fill_nodata.isChecked(),
             "smooth_sigma":        (
                 float(self._spin_smooth_sigma.value())
@@ -922,11 +1073,174 @@ class GprProfileViewer(QDialog):
                 "Funzione disponibile dal plugin principale."
             )
 
+    def _open_3d_viewer(self):
+        if not self._profiles:
+            QMessageBox.information(
+                self,
+                "Nessun profilo",
+                "Importa almeno un file .ogpr prima di aprire il viewer 3D.",
+            )
+            return
+
+        try:
+            from .gpr_3d_viewer_dialog import Gpr3dViewerDialog
+            from .gpr_ogpr_slicer import compute_ogpr_slice_grids
+            from .gpr_volume_3d import build_3d_volume
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Viewer 3D",
+                f"Impossibile inizializzare il viewer 3D:\n{exc}",
+            )
+            return
+
+        depth_max = max(float(getattr(p, "depth_max_m", 0.0) or 0.0) for p in self._profiles)
+        n_channels = max(int(getattr(p, "n_channels", 1) or 1) for p in self._profiles)
+
+        params = None
+        if self.plugin is not None and hasattr(self.plugin, "_ask_ogpr_slice_params"):
+            try:
+                params = self.plugin._ask_ogpr_slice_params(
+                    profiles=self._profiles,
+                    n_channels=n_channels,
+                    depth_max_m=depth_max,
+                    default_group="gpr_volume3d_preview",
+                    saved=None,
+                    slice_params=self.get_slice_params(),
+                )
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Viewer 3D",
+                    f"Errore nel dialog parametri 3D:\n{exc}",
+                )
+                return
+            if params is None:
+                return
+        else:
+            # Fallback sicuro quando il plugin principale non e' disponibile.
+            params = {
+                "channel": int(self._ch_idx),
+                "combine_method": "mean",
+                "z_min": 0.0,
+                "z_max": max(depth_max, 0.1),
+                "z_step": 0.05,
+                "resolution": 0.10,
+                "radius": 0.10 * (2.0 ** 0.5),
+                "group_name": "gpr_volume3d_preview",
+            }
+
+        extra = self.get_slice_params()
+        try:
+            grids, meta = compute_ogpr_slice_grids(
+                profiles=self._profiles,
+                channel=int(params["channel"]),
+                combine_method=str(params["combine_method"]),
+                resolution=float(params["resolution"]),
+                z_step=float(params["z_step"]),
+                z_min=float(params["z_min"]),
+                z_max=float(params["z_max"]),
+                radius=float(params["radius"]),
+                normalize_channels=bool(extra.get("normalize_channels", False)),
+                extraction_mode=str(extra.get("extraction_mode", "las_like") or "las_like"),
+                use_processing=bool(extra.get("use_processing", False)),
+                amplitude_sigma=extra.get("amplitude_sigma"),
+                use_anisotropic_idw=bool(extra.get("use_anisotropic_idw", False)),
+                auto_radius=bool(extra.get("auto_radius", False)),
+                min_points=int(extra.get("min_points", 1) or 1),
+                fill_nodata=bool(extra.get("fill_nodata", False)),
+                smooth_sigma=float(extra.get("smooth_sigma", 0.0) or 0.0),
+                depth_radius_factor=float(extra.get("depth_radius_factor", 0.6) or 0.0),
+                balance_profiles=bool(extra.get("balance_profiles", True)),
+                emit_diagnostics=True,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Viewer 3D",
+                f"Errore durante il calcolo volume 3D:\n{exc}",
+            )
+            return
+
+        if not grids:
+            QMessageBox.warning(
+                self,
+                "Viewer 3D",
+                "Nessuna slice disponibile per costruire il volume 3D.",
+            )
+            return
+
+        try:
+            volume = build_3d_volume(grids, meta)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Viewer 3D",
+                f"Impossibile costruire il volume 3D:\n{exc}",
+            )
+            return
+
+        meta_3d = dict(meta or {})
+        meta_3d.update({
+            "n_z": int(volume.shape[0]),
+            "n_y": int(volume.shape[1]),
+            "n_x": int(volume.shape[2]),
+            "z_step": float(params["z_step"]),
+            "z_min": float(params["z_min"]),
+            "z_max": float(params["z_max"]),
+        })
+
+        if self._gpr_3d_viewer is not None:
+            try:
+                self.cursor_moved.disconnect(self._gpr_3d_viewer.update_cursor_position)
+            except Exception:
+                pass
+            try:
+                self._gpr_3d_viewer.close()
+            except Exception:
+                pass
+            self._gpr_3d_viewer = None
+
+        try:
+            viewer = Gpr3dViewerDialog(
+                volume=volume,
+                meta=meta_3d,
+                profiles=self._profiles,
+                parent=self,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Viewer 3D",
+                f"Impossibile aprire il viewer 3D:\n{exc}",
+            )
+            return
+
+        self._gpr_3d_viewer = viewer
+        try:
+            self.cursor_moved.connect(viewer.update_cursor_position)
+        except Exception:
+            pass
+        self._emit_cursor_moved()
+        viewer.show()
+        viewer.raise_()
+        viewer.activateWindow()
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
+        if self._gpr_3d_viewer is not None:
+            try:
+                self.cursor_moved.disconnect(self._gpr_3d_viewer.update_cursor_position)
+            except Exception:
+                pass
+            try:
+                self._gpr_3d_viewer.close()
+            except Exception:
+                pass
+            self._gpr_3d_viewer = None
         for rb in (self._rb_point, self._rb_line):
             if rb is not None:
                 try:

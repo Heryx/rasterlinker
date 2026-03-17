@@ -3,8 +3,9 @@
 OGPR profiles -> GeoTIFF timeslice pipeline.
 
 Flow summary:
-  - Apply pipeline per channel, compute Hilbert envelope for amplitude
-    extraction (fallback to abs if SciPy missing).
+  - Default LAS-like extraction: abs(amplitude) per sample window
+    without forcing dewow/bg/agc normalization.
+  - Optional processing + Hilbert envelope mode when requested.
   - Aggregate points per depth window and interpolate via IDW
     (isotropic or anisotropic).
   - Support preview-in-RAM (compute grids without I/O) and
@@ -89,6 +90,69 @@ def _normalize_channels(ampl_3d: np.ndarray) -> np.ndarray:
     return out
 
 
+def _has_plausible_geo_xy(x: np.ndarray, y: np.ndarray) -> bool:
+    if x.size == 0 or y.size == 0:
+        return False
+    finite = np.isfinite(x) & np.isfinite(y)
+    if float(finite.mean()) < 0.95:
+        return False
+    xf = x[finite].astype(np.float64, copy=False)
+    yf = y[finite].astype(np.float64, copy=False)
+    if xf.size < 2:
+        return False
+    span = float(np.ptp(xf) + np.ptp(yf))
+    if not np.isfinite(span) or span < 1e-6:
+        return False
+    return True
+
+
+def _synthetic_profile_xy(ch, prof, profile_idx: int) -> tuple[np.ndarray, np.ndarray]:
+    n = int(getattr(ch, "data", np.empty((0, 0))).shape[1] or 0)
+    if n <= 0:
+        return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
+
+    dist = np.asarray(getattr(ch, "distances", []), dtype=np.float64)
+    if dist.size != n or not np.isfinite(dist).all():
+        step = float(getattr(prof, "sampling_step_m", 0.1) or 0.1)
+        if not np.isfinite(step) or step <= 0:
+            step = 0.1
+        dist = np.arange(n, dtype=np.float64) * step
+    else:
+        d0 = float(dist[0])
+        if not np.isfinite(d0):
+            d0 = 0.0
+        dist = dist - d0
+        if dist[-1] <= 0:
+            step = float(np.median(np.diff(dist))) if dist.size > 1 else 0.1
+            if not np.isfinite(step) or step <= 0:
+                step = 0.1
+            dist = np.arange(n, dtype=np.float64) * step
+
+    dx = np.diff(dist)
+    dx = dx[np.isfinite(dx) & (dx > 1e-6)]
+    trace_step = float(np.median(dx)) if dx.size else 0.1
+    line_spacing = max(0.5, trace_step * 10.0)
+
+    x = dist.astype(np.float64, copy=False)
+    y = np.full(n, float(profile_idx) * line_spacing, dtype=np.float64)
+    return x, y
+
+
+def _resample_vec_to_n(vec: np.ndarray, n: int) -> np.ndarray:
+    arr = np.asarray(vec, dtype=np.float64)
+    if n <= 0:
+        return np.zeros(0, dtype=np.float64)
+    if arr.size == n:
+        return arr.astype(np.float64, copy=False)
+    if arr.size == 0:
+        return np.zeros(n, dtype=np.float64)
+    if arr.size == 1:
+        return np.full(n, float(arr[0]), dtype=np.float64)
+    src = np.linspace(0.0, 1.0, arr.size, dtype=np.float64)
+    dst = np.linspace(0.0, 1.0, n, dtype=np.float64)
+    return np.interp(dst, src, arr).astype(np.float64)
+
+
 def _remove_amplitude_outliers(
     x: np.ndarray, y: np.ndarray, values: np.ndarray, n_sigma: float = 3.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -103,6 +167,47 @@ def _remove_amplitude_outliers(
         return x, y, values
     mask = np.abs(values - mean) <= n_sigma * std
     return x[mask], y[mask], values[mask]
+
+
+def _amplitude_diagnostics(values: np.ndarray, hist_bins: int = 10) -> dict:
+    arr = np.asarray(values, dtype=np.float64)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return {"count": 0}
+
+    mn = float(np.nanmin(finite))
+    mx = float(np.nanmax(finite))
+    mean = float(np.nanmean(finite))
+    std = float(np.nanstd(finite))
+    p01, p05, p50, p95, p99 = [float(v) for v in np.nanpercentile(finite, [1, 5, 50, 95, 99])]
+
+    try:
+        bins = int(hist_bins)
+    except Exception:
+        bins = 10
+    bins = max(4, min(64, bins))
+
+    lo, hi = p01, p99
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo, hi = mn, mx
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo, hi = -1.0, 1.0
+
+    counts, edges = np.histogram(finite, bins=bins, range=(lo, hi))
+    return {
+        "count": int(finite.size),
+        "min": mn,
+        "max": mx,
+        "mean": mean,
+        "std": std,
+        "p01": p01,
+        "p05": p05,
+        "p50": p50,
+        "p95": p95,
+        "p99": p99,
+        "hist_counts": [int(v) for v in counts.tolist()],
+        "hist_edges": [float(v) for v in edges.tolist()],
+    }
 
 
 def _estimate_acquisition_direction(x: np.ndarray, y: np.ndarray) -> float:
@@ -135,6 +240,40 @@ def _estimate_interline_radius(
     }
 
 
+def _depth_adaptive_radius(
+    base_radius: float,
+    z_center: float,
+    z_max: float,
+    depth_factor: float = 0.6,
+) -> float:
+    radius = float(base_radius)
+    if not np.isfinite(radius) or radius <= 0.0:
+        return 1e-6
+    try:
+        df = float(depth_factor)
+    except Exception:
+        df = 0.0
+    if not np.isfinite(df) or df <= 0.0:
+        return radius
+    try:
+        zmax = float(z_max)
+    except Exception:
+        zmax = 0.0
+    if not np.isfinite(zmax) or zmax <= 0.0:
+        return radius
+    try:
+        zc = float(z_center)
+    except Exception:
+        zc = 0.0
+    if not np.isfinite(zc):
+        zc = 0.0
+    zc = min(max(zc, 0.0), zmax)
+    scale = 1.0 + df * (zc / max(zmax, 1e-9))
+    if not np.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
+    return radius * scale
+
+
 def _fill_nodata_grid(grid: np.ndarray, max_distance: int = 5) -> np.ndarray:
     from scipy.ndimage import distance_transform_edt
     nan_mask = np.isnan(grid)
@@ -165,7 +304,7 @@ def _smooth_grid_gaussian(grid: np.ndarray, sigma: float = 1.0) -> np.ndarray:
 
 
 def _bin_with_idw(
-    x_pts, y_pts, i_pts, x_min, y_min, n_x, n_y, resolution, radius, power=2.0, min_points=3
+    x_pts, y_pts, i_pts, x_min, y_min, n_x, n_y, resolution, radius, power=2.0, min_points=1
 ):
     from scipy.spatial import cKDTree
     gx = x_min + np.arange(n_x) * resolution
@@ -190,8 +329,8 @@ def _bin_with_idw(
 
 
 def _bin_with_idw_anisotropic(
-    x_pts, y_pts, i_pts, x_min, y_min, n_x, n_y, resolution, radius, power=2.0, min_points=3,
-    anisotropy_ratio=1.0, anisotropy_angle=0.0,
+    x_pts, y_pts, i_pts, x_min, y_min, n_x, n_y, resolution, radius, power=2.0, min_points=1,
+    anisotropy_ratio=1.0, anisotropy_angle=0.0, max_points_per_cell=4096,
 ):
     from scipy.spatial import cKDTree
     if anisotropy_ratio <= 0:
@@ -216,6 +355,12 @@ def _bin_with_idw_anisotropic(
             continue
         idx = np.asarray(idx_list, dtype=np.int64)
         cx, cy = gpts[k]
+        if max_points_per_cell and idx.size > int(max_points_per_cell):
+            # Cap neighbors in dense areas to avoid pathological anisotropic costs.
+            keep_n = int(max_points_per_cell)
+            d2 = (x_pts[idx] - cx) ** 2 + (y_pts[idx] - cy) ** 2
+            keep = np.argpartition(d2, keep_n - 1)[:keep_n]
+            idx = idx[keep]
         d = _ad(x_pts[idx], y_pts[idx], cx, cy)
         in_r = d <= radius
         if in_r.sum() < min_points:
@@ -288,16 +433,44 @@ def _process_profiles(
     combine_method: str,
     params: dict,
     normalize_channels: bool,
+    extraction_mode: str = "las_like",
+    use_processing: bool = False,
 ) -> list[tuple]:
-    """Process profiles and return list of (prof, ch_ref, ampl_3d).
+    """Process profiles and return list of (prof, x_ref, y_ref, ampl_3d).
 
-    Applies the pipeline per channel, computes Hilbert envelope (fallback to abs)
-    and optionally normalizes channels.
+    Applies optional processing per channel and extracts amplitudes according to
+    extraction_mode:
+      - las_like: abs(amplitude), no envelope
+      - envelope: Hilbert envelope
+      - signed: keep signed processed trace
     """
     from .gpr_processing import apply_pipeline, apply_pre_bg_pipeline
 
+    mode = str(extraction_mode or "las_like").strip().lower()
+    use_proc = bool(use_processing)
+
+    if not profiles:
+        return []
+
+    # Coordinate validity per profilo: se nessun profilo e' georiferito, usa
+    # coordinate sintetiche profilo/traccia per mantenere una griglia coerente.
+    valid_geo_flags = []
+    for prof in profiles:
+        n_ch = int(getattr(prof, "n_channels", 0) or 0)
+        coord_idx = 0 if channel < 0 else min(channel, max(0, n_ch - 1))
+        try:
+            ch_geo = prof.channel(coord_idx)
+            ok_geo = _has_plausible_geo_xy(
+                np.asarray(ch_geo.easting, dtype=np.float64),
+                np.asarray(ch_geo.northing, dtype=np.float64),
+            )
+        except Exception:
+            ok_geo = False
+        valid_geo_flags.append(ok_geo)
+    use_synthetic_coords = not any(valid_geo_flags)
+
     bg_reference = None
-    if params.get("bg_removal", True) and params.get("bg_mode") == "grid_by_grid":
+    if use_proc and params.get("bg_removal", True) and params.get("bg_mode") == "grid_by_grid":
         _pre_traces = []
         for prof in profiles:
             n_ch = prof.n_channels
@@ -312,29 +485,62 @@ def _process_profiles(
             bg_reference = stacked.mean(axis=1).astype(np.float64)
 
     processed = []
-    for prof in profiles:
+    for p_idx, prof in enumerate(profiles):
         n_ch = prof.n_channels
-        ch_ref = prof.channel(0)
+        coord_idx = 0 if channel < 0 else min(channel, n_ch - 1)
+        ch_ref = prof.channel(coord_idx)
         ch_list = list(range(n_ch)) if channel < 0 else [min(channel, n_ch - 1)]
         proc_channels = []
         for ci in ch_list:
             ch = prof.channel(ci)
-            raw = ch.data.copy()
-            try:
-                proc = apply_pipeline(
-                    raw, params, dt_ns=prof.dt_ns, bg_reference_trace=bg_reference
-                )
-            except Exception as exc:
-                print(f"[OGPR slicer] pipeline error ch{ci} in {getattr(prof, 'path', '')}: {exc}")
-                proc = np.abs(raw).astype(np.float32)
-            # compute envelope (hilbert) for amplitude extraction
-            env = _envelope(proc)
-            proc_channels.append(env)
+            raw = ch.data.astype(np.float32, copy=False)
+            if use_proc:
+                try:
+                    proc = apply_pipeline(
+                        raw.copy(),
+                        params,
+                        dt_ns=prof.dt_ns,
+                        bg_reference_trace=bg_reference,
+                        normalize_output=False,
+                    )
+                except Exception as exc:
+                    print(f"[OGPR slicer] pipeline error ch{ci} in {getattr(prof, 'path', '')}: {exc}")
+                    proc = raw
+            else:
+                proc = raw
+
+            if mode in {"envelope", "hilbert"}:
+                ampl = _envelope(proc)
+            elif mode in {"signed", "signed_amp"}:
+                ampl = proc.astype(np.float32, copy=False)
+            else:
+                # LAS-like: usa ampiezza assoluta direttamente dai campioni.
+                ampl = np.abs(proc).astype(np.float32, copy=False)
+            proc_channels.append(ampl)
 
         ampl_3d = np.stack(proc_channels, axis=2)
+        n_traces = int(ampl_3d.shape[1])
+
+        if use_synthetic_coords:
+            x_ref, y_ref = _synthetic_profile_xy(ch_ref, prof, p_idx)
+        else:
+            x_ref = np.asarray(ch_ref.easting, dtype=np.float64)
+            y_ref = np.asarray(ch_ref.northing, dtype=np.float64)
+            finite = np.isfinite(x_ref) & np.isfinite(y_ref)
+            if finite.any() and not np.all(finite):
+                idx = np.arange(x_ref.size, dtype=np.float64)
+                idx_ok = np.where(finite)[0].astype(np.float64)
+                x_ref = np.interp(idx, idx_ok, x_ref[finite]).astype(np.float64)
+                y_ref = np.interp(idx, idx_ok, y_ref[finite]).astype(np.float64)
+            elif not finite.any():
+                x_ref, y_ref = _synthetic_profile_xy(ch_ref, prof, p_idx)
+
+        x_ref = _resample_vec_to_n(x_ref, n_traces)
+        y_ref = _resample_vec_to_n(y_ref, n_traces)
+
         if normalize_channels and ampl_3d.shape[2] > 1:
             ampl_3d = _normalize_channels(ampl_3d)
-        processed.append((prof, ch_ref, ampl_3d))
+        processed.append((prof, x_ref, y_ref, ampl_3d))
     return processed
 
 
@@ -347,8 +553,15 @@ def _build_grid_params(
     anisotropy_ratio: float | None,
     anisotropy_angle: float | None,
 ) -> dict:
-    all_e = np.concatenate([ch.easting for _, ch, _ in processed])
-    all_n = np.concatenate([ch.northing for _, ch, _ in processed])
+    all_e = np.concatenate([x for _, x, _, _ in processed])
+    all_n = np.concatenate([y for _, _, y, _ in processed])
+    finite = np.isfinite(all_e) & np.isfinite(all_n)
+    if finite.any():
+        all_e = all_e[finite]
+        all_n = all_n[finite]
+    else:
+        all_e = np.array([0.0, 1.0], dtype=np.float64)
+        all_n = np.array([0.0, 1.0], dtype=np.float64)
     x_min = float(all_e.min())
     x_max = float(all_e.max())
     y_min = float(all_n.min())
@@ -390,28 +603,70 @@ def _interpolate_z_level(
     idw_power: float, min_points: int,
     fill_nodata: bool, fill_nodata_max_distance: int,
     smooth_sigma: float,
-) -> tuple[np.ndarray | None, int]:
-    pts_e, pts_n, pts_a = [], [], []
-    for prof, ch, ampl_3d in processed:
+    balance_profiles: bool = True,
+    amplitude_hist_bins: int = 10,
+) -> tuple[np.ndarray | None, int, dict]:
+    profile_rows = []
+    for prof, x_ref, y_ref, ampl_3d in processed:
         n_s = ampl_3d.shape[0]
         s_lo, s_hi = _depth_to_sample_range(z_from, z_to, prof.depth_max_m, n_s)
         if s_lo >= s_hi:
             continue
-        window = np.abs(ampl_3d[s_lo:s_hi, :, :])
-        per_ch = window.mean(axis=0)
+        window = np.abs(ampl_3d[s_lo:s_hi, :, :]).astype(np.float32, copy=False)
+        if window.size == 0:
+            continue
+        # RMS integra la finestra verticale in modo piu' stabile rispetto alla media.
+        per_ch = np.sqrt(np.mean(window.astype(np.float64) ** 2, axis=0)).astype(np.float32)
         ampl = (per_ch.mean(axis=1) if (per_ch.shape[1] == 1 or combine_method == "mean")
                 else per_ch.max(axis=1)).astype(np.float32)
-        pts_e.append(ch.easting)
-        pts_n.append(ch.northing)
-        pts_a.append(ampl)
-    if not pts_e:
-        return None, 0
+        finite_ampl = ampl[np.isfinite(ampl)]
+        prof_mean = float(np.nanmean(np.abs(finite_ampl))) if finite_ampl.size else float("nan")
+        profile_rows.append((x_ref, y_ref, ampl, prof_mean))
+    if not profile_rows:
+        return None, 0, {"amp_pre": {"count": 0}, "amp_post": {"count": 0}}
+
+    target_mean = float("nan")
+    if balance_profiles:
+        valid_means = [m for _, _, _, m in profile_rows if np.isfinite(m) and m > 1e-12]
+        if valid_means:
+            target_mean = float(np.nanmedian(np.asarray(valid_means, dtype=np.float64)))
+
+    pts_e, pts_n, pts_a = [], [], []
+    for x_ref, y_ref, ampl, prof_mean in profile_rows:
+        ampl_out = ampl
+        if (
+            balance_profiles
+            and np.isfinite(target_mean)
+            and target_mean > 1e-12
+            and np.isfinite(prof_mean)
+            and prof_mean > 1e-12
+        ):
+            scale = target_mean / prof_mean
+            if np.isfinite(scale) and scale > 0.0:
+                ampl_out = (ampl.astype(np.float64) * scale).astype(np.float32)
+        pts_e.append(x_ref)
+        pts_n.append(y_ref)
+        pts_a.append(ampl_out)
+
     e_all = np.concatenate(pts_e)
     n_all = np.concatenate(pts_n)
     a_all = np.concatenate(pts_a)
+    amp_pre = _amplitude_diagnostics(a_all, hist_bins=amplitude_hist_bins)
+    n_before = int(a_all.size)
     if amplitude_sigma is not None:
         e_all, n_all, a_all = _remove_amplitude_outliers(e_all, n_all, a_all, n_sigma=amplitude_sigma)
+    amp_post = _amplitude_diagnostics(a_all, hist_bins=amplitude_hist_bins)
     n_pts = len(e_all)
+    diag = {
+        "amp_pre": amp_pre,
+        "amp_post": amp_post,
+        "n_before_filter": n_before,
+        "n_after_filter": int(n_pts),
+        "sigma_filter": (float(amplitude_sigma) if amplitude_sigma is not None else None),
+    }
+    if n_pts <= 0:
+        return None, 0, diag
+
     if use_anisotropic_idw:
         grid = _bin_with_idw_anisotropic(
             e_all, n_all, a_all,
@@ -432,7 +687,7 @@ def _interpolate_z_level(
         grid = _fill_nodata_grid(grid, max_distance=fill_nodata_max_distance)
     if smooth_sigma > 0:
         grid = _smooth_grid_gaussian(grid, sigma=smooth_sigma)
-    return grid, n_pts
+    return grid, n_pts, diag
 
 
 # ---------------------------------------------------------------------------
@@ -449,24 +704,37 @@ def compute_preview_slice(
     z_step: float = 0.10,
     radius: float | None = None,
     pipeline_params: dict | None = None,
-    normalize_channels: bool = True,
+    normalize_channels: bool = False,
+    extraction_mode: str = "las_like",
+    use_processing: bool = False,
     amplitude_sigma: float | None = None,
     use_anisotropic_idw: bool = False,
     auto_radius: bool = False,
     anisotropy_ratio: float | None = None,
     anisotropy_angle: float | None = None,
     idw_power: float = 2.0,
-    min_points: int = 3,
+    min_points: int = 1,
     fill_nodata: bool = False,
     fill_nodata_max_distance: int = 5,
     smooth_sigma: float = 0.0,
+    depth_radius_factor: float = 0.6,
+    balance_profiles: bool = True,
+    amplitude_hist_bins: int = 10,
 ) -> dict | None:
     """Compute a single timeslice without writing to disk; used for preview dialog."""
     from .gpr_processing import DEFAULT_PIPELINE
     if not profiles:
         return None
-    params = {**DEFAULT_PIPELINE, **(pipeline_params or {})}
-    processed = _process_profiles(profiles, channel, combine_method, params, normalize_channels)
+    params = {**DEFAULT_PIPELINE, **(pipeline_params or {})} if use_processing else {}
+    processed = _process_profiles(
+        profiles,
+        channel,
+        combine_method,
+        params,
+        normalize_channels,
+        extraction_mode=extraction_mode,
+        use_processing=use_processing,
+    )
     if not processed:
         return None
     gp = _build_grid_params(
@@ -476,20 +744,35 @@ def compute_preview_slice(
     )
     z_from = z_center - z_step / 2.0
     z_to = z_center + z_step / 2.0
-    grid, n_pts = _interpolate_z_level(
-        processed, z_from, z_to, combine_method, gp, resolution,
+    z_max_depth = max(prof.depth_max_m for prof, _, _, _ in processed)
+    radius_z = _depth_adaptive_radius(gp["radius"], float(z_center), float(z_max_depth), depth_radius_factor)
+    gp_slice = dict(gp)
+    gp_slice["radius"] = radius_z
+    grid, n_pts, amp_diag = _interpolate_z_level(
+        processed, z_from, z_to, combine_method, gp_slice, resolution,
         amplitude_sigma, use_anisotropic_idw,
         idw_power, min_points,
         fill_nodata, fill_nodata_max_distance, smooth_sigma,
+        balance_profiles=balance_profiles,
+        amplitude_hist_bins=amplitude_hist_bins,
     )
     if grid is None or n_pts == 0:
         return None
     n_valid = int(np.count_nonzero(~np.isnan(grid)))
-    n_total = gp["n_x"] * gp["n_y"]
+    n_total = gp_slice["n_x"] * gp_slice["n_y"]
+    ratio_for_radius = 1.0
+    if use_anisotropic_idw:
+        try:
+            ratio_for_radius = float(gp_slice.get("eff_ratio", 1.0) or 1.0)
+        except Exception:
+            ratio_for_radius = 1.0
+        if not np.isfinite(ratio_for_radius) or ratio_for_radius <= 0:
+            ratio_for_radius = 1.0
+    effective_radius = float(radius_z) * (max(1.0, ratio_for_radius) if use_anisotropic_idw else 1.0)
     return {
         "grid": grid,
-        "x_min": gp["x_min"],
-        "y_min": gp["y_min"],
+        "x_min": gp_slice["x_min"],
+        "y_min": gp_slice["y_min"],
         "resolution": resolution,
         "z_center": float(z_center),
         "z_from": round(z_from, 6),
@@ -497,8 +780,11 @@ def compute_preview_slice(
         "n_pts": n_pts,
         "n_valid_cells": n_valid,
         "n_total_cells": n_total,
-        "radius": gp["radius"],
+        "radius": float(radius_z),
+        "effective_radius": float(effective_radius),
+        "depth_radius_factor": float(depth_radius_factor),
         "fill_pct": 100.0 * n_valid / max(n_total, 1),
+        "amplitude_diag": amp_diag,
     }
 
 
@@ -517,17 +803,23 @@ def compute_ogpr_slice_grids(
     z_max: float | None = None,
     radius: float | None = None,
     pipeline_params: dict | None = None,
-    normalize_channels: bool = True,
+    normalize_channels: bool = False,
+    extraction_mode: str = "las_like",
+    use_processing: bool = False,
     amplitude_sigma: float | None = None,
     use_anisotropic_idw: bool = False,
     auto_radius: bool = False,
     anisotropy_ratio: float | None = None,
     anisotropy_angle: float | None = None,
     idw_power: float = 2.0,
-    min_points: int = 3,
+    min_points: int = 1,
     fill_nodata: bool = False,
     fill_nodata_max_distance: int = 5,
     smooth_sigma: float = 0.0,
+    emit_diagnostics: bool = True,
+    depth_radius_factor: float = 0.6,
+    balance_profiles: bool = True,
+    amplitude_hist_bins: int = 10,
 ) -> tuple[list[dict], dict]:
     """Compute IDW grids for each slice and return (grids, meta)."""
     from .gpr_processing import DEFAULT_PIPELINE
@@ -535,68 +827,147 @@ def compute_ogpr_slice_grids(
     if not profiles:
         return [], {}
 
-    params = {**DEFAULT_PIPELINE, **(pipeline_params or {})}
+    params = {**DEFAULT_PIPELINE, **(pipeline_params or {})} if use_processing else {}
 
-    processed = _process_profiles(profiles, channel, combine_method, params, normalize_channels)
+    processed = _process_profiles(
+        profiles,
+        channel,
+        combine_method,
+        params,
+        normalize_channels,
+        extraction_mode=extraction_mode,
+        use_processing=use_processing,
+    )
     if not processed:
         return [], {}
 
-    # bounding box and grid params
-    all_e = np.concatenate([ch.easting for _, ch, _ in processed])
-    all_n = np.concatenate([ch.northing for _, ch, _ in processed])
-    x_min = float(all_e.min())
-    x_max = float(all_e.max())
-    y_min = float(all_n.min())
-    y_max = float(all_n.max())
-    n_x = max(2, int(np.round((x_max - x_min) / resolution)) + 1)
-    n_y = max(2, int(np.round((y_max - y_min) / resolution)) + 1)
-    if radius is None:
-        radius = resolution * (2.0 ** 0.5)
-    _aniso_info = None
-    if auto_radius or (use_anisotropic_idw and (anisotropy_ratio is None or anisotropy_angle is None)):
-        _aniso_info = _estimate_interline_radius(all_e, all_n)
-    if auto_radius and _aniso_info is not None:
-        radius = _aniso_info["radius"]
-    eff_ratio = anisotropy_ratio
-    eff_angle = anisotropy_angle
-    if use_anisotropic_idw:
-        if eff_ratio is None:
-            eff_ratio = (_aniso_info or {}).get("anisotropy_ratio", 1.0)
-        if eff_angle is None:
-            eff_angle = (_aniso_info or {}).get("acquisition_angle", 0.0)
-
-    meta = dict(x_min=x_min, y_min=y_min, y_max=y_max, x_max=x_max, n_x=n_x, n_y=n_y, resolution=resolution)
+    gp = _build_grid_params(
+        processed,
+        resolution,
+        radius,
+        auto_radius,
+        use_anisotropic_idw,
+        anisotropy_ratio,
+        anisotropy_angle,
+    )
+    x_min = float(gp["x_min"])
+    x_max = float(gp["x_max"])
+    y_min = float(gp["y_min"])
+    y_max = float(gp["y_max"])
+    n_x = int(gp["n_x"])
+    n_y = int(gp["n_y"])
+    radius = float(gp["radius"])
+    eff_ratio = gp.get("eff_ratio")
+    eff_angle = gp.get("eff_angle")
 
     if z_min is None:
         z_min = 0.0
     if z_max is None:
-        z_max = max(prof.depth_max_m for prof, _, _ in processed)
+        z_max = max(prof.depth_max_m for prof, _, _, _ in processed)
 
     z_levels = np.arange(float(z_min), float(z_max) + z_step * 0.5, float(z_step))
 
     grids = []
+    ratio_for_radius = 1.0
+    if use_anisotropic_idw:
+        try:
+            ratio_for_radius = float(eff_ratio if eff_ratio is not None else 1.0)
+        except Exception:
+            ratio_for_radius = 1.0
+        if not np.isfinite(ratio_for_radius) or ratio_for_radius <= 0:
+            ratio_for_radius = 1.0
+    base_radius = float(radius)
+    effective_radius_base = base_radius * (max(1.0, ratio_for_radius) if use_anisotropic_idw else 1.0)
+    meta = dict(
+        x_min=x_min,
+        y_min=y_min,
+        y_max=y_max,
+        x_max=x_max,
+        n_x=n_x,
+        n_y=n_y,
+        resolution=resolution,
+        radius=float(base_radius),
+        effective_radius=float(effective_radius_base),
+        depth_radius_factor=float(depth_radius_factor),
+        use_anisotropic_idw=bool(use_anisotropic_idw),
+        min_points=int(min_points),
+        balance_profiles=bool(balance_profiles),
+    )
+
     for iz, z_lev in enumerate(z_levels):
         z_from = float(z_lev - z_step / 2.0)
         z_to = float(z_lev + z_step / 2.0)
-        grid, n_pts = _interpolate_z_level(
+        radius_z = _depth_adaptive_radius(base_radius, float(z_lev), float(z_max), depth_radius_factor)
+        effective_radius = radius_z * (max(1.0, ratio_for_radius) if use_anisotropic_idw else 1.0)
+        grid, n_pts, amp_diag = _interpolate_z_level(
             processed, z_from, z_to, combine_method,
             {
                 "x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max,
-                "n_x": n_x, "n_y": n_y, "radius": radius,
+                "n_x": n_x, "n_y": n_y, "radius": radius_z,
                 "eff_ratio": eff_ratio, "eff_angle": eff_angle,
             },
             resolution, amplitude_sigma, use_anisotropic_idw,
             idw_power, min_points, fill_nodata, fill_nodata_max_distance, smooth_sigma,
+            balance_profiles=balance_profiles,
+            amplitude_hist_bins=amplitude_hist_bins,
         )
         if grid is None:
+            if emit_diagnostics:
+                print(
+                    f"[OGPR slicer] slice {iz:04d} z={z_lev:.4f}m skipped: "
+                    f"no points in window [{z_from:.4f}, {z_to:.4f}]"
+                )
             continue
+        n_valid = int(np.count_nonzero(~np.isnan(grid)))
+        n_total = int(grid.size)
+        fill_pct = 100.0 * n_valid / max(n_total, 1)
+        if emit_diagnostics:
+            low_fill = fill_pct < 60.0
+            level = "WARN" if low_fill else "INFO"
+            print(
+                f"[OGPR slicer][{level}] slice {iz:04d} z={z_lev:.4f}m "
+                f"fill_pct={fill_pct:.1f}% valid={n_valid}/{n_total} "
+                f"n_pts={n_pts} radius={float(radius_z):.4f}m "
+                f"effective_radius={effective_radius:.4f}m"
+                + (" -> radius likely too small" if low_fill else "")
+            )
+            amp_post = (amp_diag or {}).get("amp_post", {}) if isinstance(amp_diag, dict) else {}
+            if int(amp_post.get("count", 0) or 0) > 0:
+                print(
+                    f"[OGPR slicer][INFO] slice {iz:04d} amp "
+                    f"p05={float(amp_post.get('p05', 0.0)):.4g} "
+                    f"p95={float(amp_post.get('p95', 0.0)):.4g} "
+                    f"mean={float(amp_post.get('mean', 0.0)):.4g} "
+                    f"std={float(amp_post.get('std', 0.0)):.4g} "
+                    f"hist={amp_post.get('hist_counts', [])}"
+                )
         grids.append({
             "z_lev": float(z_lev),
             "z_from": round(z_from, 6),
             "z_to": round(z_to, 6),
             "index": iz,
             "grid": grid,
+            "n_pts": int(n_pts),
+            "n_valid_cells": n_valid,
+            "n_total_cells": n_total,
+            "fill_pct": float(fill_pct),
+            "radius": float(radius_z),
+            "effective_radius": float(effective_radius),
+            "amplitude_diag": amp_diag,
         })
+
+    if grids:
+        fill_vals = np.asarray([g.get("fill_pct", 0.0) for g in grids], dtype=np.float64)
+        low_fill_count = int(np.count_nonzero(fill_vals < 60.0))
+        meta["fill_pct_mean"] = float(np.nanmean(fill_vals))
+        meta["fill_pct_min"] = float(np.nanmin(fill_vals))
+        meta["fill_pct_low_count"] = low_fill_count
+        meta["fill_pct_low_threshold"] = 60.0
+        if emit_diagnostics and low_fill_count > 0:
+            print(
+                f"[OGPR slicer][WARN] low fill slices: {low_fill_count}/{len(grids)} "
+                f"(threshold < 60%)"
+            )
 
     return grids, meta
 
@@ -661,6 +1032,12 @@ def slice_ogpr_to_tifs(
     radius: float | None = None,
     epsg: int | None = None,
     pipeline_params: dict | None = None,
+    normalize_channels: bool = False,
+    extraction_mode: str = "las_like",
+    use_processing: bool = False,
+    min_points: int = 1,
+    depth_radius_factor: float = 0.6,
+    balance_profiles: bool = True,
 ) -> list[dict]:
     """Legacy entrypoint: compute grids and write to disk."""
     grids, meta = compute_ogpr_slice_grids(
@@ -673,6 +1050,12 @@ def slice_ogpr_to_tifs(
         z_max=z_max,
         radius=radius,
         pipeline_params=pipeline_params,
+        normalize_channels=normalize_channels,
+        extraction_mode=extraction_mode,
+        use_processing=use_processing,
+        min_points=min_points,
+        depth_radius_factor=depth_radius_factor,
+        balance_profiles=balance_profiles,
     )
     if not grids:
         return []

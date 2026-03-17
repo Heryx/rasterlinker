@@ -16,6 +16,7 @@ Flusso:
 from __future__ import annotations
 
 import os
+from collections import Counter
 
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QDialogButtonBox,
@@ -25,6 +26,8 @@ from qgis.PyQt.QtWidgets import (
 from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsProject
 from .project_catalog import parse_depth_from_filename
+
+_DEPTH_PARSE_CONF_THRESHOLD = 0.8
 
 
 class GprOgprVolumeMixin:
@@ -76,7 +79,11 @@ class GprOgprVolumeMixin:
             if candidates:
                 best = max(candidates, key=lambda x: x[0])
                 conf, parsed, src = best
-                if conf >= 0.8 and parsed.get("depth_from") is not None and parsed.get("depth_to") is not None:
+                if (
+                    conf >= _DEPTH_PARSE_CONF_THRESHOLD
+                    and parsed.get("depth_from") is not None
+                    and parsed.get("depth_to") is not None
+                ):
                     default_zmin = parsed.get("depth_from")
                     default_zmax = parsed.get("depth_to")
                 else:
@@ -186,16 +193,22 @@ class GprOgprVolumeMixin:
         profiles: lista di OgprProfile gia' letti da read_ogpr()
         """
         from .gpr_ogpr_slicer import (
-            compute_ogpr_slice_grids,
             load_ogpr_slicer_params,
             save_ogpr_slicer_params,
-            write_grids_to_tifs,
         )
+        from .background_tasks import OgprSliceBuildTask, start_task_with_progress_dialog
 
         if not profiles:
             QMessageBox.information(
                 getattr(self, "dlg", None), "Nessun profilo",
                 "Importa almeno un file .ogpr prima di creare le timeslice.",
+            )
+            return
+        if bool(getattr(self, "_ogpr_slice_task_active", False)):
+            QMessageBox.information(
+                getattr(self, "dlg", None),
+                "Generazione in corso",
+                "Una generazione OGPR->Timeslice e' gia' in esecuzione.",
             )
             return
 
@@ -236,7 +249,23 @@ class GprOgprVolumeMixin:
 
         group_name = params["group_name"]
         output_dir = os.path.join(project_root, "timeslices_2d", group_name)
-        epsg       = QgsProject.instance().crs().postgisSrid() or None
+        epsg = QgsProject.instance().crs().postgisSrid() or None
+        if not epsg:
+            epsg_vals = []
+            for p in profiles:
+                try:
+                    v = int(getattr(p, "epsg", 0) or 0)
+                except Exception:
+                    v = 0
+                if v > 0:
+                    epsg_vals.append(v)
+            if epsg_vals:
+                epsg = int(Counter(epsg_vals).most_common(1)[0][0])
+                if hasattr(self, "_notify_info"):
+                    self._notify_info(
+                        f"CRS progetto non impostato: uso EPSG:{epsg} dai profili OGPR.",
+                        duration=8,
+                    )
 
         ch_label = (
             f"tutti ({params['combine_method']})"
@@ -252,94 +281,112 @@ class GprOgprVolumeMixin:
                 duration=60,
             )
 
-        extra_slice_params = dict(slice_params or {})
-        try:
-            grids, meta = compute_ogpr_slice_grids(
-                profiles=profiles,
-                channel=params["channel"],
-                combine_method=params["combine_method"],
-                resolution=params["resolution"],
-                z_step=params["z_step"],
-                z_min=params["z_min"],
-                z_max=params["z_max"],
-                radius=params["radius"],
-                normalize_channels=bool(extra_slice_params.get("normalize_channels", True)),
-                amplitude_sigma=extra_slice_params.get("amplitude_sigma"),
-                use_anisotropic_idw=bool(extra_slice_params.get("use_anisotropic_idw", False)),
-                auto_radius=bool(extra_slice_params.get("auto_radius", False)),
-                fill_nodata=bool(extra_slice_params.get("fill_nodata", False)),
-                smooth_sigma=float(extra_slice_params.get("smooth_sigma", 0.0) or 0.0),
-            )
-        except Exception as exc:
-            QMessageBox.critical(
-                getattr(self, "dlg", None), "Errore calcolo grids", str(exc)
-            )
-            return
+        # Parametri avanzati: priorita' ai controlli live del viewer; fallback al sidecar.
+        extra_slice_params = dict(saved or {})
+        extra_slice_params.update(slice_params or {})
 
-        if not grids:
-            QMessageBox.warning(
-                getattr(self, "dlg", None), "Nessuna slice prodotta",
-                f"Nessun punto nel range Z [{params['z_min']:.4f}, "
-                f"{params['z_max']:.4f}] m.\n"
-                "Verifica che i profili abbiano coordinate valide.",
-            )
-            return
-
-        try:
-            slices = write_grids_to_tifs(grids, meta, output_dir, epsg=epsg)
-        except Exception as exc:
-            QMessageBox.critical(
-                getattr(self, "dlg", None), "Errore scrittura TIFF", str(exc)
-            )
-            return
-
-        # --- salva parametri sidecar ---
-        save_ogpr_slicer_params(output_dir, {
-            "source_profiles": [p.path for p in profiles],
-            "group_name":      group_name,
-            "channel":         params["channel"],
-            "combine_method":  params["combine_method"],
-            "z_min":           params["z_min"],
-            "z_max":           params["z_max"],
-            "z_step":          params["z_step"],
-            "resolution":      params["resolution"],
-            "radius":          params["radius"],
-            "epsg":            epsg,
-            "n_slices":        len(slices),
-            "normalize_channels": bool(extra_slice_params.get("normalize_channels", True)),
-            "amplitude_sigma": extra_slice_params.get("amplitude_sigma"),
-            "use_anisotropic_idw": bool(extra_slice_params.get("use_anisotropic_idw", False)),
-            "auto_radius": bool(extra_slice_params.get("auto_radius", False)),
-            "fill_nodata": bool(extra_slice_params.get("fill_nodata", False)),
-            "smooth_sigma": float(extra_slice_params.get("smooth_sigma", 0.0) or 0.0),
-        })
-
-        # --- registra nel catalogo (riusa GprVolumeMixin) ---
-        try:
-            self._register_las_slices_in_catalog(
-                project_root, group_name, slices, epsg, reslice=is_reslice
-            )
-        except Exception as exc:
-            QMessageBox.warning(
-                getattr(self, "dlg", None), "Errore catalogo", str(exc)
-            )
-
-        # --- aggiorna UI ---
-        if hasattr(self, "populate_group_list"):
+        def _on_task_done(done_task, ok):
             try:
-                self.populate_group_list()
-            except Exception:
-                pass
+                if not ok:
+                    if bool(getattr(done_task, "cancelled", False)):
+                        QMessageBox.information(
+                            getattr(self, "dlg", None),
+                            "OGPR -> Timeslice",
+                            "Operazione annullata.",
+                        )
+                    else:
+                        err = str(getattr(done_task, "error_message", "") or "Errore sconosciuto")
+                        QMessageBox.critical(
+                            getattr(self, "dlg", None),
+                            "Errore OGPR -> Timeslice",
+                            err,
+                        )
+                    return
 
-        action = "Re-slice" if is_reslice else "Import OGPR\u2192Slice"
-        msg = (
-            f"{action} completato: '{group_name}', "
-            f"{len(slices)} slice, {ch_label}, "
-            f"dz={params['z_step']:.3f}m."
+                slices = list(getattr(done_task, "slices", []) or [])
+                if bool(getattr(done_task, "no_grids", False)) or not slices:
+                    QMessageBox.warning(
+                        getattr(self, "dlg", None), "Nessuna slice prodotta",
+                        f"Nessun punto nel range Z [{params['z_min']:.4f}, "
+                        f"{params['z_max']:.4f}] m.\n"
+                        "Verifica che i profili abbiano coordinate valide.",
+                    )
+                    return
+
+                # --- salva parametri sidecar ---
+                sidecar_params = {
+                    "source_profiles": [p.path for p in profiles],
+                    "group_name":      group_name,
+                    "channel":         params["channel"],
+                    "combine_method":  params["combine_method"],
+                    "z_min":           params["z_min"],
+                    "z_max":           params["z_max"],
+                    "z_step":          params["z_step"],
+                    "resolution":      params["resolution"],
+                    "radius":          params["radius"],
+                    "epsg":            epsg,
+                    "n_slices":        len(slices),
+                    "normalize_channels": bool(extra_slice_params.get("normalize_channels", False)),
+                    "extraction_mode": str(extra_slice_params.get("extraction_mode", "las_like") or "las_like"),
+                    "use_processing": bool(extra_slice_params.get("use_processing", False)),
+                    "use_anisotropic_idw": bool(extra_slice_params.get("use_anisotropic_idw", False)),
+                    "auto_radius": bool(extra_slice_params.get("auto_radius", False)),
+                    "min_points": int(extra_slice_params.get("min_points", 1) or 1),
+                    "fill_nodata": bool(extra_slice_params.get("fill_nodata", False)),
+                    "smooth_sigma": float(extra_slice_params.get("smooth_sigma", 0.0) or 0.0),
+                    "depth_radius_factor": float(extra_slice_params.get("depth_radius_factor", 0.6) or 0.0),
+                    "balance_profiles": bool(extra_slice_params.get("balance_profiles", True)),
+                }
+                if extra_slice_params.get("amplitude_sigma") is not None:
+                    sidecar_params["amplitude_sigma"] = extra_slice_params.get("amplitude_sigma")
+                save_ogpr_slicer_params(output_dir, sidecar_params)
+
+                # --- registra nel catalogo (riusa GprVolumeMixin) ---
+                try:
+                    self._register_las_slices_in_catalog(
+                        project_root, group_name, slices, epsg, reslice=is_reslice
+                    )
+                except Exception as exc:
+                    QMessageBox.warning(
+                        getattr(self, "dlg", None), "Errore catalogo", str(exc)
+                    )
+
+                # --- aggiorna UI ---
+                if hasattr(self, "populate_group_list"):
+                    try:
+                        self.populate_group_list()
+                    except Exception:
+                        pass
+
+                action = "Re-slice" if is_reslice else "Import OGPR->Slice"
+                msg = (
+                    f"{action} completato: '{group_name}', "
+                    f"{len(slices)} slice, {ch_label}, "
+                    f"dz={params['z_step']:.3f}m."
+                )
+                if hasattr(self, "_notify_info"):
+                    self._notify_info(msg, duration=12)
+                else:
+                    QMessageBox.information(
+                        getattr(self, "dlg", None), "Slice completate", msg
+                    )
+            finally:
+                self._ogpr_slice_task_active = False
+
+        build_task = OgprSliceBuildTask(
+            profiles=profiles,
+            params=params,
+            extra_slice_params=extra_slice_params,
+            output_dir=output_dir,
+            epsg=epsg,
+        )
+        self._ogpr_slice_task_active = True
+        start_task_with_progress_dialog(
+            build_task,
+            getattr(self, "dlg", None),
+            "Generazione slice OGPR in corso...",
+            "OGPR -> Timeslice",
+            on_finished=_on_task_done,
         )
         if hasattr(self, "_notify_info"):
-            self._notify_info(msg, duration=12)
-        else:
-            QMessageBox.information(
-                getattr(self, "dlg", None), "Slice completate", msg
-            )
+            self._notify_info("OGPR->Slice avviato in background.", duration=8)

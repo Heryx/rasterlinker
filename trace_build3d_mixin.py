@@ -302,23 +302,30 @@ class TraceBuild3DMixin:
         except Exception:
             return None
 
-        def _part_wkt(part):
+        def _part_segments_wkt(part):
             if len(part) < 2:
-                return None
+                return []
+            segments = []
             coords = []
             for pt in part:
                 point_xy = QgsPointXY(pt.x(), pt.y())
                 dtm_z = self._sample_raster_value(dtm_layer, point_xy, 1)
                 if dtm_z is None:
-                    return None
+                    # Chiude il segmento corrente e riparte: non scarta l'intera traccia.
+                    if len(coords) >= 2:
+                        segments.append(f"({', '.join(coords)})")
+                    coords = []
+                    continue
                 coords.append(f"{pt.x()} {pt.y()} {dtm_z - depth}")
-            if len(coords) < 2:
-                return None
-            return f"({', '.join(coords)})"
+            if len(coords) >= 2:
+                segments.append(f"({', '.join(coords)})")
+            return segments
 
         if geometry.isMultipart():
             parts = geometry.asMultiPolyline()
-            part_wkts = [w for w in (_part_wkt(part) for part in parts) if w]
+            part_wkts = []
+            for part in parts:
+                part_wkts.extend(_part_segments_wkt(part))
             if not part_wkts:
                 return None
             return QgsGeometry.fromWkt(f"MULTILINESTRING Z ({', '.join(part_wkts)})")
@@ -327,10 +334,12 @@ class TraceBuild3DMixin:
         if len(pts) < 2:
             multi = geometry.asMultiPolyline()
             pts = multi[0] if multi else []
-        part_wkt = _part_wkt(pts)
-        if not part_wkt:
+        part_wkts = _part_segments_wkt(pts)
+        if not part_wkts:
             return None
-        return QgsGeometry.fromWkt(f"LINESTRING Z {part_wkt}")
+        if len(part_wkts) == 1:
+            return QgsGeometry.fromWkt(f"LINESTRING Z {part_wkts[0]}")
+        return QgsGeometry.fromWkt(f"MULTILINESTRING Z ({', '.join(part_wkts)})")
 
     def _create_3d_output_layer(self, source_layer, output_name):
         crs_authid = source_layer.crs().authid() if source_layer.crs().isValid() else "EPSG:4326"
