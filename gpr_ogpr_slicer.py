@@ -969,10 +969,11 @@ def _interpolate_z_level(
     if not profile_rows:
         return None, 0, {"amp_pre": {"count": 0}, "amp_post": {"count": 0}}
 
-    # Optional residual balancing per-slice (OFF by default to avoid double scaling
-    # when global inter-profile normalization is already applied in _process_profiles).
+    # Residual per-slice balancing. Disable when global inter-profile balancing
+    # is already active to avoid double scaling.
+    do_per_slice_balance = bool(per_slice_balance) and (not bool(balance_profiles))
     target_mean = float("nan")
-    if balance_profiles and per_slice_balance:
+    if do_per_slice_balance:
         valid_means = [m for _, _, _, m in profile_rows if np.isfinite(m) and m > 1e-12]
         if valid_means:
             target_mean = float(np.nanmedian(np.asarray(valid_means, dtype=np.float64)))
@@ -981,7 +982,7 @@ def _interpolate_z_level(
     for x_ref, y_ref, ampl, prof_mean in profile_rows:
         ampl_out = ampl
         if (
-            balance_profiles
+            do_per_slice_balance
             and np.isfinite(target_mean)
             and target_mean > 1e-12
             and np.isfinite(prof_mean)
@@ -1061,7 +1062,7 @@ def compute_preview_slice(
     use_processing: bool = False,
     amplitude_sigma: float | None = None,
     use_anisotropic_idw: bool = False,
-    auto_radius: bool = False,
+    auto_radius: bool = True,
     anisotropy_ratio: float | None = None,
     anisotropy_angle: float | None = None,
     idw_power: float = 2.0,
@@ -1110,6 +1111,7 @@ def compute_preview_slice(
     )
     if not processed:
         return None
+    per_slice_balance_eff = bool(per_slice_balance) and (not bool(balance_profiles))
     gp = _build_grid_params(
         processed, resolution, radius,
         auto_radius, use_anisotropic_idw,
@@ -1134,7 +1136,7 @@ def compute_preview_slice(
         idw_power, min_points,
         fill_nodata, fill_nodata_max_distance, smooth_sigma,
         balance_profiles=balance_profiles,
-        per_slice_balance=per_slice_balance,
+        per_slice_balance=per_slice_balance_eff,
         amplitude_hist_bins=amplitude_hist_bins,
         topographic_correction=bool(topographic_correction),
         topo_reference_elevation=topo_ref,
@@ -1191,7 +1193,7 @@ def compute_ogpr_slice_grids(
     use_processing: bool = False,
     amplitude_sigma: float | None = None,
     use_anisotropic_idw: bool = False,
-    auto_radius: bool = False,
+    auto_radius: bool = True,
     anisotropy_ratio: float | None = None,
     anisotropy_angle: float | None = None,
     idw_power: float = 2.0,
@@ -1255,6 +1257,12 @@ def compute_ogpr_slice_grids(
             "profiles_geo_skipped": int(proc_diag.get("profiles_geo_skipped", 0)),
             "using_synthetic_coords": bool(proc_diag.get("using_synthetic_coords", False)),
         }
+    per_slice_balance_eff = bool(per_slice_balance) and (not bool(balance_profiles))
+    if bool(per_slice_balance) and bool(balance_profiles) and emit_diagnostics:
+        print(
+            "[OGPR slicer][INFO] per-slice balancing disattivato: "
+            "global balance_profiles e' gia' attivo."
+        )
 
     gp = _build_grid_params(
         processed,
@@ -1323,7 +1331,7 @@ def compute_ogpr_slice_grids(
         use_anisotropic_idw=bool(use_anisotropic_idw),
         min_points=int(min_points),
         balance_profiles=bool(balance_profiles),
-        per_slice_balance=bool(per_slice_balance),
+        per_slice_balance=bool(per_slice_balance_eff),
         fill_nodata_max_distance_m=float(fill_nodata_max_distance),
         pre_slice_bg_removal=bool(pre_slice_bg_removal),
         pre_slice_bg_mode=str(pre_slice_bg_mode or "line_by_line"),
@@ -1355,7 +1363,7 @@ def compute_ogpr_slice_grids(
             resolution, amplitude_sigma, use_anisotropic_idw,
             idw_power, min_points, fill_nodata, fill_nodata_max_distance, smooth_sigma,
             balance_profiles=balance_profiles,
-            per_slice_balance=per_slice_balance,
+            per_slice_balance=per_slice_balance_eff,
             amplitude_hist_bins=amplitude_hist_bins,
             topographic_correction=bool(topographic_correction),
             topo_reference_elevation=topo_ref,

@@ -901,7 +901,7 @@ class GprProfileViewer(QDialog):
         self._chk_amplitude_filter.toggled.connect(self._spin_amplitude_sigma.setEnabled)
 
         self._chk_anisotropic_idw = QCheckBox(); self._chk_anisotropic_idw.setChecked(False)
-        self._chk_auto_radius     = QCheckBox(); self._chk_auto_radius.setChecked(False)
+        self._chk_auto_radius     = QCheckBox(); self._chk_auto_radius.setChecked(True)
         self._chk_fill_nodata     = QCheckBox(); self._chk_fill_nodata.setChecked(False)
         self._chk_slice_balance_profiles = QCheckBox(); self._chk_slice_balance_profiles.setChecked(True)
         self._chk_slice_balance_profiles.setToolTip(
@@ -2981,7 +2981,7 @@ class GprProfileViewer(QDialog):
                 "amplitude_filter": False,
                 "amplitude_sigma": 3.0,
                 "use_anisotropic_idw": False,
-                "auto_radius": False,
+                "auto_radius": True,
                 "balance_profiles": True,
                 "depth_radius_factor": 0.6,
                 "min_points": 1,
@@ -3160,7 +3160,7 @@ class GprProfileViewer(QDialog):
                 use_processing=bool(extra.get("use_processing", False)),
                 amplitude_sigma=extra.get("amplitude_sigma"),
                 use_anisotropic_idw=bool(extra.get("use_anisotropic_idw", False)),
-                auto_radius=bool(extra.get("auto_radius", False)),
+                auto_radius=bool(extra.get("auto_radius", True)),
                 min_points=int(extra.get("min_points", 1) or 1),
                 fill_nodata=bool(extra.get("fill_nodata", False)),
                 smooth_sigma=float(extra.get("smooth_sigma", 0.0) or 0.0),

@@ -319,7 +319,7 @@ class OgprSliceBuildTask(CallbackTask):
                 use_processing=bool(self.extra_slice_params.get("use_processing", False)),
                 amplitude_sigma=self.extra_slice_params.get("amplitude_sigma"),
                 use_anisotropic_idw=bool(self.extra_slice_params.get("use_anisotropic_idw", False)),
-                auto_radius=bool(self.extra_slice_params.get("auto_radius", False)),
+                auto_radius=bool(self.extra_slice_params.get("auto_radius", True)),
                 min_points=int(self.extra_slice_params.get("min_points", 1) or 1),
                 fill_nodata=bool(self.extra_slice_params.get("fill_nodata", False)),
                 smooth_sigma=float(self.extra_slice_params.get("smooth_sigma", 0.0) or 0.0),
