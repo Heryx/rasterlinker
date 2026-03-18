@@ -382,11 +382,11 @@ def _stack_traces(
     except Exception:
         n = 1
     if n <= 1:
-        return np.asarray(data, dtype=np.float32, copy=False)
+        return np.asarray(data, dtype=np.float32)
     n = max(1, min(255, n))
     arr = np.asarray(data, dtype=np.float64)
     if arr.ndim != 2 or arr.shape[1] <= 1:
-        return np.asarray(data, dtype=np.float32, copy=False)
+        return np.asarray(data, dtype=np.float32)
 
     if str(kernel or "boxcar").strip().lower() in {"tri", "triangle", "triangular"}:
         # Triangular weights: 1..k..1
@@ -576,9 +576,9 @@ def _bin_with_idw_ball(
         results = tree.query_ball_point(gpts, r=radius, workers=-1)
     except TypeError:
         results = tree.query_ball_point(gpts, r=radius)
-    i64 = np.asarray(i_pts, dtype=np.float64, copy=False)
-    x_arr = np.asarray(x_pts, dtype=np.float64, copy=False)
-    y_arr = np.asarray(y_pts, dtype=np.float64, copy=False)
+    i64 = np.asarray(i_pts, dtype=np.float64)
+    x_arr = np.asarray(x_pts, dtype=np.float64)
+    y_arr = np.asarray(y_pts, dtype=np.float64)
     pwr = float(power) if np.isfinite(power) and float(power) > 0 else 2.0
     min_pts = max(1, int(min_points))
 
@@ -621,9 +621,9 @@ def _bin_with_idw_anisotropic_ball(
     except TypeError:
         results = tree.query_ball_point(gpts, r=radius * max(1.0, anisotropy_ratio))
 
-    i64 = np.asarray(i_pts, dtype=np.float64, copy=False)
-    x_arr = np.asarray(x_pts, dtype=np.float64, copy=False)
-    y_arr = np.asarray(y_pts, dtype=np.float64, copy=False)
+    i64 = np.asarray(i_pts, dtype=np.float64)
+    x_arr = np.asarray(x_pts, dtype=np.float64)
+    y_arr = np.asarray(y_pts, dtype=np.float64)
     pwr = float(power) if np.isfinite(power) and float(power) > 0 else 2.0
     min_pts = max(1, int(min_points))
     cap_pts = int(max_points_per_cell or 0)
@@ -669,9 +669,9 @@ def _bin_with_idw(
     pwr = float(power) if np.isfinite(power) and float(power) > 0.0 else 2.0
     min_pts = max(1, int(min_points))
 
-    x_arr = np.asarray(x_pts, dtype=np.float64, copy=False)
-    y_arr = np.asarray(y_pts, dtype=np.float64, copy=False)
-    i64 = np.asarray(i_pts, dtype=np.float64, copy=False)
+    x_arr = np.asarray(x_pts, dtype=np.float64)
+    y_arr = np.asarray(y_pts, dtype=np.float64)
+    i64 = np.asarray(i_pts, dtype=np.float64)
 
     tree = cKDTree(np.column_stack([x_arr, y_arr]))
     k = _estimate_idw_knn_k(x_arr, y_arr, r, min_pts, max_k=512)
@@ -741,9 +741,9 @@ def _bin_with_idw_anisotropic(
     max_k = int(max_points_per_cell) if max_points_per_cell else 512
     max_k = max(min_pts, max(8, max_k))
 
-    x_arr = np.asarray(x_pts, dtype=np.float64, copy=False)
-    y_arr = np.asarray(y_pts, dtype=np.float64, copy=False)
-    i64 = np.asarray(i_pts, dtype=np.float64, copy=False)
+    x_arr = np.asarray(x_pts, dtype=np.float64)
+    y_arr = np.asarray(y_pts, dtype=np.float64)
+    i64 = np.asarray(i_pts, dtype=np.float64)
 
     tree = cKDTree(np.column_stack([x_arr, y_arr]))
     k = _estimate_idw_knn_k(x_arr, y_arr, r_search, min_pts, max_k=max_k)
@@ -1991,6 +1991,82 @@ def compute_ogpr_slice_grids(
 # ---------------------------------------------------------------------------
 
 
+def _validate_grid_georef_meta(meta: dict, grid: np.ndarray | None = None) -> None:
+    """Validate georeferencing metadata before writing GeoTIFF outputs."""
+    if not isinstance(meta, dict):
+        raise ValueError("Invalid georef metadata: expected dict.")
+
+    required = ("x_min", "y_min", "y_max", "resolution")
+    missing = [k for k in required if k not in meta]
+    if missing:
+        raise ValueError(f"Invalid georef metadata: missing keys {missing}.")
+
+    try:
+        x_min = float(meta.get("x_min"))
+        y_min = float(meta.get("y_min"))
+        y_max = float(meta.get("y_max"))
+        res = float(meta.get("resolution"))
+    except Exception as exc:
+        raise ValueError(f"Invalid georef metadata numeric fields: {exc}") from exc
+
+    if not np.isfinite(x_min):
+        raise ValueError("Invalid georef metadata: x_min is not finite.")
+    if not np.isfinite(y_min) or not np.isfinite(y_max):
+        raise ValueError("Invalid georef metadata: y_min/y_max must be finite.")
+    if not np.isfinite(res) or res <= 0.0:
+        raise ValueError("Invalid georef metadata: resolution must be > 0.")
+    if y_max <= y_min:
+        raise ValueError("Invalid georef metadata: y_max must be greater than y_min.")
+
+    n_x_meta = meta.get("n_x")
+    n_y_meta = meta.get("n_y")
+    if n_x_meta is not None:
+        try:
+            n_x_meta = int(n_x_meta)
+        except Exception as exc:
+            raise ValueError(f"Invalid georef metadata: n_x is not an integer ({exc}).") from exc
+        if n_x_meta <= 0:
+            raise ValueError("Invalid georef metadata: n_x must be > 0.")
+    if n_y_meta is not None:
+        try:
+            n_y_meta = int(n_y_meta)
+        except Exception as exc:
+            raise ValueError(f"Invalid georef metadata: n_y is not an integer ({exc}).") from exc
+        if n_y_meta <= 0:
+            raise ValueError("Invalid georef metadata: n_y must be > 0.")
+
+    x_max = meta.get("x_max")
+    if x_max is not None:
+        try:
+            x_max = float(x_max)
+        except Exception as exc:
+            raise ValueError(f"Invalid georef metadata: x_max is not numeric ({exc}).") from exc
+        if not np.isfinite(x_max):
+            raise ValueError("Invalid georef metadata: x_max is not finite.")
+        if x_max <= x_min:
+            raise ValueError("Invalid georef metadata: x_max must be greater than x_min.")
+        if n_x_meta is not None:
+            expected_x = x_min + max(0, n_x_meta - 1) * res
+            tol = max(res * 1.5, 1e-6)
+            if abs(expected_x - x_max) > tol:
+                raise ValueError(
+                    "Invalid georef metadata: x_max is not coherent with x_min, n_x and resolution."
+                )
+
+    if grid is not None:
+        arr = np.asarray(grid)
+        if arr.ndim != 2 or arr.size <= 0:
+            raise ValueError("Invalid grid: expected a non-empty 2D array.")
+        if n_x_meta is not None and arr.shape[1] != n_x_meta:
+            raise ValueError(
+                f"Invalid grid width: grid n_x={arr.shape[1]} differs from metadata n_x={n_x_meta}."
+            )
+        if n_y_meta is not None and arr.shape[0] != n_y_meta:
+            raise ValueError(
+                f"Invalid grid height: grid n_y={arr.shape[0]} differs from metadata n_y={n_y_meta}."
+            )
+
+
 def write_grids_to_tifs(
     grids: list[dict],
     meta: dict,
@@ -2000,6 +2076,7 @@ def write_grids_to_tifs(
     """Write precomputed grids to disk as GeoTIFF + QML sidecar."""
     from .gpr_las_slicer import _write_tif_singleband
 
+    _validate_grid_georef_meta(meta)
     os.makedirs(output_dir, exist_ok=True)
     results = []
     x_min = meta["x_min"]
@@ -2011,6 +2088,7 @@ def write_grids_to_tifs(
         z_lev = item["z_lev"]
         iz = item["index"]
         grid = item["grid"]
+        _validate_grid_georef_meta(meta, grid=np.asarray(grid))
         z_label = f"{z_lev:.4f}".replace(".", "_").replace("-", "m")
         tif_name = f"slice_{iz:04d}_z{z_label}.tif"
         tif_path = os.path.join(output_dir, tif_name)
