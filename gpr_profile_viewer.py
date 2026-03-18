@@ -83,6 +83,8 @@ class _RangeGainCurveDialog(QDialog):
         self._max_points = int(max(2, min(32, max_points)))
         self._on_curve_changed = on_curve_changed
         self._drag_idx = None
+        self._selected_idx = None
+        self._did_drag = False
         self._points = self._sanitize(points)
 
         root = QVBoxLayout(self)
@@ -104,10 +106,27 @@ class _RangeGainCurveDialog(QDialog):
             root.addWidget(lbl, 1)
 
         help_lbl = QLabel(
-            "Left drag: sposta punto | Double-click: aggiungi punto | Right-click: elimina punto interno"
+            "X=Gain, Y=Depth (0 in alto) | Left click: seleziona/drag | Double-click: aggiungi | Right-click: elimina punto interno"
         )
         help_lbl.setWordWrap(True)
         root.addWidget(help_lbl)
+
+        step_row = QHBoxLayout()
+        step_row.addWidget(QLabel("Step:"))
+        self._spin_step = QDoubleSpinBox()
+        self._spin_step.setRange(0.01, 1.0)
+        self._spin_step.setSingleStep(0.01)
+        self._spin_step.setValue(0.05)
+        self._spin_step.setDecimals(2)
+        step_row.addWidget(self._spin_step)
+        self._btn_step_up = QPushButton("▲ Gain +")
+        self._btn_step_down = QPushButton("▼ Gain -")
+        self._btn_step_up.clicked.connect(lambda: self._move_selected(+float(self._spin_step.value())))
+        self._btn_step_down.clicked.connect(lambda: self._move_selected(-float(self._spin_step.value())))
+        step_row.addWidget(self._btn_step_up)
+        step_row.addWidget(self._btn_step_down)
+        step_row.addStretch(1)
+        root.addLayout(step_row)
 
         btns_row = QHBoxLayout()
         self._btn_reset = QPushButton("Reset")
@@ -170,24 +189,42 @@ class _RangeGainCurveDialog(QDialog):
             return
         self._ax.clear()
         p = self._points
-        self._ax.plot(p[:, 0], p[:, 1], color="#2d6ba3", lw=1.4)
-        self._ax.scatter(p[:, 0], p[:, 1], s=40, color="#c0392b", zorder=3)
-        self._ax.set_xlim(-0.02, 1.02)
-        y_top = float(max(10.0, np.nanmax(p[:, 1]) * 1.15))
-        self._ax.set_ylim(0.0, y_top)
+        # X=gain, Y=depth fraction (0 top, 1 bottom).
+        self._ax.plot(p[:, 1], p[:, 0], color="#2d6ba3", lw=1.4)
+        self._ax.scatter(p[:, 1], p[:, 0], s=40, color="#c0392b", zorder=3)
+        x_max = float(max(10.0, np.nanmax(p[:, 1]) * 1.15))
+        self._ax.set_xlim(0.0, x_max)
+        self._ax.set_ylim(1.0, 0.0)
         self._ax.grid(True, ls=":", lw=0.5, alpha=0.7)
-        self._ax.set_xlabel("Depth fraction")
-        self._ax.set_ylabel("Gain")
+        self._ax.set_xlabel("Gain")
+        self._ax.set_ylabel("Depth fraction")
         self._ax.set_title(f"Breakpoints: {len(p)}/{self._max_points}")
+        if self._selected_idx is not None:
+            try:
+                i = int(self._selected_idx)
+                if 0 <= i < len(p):
+                    sel = p[i]
+                    self._ax.scatter(
+                        [float(sel[1])],
+                        [float(sel[0])],
+                        s=80,
+                        color="#ffd000",
+                        edgecolor="#1f1f1f",
+                        linewidths=1.0,
+                        zorder=5,
+                    )
+            except Exception:
+                pass
         self._canvas.draw_idle()
 
     def _nearest_idx(self, x, y):
         p = self._points
         if p.shape[0] <= 0:
             return None, 1e9
-        dx = p[:, 0] - float(x)
-        y_span = max(1e-6, float(np.nanmax(p[:, 1]) - np.nanmin(p[:, 1])))
-        dy = (p[:, 1] - float(y)) / y_span
+        # x=gain, y=depth fraction
+        x_span = max(1e-6, float(np.nanmax(p[:, 1]) - np.nanmin(p[:, 1])))
+        dx = (p[:, 1] - float(x)) / x_span
+        dy = (p[:, 0] - float(y))
         d = np.sqrt(dx * dx + dy * dy)
         idx = int(np.argmin(d))
         return idx, float(d[idx])
@@ -195,15 +232,16 @@ class _RangeGainCurveDialog(QDialog):
     def _on_press(self, event):
         if event is None or event.inaxes != self._ax or event.xdata is None or event.ydata is None:
             return
-        x = float(np.clip(event.xdata, 0.0, 1.0))
-        y = float(np.clip(event.ydata, 0.1, 80.0))
-        idx, dist = self._nearest_idx(x, y)
+        gain = float(np.clip(event.xdata, 0.1, 80.0))
+        depth = float(np.clip(event.ydata, 0.0, 1.0))
+        idx, dist = self._nearest_idx(gain, depth)
 
         # Right click: remove internal point.
         if int(getattr(event, "button", 0) or 0) == 3:
             if idx is not None and dist < 0.05 and idx not in (0, len(self._points) - 1):
                 self._points = np.delete(self._points, idx, axis=0)
                 self._points = self._sanitize(self._points)
+                self._selected_idx = None
                 self._emit_changed()
                 self._redraw()
             return
@@ -211,15 +249,20 @@ class _RangeGainCurveDialog(QDialog):
         # Double left click: add point.
         if bool(getattr(event, "dblclick", False)) and int(getattr(event, "button", 0) or 0) == 1:
             if len(self._points) < self._max_points and (idx is None or dist >= 0.02):
-                self._points = np.vstack([self._points, np.asarray([[x, y]], dtype=np.float64)])
+                self._points = np.vstack([self._points, np.asarray([[depth, gain]], dtype=np.float64)])
                 self._points = self._sanitize(self._points)
+                idx_new, _ = self._nearest_idx(gain, depth)
+                self._selected_idx = idx_new
                 self._emit_changed()
                 self._redraw()
             return
 
-        # Single left click: drag nearest point.
+        # Single left click: select nearest point and enable drag.
         if int(getattr(event, "button", 0) or 0) == 1 and idx is not None and dist < 0.08:
+            self._selected_idx = int(idx)
             self._drag_idx = int(idx)
+            self._did_drag = False
+            self._redraw()
 
     def _on_move(self, event):
         if self._drag_idx is None:
@@ -227,31 +270,47 @@ class _RangeGainCurveDialog(QDialog):
         if event is None or event.inaxes != self._ax or event.xdata is None or event.ydata is None:
             return
         i = int(self._drag_idx)
-        x = float(np.clip(event.xdata, 0.0, 1.0))
-        y = float(np.clip(event.ydata, 0.1, 80.0))
+        gain = float(np.clip(event.xdata, 0.1, 80.0))
+        depth = float(np.clip(event.ydata, 0.0, 1.0))
         p = self._points.copy()
         if i == 0:
-            x = 0.0
+            depth = 0.0
         elif i == (len(p) - 1):
-            x = 1.0
+            depth = 1.0
         else:
             lo = float(p[i - 1, 0] + 1e-4)
             hi = float(p[i + 1, 0] - 1e-4)
             if hi <= lo:
-                x = float(p[i, 0])
+                depth = float(p[i, 0])
             else:
-                x = float(np.clip(x, lo, hi))
-        p[i, 0] = x
-        p[i, 1] = y
+                depth = float(np.clip(depth, lo, hi))
+        p[i, 0] = depth
+        p[i, 1] = gain
         self._points = self._sanitize(p)
+        self._did_drag = True
         self._emit_changed()
         self._redraw()
 
     def _on_release(self, _event):
+        self._did_drag = False
         self._drag_idx = None
+
+    def _move_selected(self, delta: float):
+        if self._selected_idx is None:
+            return
+        i = int(self._selected_idx)
+        p = self._points.copy()
+        if i < 0 or i >= len(p):
+            return
+        p[i, 1] = float(np.clip(p[i, 1] + float(delta), 0.1, 80.0))
+        self._points = self._sanitize(p)
+        self._emit_changed()
+        self._redraw()
 
     def _on_reset(self):
         self._points = np.asarray([(0.0, 1.0), (1.0, 6.0)], dtype=np.float64)
+        self._selected_idx = None
+        self._drag_idx = None
         self._emit_changed()
         self._redraw()
 
@@ -325,6 +384,8 @@ class GprProfileViewer(QMainWindow):
         self._ax_main_bounds_default = None
         self._ax_wiggle_bounds_default = None
         self._last_pipeline_params: dict = {}
+        self._profile_view_initialized: bool = True
+        self._allow_close: bool = False
 
         self._rb_point: Optional[QgsRubberBand] = None
         self._rb_line:  Optional[QgsRubberBand] = None
@@ -1997,6 +2058,7 @@ class GprProfileViewer(QMainWindow):
         # Reset zoom when changing profile to avoid carrying tiny previous windows.
         self._view_xlim = None
         self._view_ylim = None
+        self._profile_view_initialized = False
         self._update_slice_profile_info()
         self._safe_set_text(
             self._lbl_profile,
@@ -2048,6 +2110,15 @@ class GprProfileViewer(QMainWindow):
     def _reload_data(self):
         if not self._profiles:
             return
+        if not self._is_qt_alive(self):
+            return
+        for w in (
+            getattr(self, "_spin_trim_start", None),
+            getattr(self, "_spin_trim_end", None),
+            getattr(self, "_chk_flip_profile", None),
+        ):
+            if not self._is_qt_alive(w):
+                return
         prof = self._profiles[self._prof_idx]
         ch   = prof.channel(self._ch_idx)
         full = ch.data.copy()
@@ -2116,6 +2187,18 @@ class GprProfileViewer(QMainWindow):
     def _apply_processing(self):
         if self._raw_data is None:
             return
+        if not self._is_qt_alive(self):
+            return
+        for w in (
+            getattr(self, "_chk_dewow", None),
+            getattr(self, "_spin_dewow", None),
+            getattr(self, "_chk_timezero", None),
+            getattr(self, "_chk_bg", None),
+            getattr(self, "_chk_agc", None),
+            getattr(self, "_spin_agc", None),
+        ):
+            if not self._is_qt_alive(w):
+                return
         params = self._current_processing_params()
         self._last_pipeline_params = dict(params)
         prof = self._profiles[self._prof_idx]
@@ -2737,9 +2820,47 @@ class GprProfileViewer(QMainWindow):
     def _reset_zoom(self):
         self._view_xlim = None
         self._view_ylim = None
+        # Explicit reset should restore full extent, not the initial short-window view.
+        self._profile_view_initialized = True
         self._slice_view_xlim = None
         self._slice_view_ylim = None
         self._redraw()
+
+    def _axis_pixel_size(self) -> tuple[float, float]:
+        fig_w_px = fig_h_px = None
+        try:
+            if self._canvas_mpl is not None:
+                fig_w_px, fig_h_px = self._canvas_mpl.get_width_height()
+        except Exception:
+            fig_w_px = fig_h_px = None
+        if not (fig_w_px and fig_h_px):
+            fig_w_px = float(self._fig.get_figwidth() * 100.0)
+            fig_h_px = float(self._fig.get_figheight() * 100.0)
+        bbox = self._ax.get_position()
+        ax_w_px = max(1.0, float(fig_w_px) * float(bbox.width))
+        ax_h_px = max(1.0, float(fig_h_px) * float(bbox.height))
+        return float(ax_w_px), float(ax_h_px)
+
+    def _compute_initial_xview(
+        self,
+        dist_max: float,
+        depth_max: float,
+        aspect_factor: float,
+    ) -> tuple[float, float]:
+        if not (np.isfinite(dist_max) and np.isfinite(depth_max)):
+            return (0.0, 1.0)
+        if dist_max <= 0.0 or depth_max <= 0.0:
+            return (0.0, float(max(1.0, dist_max)))
+        ax_w_px, ax_h_px = self._axis_pixel_size()
+        if ax_h_px <= 1e-6:
+            return (0.0, float(dist_max))
+        af = float(np.clip(aspect_factor, 1e-6, 1e6))
+        ideal_dist_window = float((ax_w_px * depth_max) / (ax_h_px * af))
+        ideal_dist_window = float(np.clip(ideal_dist_window, 1.0, dist_max))
+        # Keep full extent for short profiles; constrain only when profile is much longer.
+        if dist_max <= (ideal_dist_window * 1.05):
+            return (0.0, float(dist_max))
+        return (0.0, float(ideal_dist_window))
 
     def _full_x_limits(self) -> tuple[float, float]:
         if self._disp_data is None or not self._profiles:
@@ -2936,6 +3057,13 @@ class GprProfileViewer(QMainWindow):
         interpolation_mode = "bilinear"
         if hasattr(self, "_cb_interp") and self._cb_interp is not None:
             interpolation_mode = str(self._cb_interp.currentData() or "bilinear")
+        ve = 1.0
+        if hasattr(self, "_spin_vertical_exag") and self._spin_vertical_exag is not None:
+            try:
+                ve = float(self._spin_vertical_exag.value())
+            except Exception:
+                ve = 1.0
+        ve = float(np.clip(ve, 0.5, 20.0))
         self._im = self._ax.imshow(
             self._disp_data,
             # Mantieni il riempimento del pannello; la scala reale e' gestita sotto con set_aspect+datalim.
@@ -2948,7 +3076,13 @@ class GprProfileViewer(QMainWindow):
         )
         x_full = (0.0, dist_max)
         y_full = (depth_max, 0.0)
-        x_view = self._view_xlim if self._view_xlim is not None else x_full
+        if self._view_xlim is None:
+            if not bool(getattr(self, "_profile_view_initialized", True)):
+                init_af = ve if real_aspect else 1.0
+                self._view_xlim = self._compute_initial_xview(dist_max, depth_max, init_af)
+            else:
+                self._view_xlim = x_full
+        x_view = self._view_xlim
         y_view = self._view_ylim if self._view_ylim is not None else y_full
         x_view = self._clamp_axis_limits(x_view[0], x_view[1], x_full[0], x_full[1])
         y_view = self._clamp_axis_limits(y_view[0], y_view[1], 0.0, depth_max)
@@ -2957,16 +3091,21 @@ class GprProfileViewer(QMainWindow):
         self._ax.set_xlim(*x_view)
         self._ax.set_ylim(*y_view)
         if real_aspect and dist_max > 1e-9 and depth_max > 1e-9:
-            ve = 1.0
-            if hasattr(self, "_spin_vertical_exag") and self._spin_vertical_exag is not None:
-                try:
-                    ve = float(self._spin_vertical_exag.value())
-                except Exception:
-                    ve = 1.0
             # VE=1.0 keeps metric proportions, VE>1.0 increases vertical emphasis.
             self._ax.set_aspect(float(np.clip(ve, 0.5, 20.0)), adjustable="box")
         else:
-            self._ax.set_aspect("auto", adjustable="box")
+            # In auto mode avoid excessive horizontal stretch on short profiles.
+            ax_w_px, ax_h_px = self._axis_pixel_size()
+            x_range = max(1e-9, float(abs(x_view[1] - x_view[0])))
+            y_range = max(1e-9, float(abs(y_view[0] - y_view[1])))
+            px_per_m_x = ax_w_px / x_range
+            px_per_m_y = ax_h_px / y_range
+            max_ratio = 4.0
+            if px_per_m_x > (px_per_m_y * max_ratio):
+                ratio = float((y_range / x_range) / max_ratio)
+                self._ax.set_aspect(float(np.clip(ratio, 1e-4, 1e4)), adjustable="box")
+            else:
+                self._ax.set_aspect("auto", adjustable="box")
         self._ax.set_xlabel("Distanza (m)")
         self._ax.set_ylabel("Profondit\u00e0 (m)")
         self._ax.set_title(
@@ -2980,6 +3119,7 @@ class GprProfileViewer(QMainWindow):
         self._apply_wiggle_visibility_layout()
         self._sync_xpan_slider()
         self._update_wiggle_plot(draw=False, force=True)
+        self._profile_view_initialized = True
         self._safe_draw_idle(self._canvas_mpl)
         self._redraw_slice_view()
 
@@ -4952,21 +5092,52 @@ class GprProfileViewer(QMainWindow):
     # Cleanup
     # ------------------------------------------------------------------
 
+    def request_close(self):
+        """Force real close/destruction (used by plugin unload)."""
+        self._allow_close = True
+        try:
+            self.close()
+        finally:
+            self._allow_close = False
+
+    def _close_3d_viewer(self):
+        if self._gpr_3d_viewer is None:
+            return
+        try:
+            self.cursor_moved.disconnect(self._gpr_3d_viewer.update_cursor_position)
+        except Exception:
+            pass
+        try:
+            self._gpr_3d_viewer.depth_changed.disconnect(self._on_3d_depth_changed)
+        except Exception:
+            pass
+        try:
+            self._gpr_3d_viewer.close()
+        except Exception:
+            pass
+        self._gpr_3d_viewer = None
+
     def closeEvent(self, event):
-        if self._gpr_3d_viewer is not None:
+        # Default UX: closing hides the window to preserve child widgets/docks.
+        # This avoids stale Python refs to deleted Qt C++ objects on next reopen.
+        if not bool(getattr(self, "_allow_close", False)):
             try:
-                self.cursor_moved.disconnect(self._gpr_3d_viewer.update_cursor_position)
+                if self._processing_dock is not None:
+                    self._save_dock_state(self._processing_dock, "processing")
+                if self._timeslice_dock is not None:
+                    self._save_dock_state(self._timeslice_dock, "timeslice")
             except Exception:
                 pass
             try:
-                self._gpr_3d_viewer.depth_changed.disconnect(self._on_3d_depth_changed)
+                self._close_3d_viewer()
             except Exception:
                 pass
-            try:
-                self._gpr_3d_viewer.close()
-            except Exception:
-                pass
-            self._gpr_3d_viewer = None
+            self.hide()
+            event.ignore()
+            return
+
+        # Real close path (plugin unload).
+        self._close_3d_viewer()
         if self._processing_dock is not None:
             try:
                 self._save_dock_state(self._processing_dock, "processing")

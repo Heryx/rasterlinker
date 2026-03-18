@@ -320,12 +320,25 @@ class GeoSurveyStudioPlugin(
                 "Installa con: pip install matplotlib scipy"
             )
             return
-        if self._gpr_profile_viewer is None:
+        viewer_alive = False
+        if self._gpr_profile_viewer is not None:
+            try:
+                self._gpr_profile_viewer.objectName()
+                viewer_alive = True
+            except RuntimeError:
+                viewer_alive = False
+            except Exception:
+                viewer_alive = False
+        if (self._gpr_profile_viewer is None) or (not viewer_alive):
             self._gpr_profile_viewer = GprProfileViewer(
                 iface=self.iface,
                 plugin=self,
                 parent=self.iface.mainWindow(),
             )
+            try:
+                self._gpr_profile_viewer.destroyed.connect(lambda *_a: setattr(self, "_gpr_profile_viewer", None))
+            except Exception:
+                pass
         self._gpr_profile_viewer.show()
         self._gpr_profile_viewer.raise_()
         self._gpr_profile_viewer.activateWindow()
@@ -337,7 +350,10 @@ class GeoSurveyStudioPlugin(
         # Chiudi viewer GPR se aperto
         if self._gpr_profile_viewer is not None:
             try:
-                self._gpr_profile_viewer.close()
+                if hasattr(self._gpr_profile_viewer, "request_close"):
+                    self._gpr_profile_viewer.request_close()
+                else:
+                    self._gpr_profile_viewer.close()
             except Exception:
                 pass
             self._gpr_profile_viewer = None
