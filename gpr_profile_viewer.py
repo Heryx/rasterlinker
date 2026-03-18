@@ -24,7 +24,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
     QInputDialog,
     QFileDialog, QMessageBox, QSizePolicy,
-    QGroupBox, QFormLayout, QPushButton, QDialogButtonBox,
+    QGroupBox, QFormLayout, QPushButton, QDialogButtonBox, QScrollArea,
 )
 from qgis.core import (
     QgsCoordinateReferenceSystem,
@@ -266,6 +266,10 @@ class GprProfileViewer(QDialog):
         self._view_xlim:   Optional[tuple[float, float]] = None
         self._view_ylim:   Optional[tuple[float, float]] = None
         self._gpr_3d_viewer = None
+        self._processing_dialog = None
+        self._timeslice_dialog = None
+        self._processing_panel_widget = None
+        self._timeslice_panel_widget = None
         self._cached_catalog = None
         self._cached_catalog_pr: Optional[str] = None
         self._cached_catalog_mtime: Optional[float] = None
@@ -407,6 +411,22 @@ class GprProfileViewer(QDialog):
         act_export.triggered.connect(self._export_radargram_image)
         tb.addAction(act_export)
 
+        tb.addSeparator()
+        act_processing = QAction("⚙ Processing", self)
+        act_processing.setToolTip("Apri il pannello Processing in una finestra separata.")
+        act_processing.triggered.connect(self._open_processing_window)
+        tb.addAction(act_processing)
+
+        act_timeslice = QAction("🗺 Timeslice", self)
+        act_timeslice.setToolTip("Apri il pannello Timeslice in una finestra separata.")
+        act_timeslice.triggered.connect(self._open_timeslice_window)
+        tb.addAction(act_timeslice)
+
+        act_view3d = QAction("📦 3D Viewer", self)
+        act_view3d.setToolTip("Apri il viewer 3D delle timeslice.")
+        act_view3d.triggered.connect(self._open_3d_viewer)
+        tb.addAction(act_view3d)
+
         root.addWidget(tb)
 
         center = QHBoxLayout()
@@ -491,12 +511,50 @@ class GprProfileViewer(QDialog):
             lbl.setAlignment(Qt.AlignCenter)
             center.addWidget(lbl, stretch=4)
 
-        panel = self._build_processing_panel()
-        center.addWidget(panel, stretch=1)
+        self._processing_panel_widget, self._timeslice_panel_widget = self._build_processing_panel()
+        self._init_aux_windows()
         root.addLayout(center)
 
         self._lbl_status = QLabel("Importa un file .ogpr per iniziare.")
         root.addWidget(self._lbl_status)
+
+    def _create_aux_window(self, title: str, content: QWidget, width: int = 320, height: int = 760):
+        dlg = QDialog(self, Qt.Window)
+        dlg.setWindowTitle(title)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(content)
+        dlg.resize(int(width), int(height))
+        return dlg
+
+    def _init_aux_windows(self):
+        if self._processing_dialog is None and self._processing_panel_widget is not None:
+            self._processing_dialog = self._create_aux_window(
+                "GPR Processing", self._processing_panel_widget, width=330, height=780
+            )
+        if self._timeslice_dialog is None and self._timeslice_panel_widget is not None:
+            self._timeslice_dialog = self._create_aux_window(
+                "GPR Timeslice", self._timeslice_panel_widget, width=360, height=800
+            )
+
+    def _open_processing_window(self):
+        if self._processing_dialog is None:
+            self._init_aux_windows()
+        if self._processing_dialog is None:
+            return
+        self._processing_dialog.show()
+        self._processing_dialog.raise_()
+        self._processing_dialog.activateWindow()
+
+    def _open_timeslice_window(self):
+        if self._timeslice_dialog is None:
+            self._init_aux_windows()
+        if self._timeslice_dialog is None:
+            return
+        self._timeslice_dialog.show()
+        self._timeslice_dialog.raise_()
+        self._timeslice_dialog.activateWindow()
 
     def _build_processing_panel(self):
         grp = QGroupBox("Processing")
@@ -810,6 +868,24 @@ class GprProfileViewer(QDialog):
         grp_slice = QGroupBox("Timeslice")
         fl_slice  = QFormLayout(grp_slice)
 
+        self._cb_slice_cmap = QComboBox()
+        self._cb_slice_cmap.addItems(GPR_CMAPS)
+        self._cb_slice_cmap.setCurrentText(DEFAULT_CMAP)
+        self._cb_slice_cmap.setToolTip("Colormap dedicata alla vista timeslice (indipendente dal radargramma).")
+        self._spin_slice_vmin_pct = QDoubleSpinBox()
+        self._spin_slice_vmin_pct.setRange(0.0, 49.0)
+        self._spin_slice_vmin_pct.setSingleStep(0.5)
+        self._spin_slice_vmin_pct.setValue(2.0)
+        self._spin_slice_vmin_pct.setToolTip("Percentile minimo per contrasto timeslice.")
+        self._spin_slice_vmax_pct = QDoubleSpinBox()
+        self._spin_slice_vmax_pct.setRange(51.0, 100.0)
+        self._spin_slice_vmax_pct.setSingleStep(0.5)
+        self._spin_slice_vmax_pct.setValue(98.0)
+        self._spin_slice_vmax_pct.setToolTip("Percentile massimo per contrasto timeslice.")
+        self._cb_slice_cmap.currentTextChanged.connect(lambda _v: self._redraw_slice_view(force=True))
+        self._spin_slice_vmin_pct.valueChanged.connect(self._on_slice_clip_changed)
+        self._spin_slice_vmax_pct.valueChanged.connect(self._on_slice_clip_changed)
+
         self._cb_slice_preset = QComboBox()
         self._cb_slice_preset.addItem("Base (default)", "base")
         self._cb_slice_preset.addItem("Qualita'", "quality")
@@ -996,6 +1072,9 @@ class GprProfileViewer(QDialog):
 
         fl_slice.addRow("Preset:",            self._cb_slice_preset)
         fl_slice.addRow("  azione:",          self._btn_slice_preset_apply)
+        fl_slice.addRow("Slice colormap:",    self._cb_slice_cmap)
+        fl_slice.addRow("Slice clip min %:",  self._spin_slice_vmin_pct)
+        fl_slice.addRow("Slice clip max %:",  self._spin_slice_vmax_pct)
         fl_slice.addRow("Estrazione:",         self._cb_slice_extraction)
         fl_slice.addRow("Processing pre-slice:", self._chk_slice_use_processing)
         fl_slice.addRow("BG pre-slice:",       self._chk_slice_bg)
@@ -1064,20 +1143,30 @@ class GprProfileViewer(QDialog):
         fl_slice.addRow("Sync timeslice canvas:", self._chk_timeslice_sync)
         fl_slice.addRow("  crosshair size (m):", self._spin_crosshair_size)
 
-        from qgis.PyQt.QtWidgets import QScrollArea, QWidget
-        scroll_content = QWidget()
-        scroll_layout  = QVBoxLayout(scroll_content)
-        scroll_layout.setContentsMargins(0, 0, 0, 0)
-        scroll_layout.addWidget(grp)
-        scroll_layout.addWidget(grp_slice)
-        scroll_layout.addStretch()
+        proc_content = QWidget()
+        proc_layout = QVBoxLayout(proc_content)
+        proc_layout.setContentsMargins(0, 0, 0, 0)
+        proc_layout.addWidget(grp)
+        proc_layout.addStretch()
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(scroll_content)
-        scroll.setMinimumWidth(230)
-        scroll.setMaximumWidth(300)
-        return scroll
+        processing_scroll = QScrollArea()
+        processing_scroll.setWidgetResizable(True)
+        processing_scroll.setWidget(proc_content)
+        processing_scroll.setMinimumWidth(250)
+        processing_scroll.setMaximumWidth(420)
+
+        slice_content = QWidget()
+        slice_layout = QVBoxLayout(slice_content)
+        slice_layout.setContentsMargins(0, 0, 0, 0)
+        slice_layout.addWidget(grp_slice)
+        slice_layout.addStretch()
+
+        timeslice_scroll = QScrollArea()
+        timeslice_scroll.setWidgetResizable(True)
+        timeslice_scroll.setWidget(slice_content)
+        timeslice_scroll.setMinimumWidth(270)
+        timeslice_scroll.setMaximumWidth(460)
+        return processing_scroll, timeslice_scroll
 
     def _current_dt_ns(self) -> float:
         if not self._profiles:
@@ -2252,7 +2341,8 @@ class GprProfileViewer(QDialog):
             interpolation_mode = str(self._cb_interp.currentData() or "bilinear")
         self._im = self._ax.imshow(
             self._disp_data,
-            aspect="equal" if real_aspect else "auto",
+            # Mantieni il riempimento del pannello; la scala reale e' gestita sotto con set_aspect+datalim.
+            aspect="auto",
             cmap=cmap,
             vmin=vmin, vmax=vmax,
             extent=[0, dist_max, depth_max, 0],
@@ -2269,7 +2359,14 @@ class GprProfileViewer(QDialog):
         self._view_ylim = y_view
         self._ax.set_xlim(*x_view)
         self._ax.set_ylim(*y_view)
-        self._ax.set_aspect("equal" if real_aspect else "auto", adjustable="box")
+        if real_aspect and dist_max > 1e-9 and depth_max > 1e-9:
+            # Evita l'effetto "radargramma schiacciato in un box piccolo":
+            # usa datalim invece di box per preservare meglio l'area visibile.
+            ratio = float(depth_max / dist_max)
+            ratio = float(np.clip(ratio, 1e-4, 1e4))
+            self._ax.set_aspect(ratio, adjustable="datalim")
+        else:
+            self._ax.set_aspect("auto", adjustable="box")
         self._ax.set_xlabel("Distanza (m)")
         self._ax.set_ylabel("Profondit\u00e0 (m)")
         self._ax.set_title(
@@ -2961,21 +3058,20 @@ class GprProfileViewer(QDialog):
         return arr, extent
 
     def _slice_world_to_pixel(self, east: float, north: float) -> tuple[float, float] | tuple[None, None]:
-        if self._slice_current_extent is None or self._slice_current_shape is None:
+        if self._slice_current_extent is None:
             return None, None
         xmin, xmax, ymin, ymax = [float(v) for v in self._slice_current_extent]
-        n_rows, n_cols = self._slice_current_shape
-        if n_rows <= 1 or n_cols <= 1:
+        if not (np.isfinite(xmin) and np.isfinite(xmax) and np.isfinite(ymin) and np.isfinite(ymax)):
             return None, None
-        dx = float(xmax - xmin)
-        dy = float(ymax - ymin)
-        if abs(dx) < 1e-12 or abs(dy) < 1e-12:
+        # Ora la slice e' visualizzata direttamente in coordinate geografiche (extent su imshow),
+        # quindi il crosshair puo' usare world-coordinates senza conversione in pixel.
+        if abs(float(xmax - xmin)) < 1e-12 or abs(float(ymax - ymin)) < 1e-12:
             return None, None
-        col = ((float(east) - xmin) / dx) * float(n_cols - 1)
-        row = ((ymax - float(north)) / dy) * float(n_rows - 1)
-        if not (np.isfinite(col) and np.isfinite(row)):
+        ex = float(east)
+        ny = float(north)
+        if not (np.isfinite(ex) and np.isfinite(ny)):
             return None, None
-        return float(col), float(row)
+        return ex, ny
 
     def _update_slice_crosshair_overlay(self, draw: bool = True) -> bool:
         if self._ax_slice is None or self._slice_im is None:
@@ -2992,20 +3088,43 @@ class GprProfileViewer(QDialog):
             return False
         if not (np.isfinite(east_f) and np.isfinite(north_f)):
             return False
-        col, row = self._slice_world_to_pixel(east_f, north_f)
-        if col is None or row is None:
+        xw, yw = self._slice_world_to_pixel(east_f, north_f)
+        if xw is None or yw is None:
             return False
         if self._slice_vline is None:
-            self._slice_vline = self._ax_slice.axvline(col, color="yellow", lw=1.0, alpha=0.85)
+            self._slice_vline = self._ax_slice.axvline(xw, color="yellow", lw=1.0, alpha=0.85)
         else:
-            self._slice_vline.set_xdata([col, col])
+            self._slice_vline.set_xdata([xw, xw])
         if self._slice_hline is None:
-            self._slice_hline = self._ax_slice.axhline(row, color="cyan", lw=1.0, ls="--", alpha=0.8)
+            self._slice_hline = self._ax_slice.axhline(yw, color="cyan", lw=1.0, ls="--", alpha=0.8)
         else:
-            self._slice_hline.set_ydata([row, row])
+            self._slice_hline.set_ydata([yw, yw])
         if draw and self._canvas_slice is not None:
             self._canvas_slice.draw_idle()
         return True
+
+    def _on_slice_clip_changed(self, _value):
+        if not hasattr(self, "_spin_slice_vmin_pct") or not hasattr(self, "_spin_slice_vmax_pct"):
+            return
+        lo = float(self._spin_slice_vmin_pct.value())
+        hi = float(self._spin_slice_vmax_pct.value())
+        if hi <= lo + 0.1:
+            sender = self.sender()
+            if sender is self._spin_slice_vmin_pct:
+                hi = min(100.0, lo + 0.1)
+                self._spin_slice_vmax_pct.blockSignals(True)
+                try:
+                    self._spin_slice_vmax_pct.setValue(hi)
+                finally:
+                    self._spin_slice_vmax_pct.blockSignals(False)
+            else:
+                lo = max(0.0, hi - 0.1)
+                self._spin_slice_vmin_pct.blockSignals(True)
+                try:
+                    self._spin_slice_vmin_pct.setValue(lo)
+                finally:
+                    self._spin_slice_vmin_pct.blockSignals(False)
+        self._redraw_slice_view(force=True)
 
     def _redraw_slice_view(self, force: bool = False):
         if not HAS_MPL or self._ax_slice is None or self._canvas_slice is None:
@@ -3036,7 +3155,11 @@ class GprProfileViewer(QDialog):
         idx = int(np.clip(idx, 0, len(slices) - 1))
         ts = slices[idx]
         raster_path = self._resolve_timeslice_raster_path(ts)
-        cmap = self._cb_cmap.currentText() if hasattr(self, "_cb_cmap") else DEFAULT_CMAP
+        cmap = (
+            self._cb_slice_cmap.currentText()
+            if hasattr(self, "_cb_slice_cmap") and self._cb_slice_cmap is not None
+            else (self._cb_cmap.currentText() if hasattr(self, "_cb_cmap") else DEFAULT_CMAP)
+        )
 
         if not raster_path:
             self._ax_slice.clear()
@@ -3083,9 +3206,23 @@ class GprProfileViewer(QDialog):
                 return
 
             finite = arr[np.isfinite(arr)]
+            p_lo = 2.0
+            p_hi = 98.0
+            if hasattr(self, "_spin_slice_vmin_pct") and self._spin_slice_vmin_pct is not None:
+                try:
+                    p_lo = float(self._spin_slice_vmin_pct.value())
+                except Exception:
+                    p_lo = 2.0
+            if hasattr(self, "_spin_slice_vmax_pct") and self._spin_slice_vmax_pct is not None:
+                try:
+                    p_hi = float(self._spin_slice_vmax_pct.value())
+                except Exception:
+                    p_hi = 98.0
+            if p_hi <= p_lo + 0.1:
+                p_hi = min(100.0, p_lo + 0.1)
             if finite.size > 0:
-                vmin = float(np.nanpercentile(finite, 2))
-                vmax = float(np.nanpercentile(finite, 98))
+                vmin = float(np.nanpercentile(finite, p_lo))
+                vmax = float(np.nanpercentile(finite, p_hi))
                 if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax <= vmin):
                     vmin = float(np.nanmin(finite))
                     vmax = float(np.nanmax(finite))
@@ -3114,14 +3251,16 @@ class GprProfileViewer(QDialog):
                 cmap=slice_cmap,
                 vmin=vmin,
                 vmax=vmax,
+                extent=[float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3])],
                 origin="upper",
-                aspect="auto",
-                interpolation="nearest",
+                aspect="equal",
+                interpolation="bilinear",
             )
 
             n_rows, n_cols = int(arr.shape[0]), int(arr.shape[1])
-            x_full = (-0.5, float(max(0, n_cols - 1)) + 0.5)
-            y_full = (float(max(0, n_rows - 1)) + 0.5, -0.5)
+            xmin, xmax, ymin, ymax = [float(v) for v in extent]
+            x_full = (min(xmin, xmax), max(xmin, xmax))
+            y_full = (min(ymin, ymax), max(ymin, ymax))
             if self._slice_view_xlim is None:
                 self._slice_view_xlim = x_full
             if self._slice_view_ylim is None:
@@ -3130,7 +3269,7 @@ class GprProfileViewer(QDialog):
                 self._slice_view_xlim[0], self._slice_view_xlim[1], x_full[0], x_full[1]
             )
             self._slice_view_ylim = self._clamp_axis_limits(
-                self._slice_view_ylim[0], self._slice_view_ylim[1], -0.5, float(max(0, n_rows - 1)) + 0.5
+                self._slice_view_ylim[0], self._slice_view_ylim[1], y_full[0], y_full[1]
             )
             self._ax_slice.set_xlim(*self._slice_view_xlim)
             self._ax_slice.set_ylim(*self._slice_view_ylim)
