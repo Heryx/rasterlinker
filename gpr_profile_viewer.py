@@ -39,6 +39,14 @@ from qgis.core import (
 from qgis.gui import QgsRubberBand
 
 try:
+    from qgis.PyQt import sip  # type: ignore
+except Exception:
+    try:
+        import sip  # type: ignore
+    except Exception:
+        sip = None  # type: ignore
+
+try:
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
     from matplotlib.figure import Figure
     HAS_MPL = True
@@ -329,6 +337,118 @@ class GprProfileViewer(QMainWindow):
         self._updating_xpan = False
 
         self._build_ui()
+
+    def _is_qt_alive(self, obj) -> bool:
+        if obj is None:
+            return False
+        try:
+            if sip is not None and hasattr(sip, "isdeleted") and sip.isdeleted(obj):
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _safe_set_text(self, widget, text: str):
+        if not self._is_qt_alive(widget):
+            return
+        try:
+            widget.setText(str(text))
+        except Exception:
+            pass
+
+    def _safe_cb_clear(self, combo):
+        if not self._is_qt_alive(combo):
+            return
+        try:
+            combo.blockSignals(True)
+            combo.clear()
+        except Exception:
+            pass
+        finally:
+            try:
+                combo.blockSignals(False)
+            except Exception:
+                pass
+
+    def _safe_draw_idle(self, canvas):
+        if not self._is_qt_alive(canvas):
+            return
+        try:
+            canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _reset_session_state(self):
+        try:
+            self._canvas_timer.stop()
+        except Exception:
+            pass
+
+        self._profiles = []
+        self._prof_idx = 0
+        self._ch_idx = 0
+        self._raw_data = None
+        self._proc_data = None
+        self._disp_data = None
+        self._cursor_x = None
+        self._cursor_z = None
+        self._view_xlim = None
+        self._view_ylim = None
+        self._trace_source_indices = None
+        self._trim_start_traces = 0
+        self._trim_end_traces = 0
+        self._hyper_apex_x = None
+        self._hyper_apex_depth = None
+        self._wiggle_trace_idx = None
+        self._slice_pan_anchor = None
+
+        self._slice_catalog = []
+        self._slice_current_idx = None
+        self._slice_current_path = None
+        self._slice_current_extent = None
+        self._slice_current_shape = None
+        self._slice_current_cmap = ""
+        self._slice_view_xlim = None
+        self._slice_view_ylim = None
+        self._slice_cache_path = None
+        self._slice_cache_mtime = None
+        self._slice_cache_arr = None
+        self._slice_cache_extent = None
+
+        self._safe_set_text(self._lbl_profile, "\u2014")
+        self._safe_set_text(self._lbl_status, "Importa un file .ogpr per iniziare.")
+        self._safe_set_text(self._lbl_xpan, "Full")
+        self._safe_cb_clear(self._cb_channel)
+        if self._is_qt_alive(getattr(self, "_xpan_slider", None)):
+            try:
+                self._xpan_slider.setEnabled(False)
+                self._xpan_slider.setValue(0)
+            except Exception:
+                pass
+
+        try:
+            if self._ax is not None:
+                self._ax.clear()
+            if self._ax_wiggle is not None:
+                self._ax_wiggle.clear()
+            if self._canvas_mpl is not None:
+                self._safe_draw_idle(self._canvas_mpl)
+        except Exception:
+            pass
+
+        try:
+            if self._ax_slice is not None:
+                self._ax_slice.clear()
+            if self._canvas_slice is not None:
+                self._safe_draw_idle(self._canvas_slice)
+        except Exception:
+            pass
+
+        self._update_slice_navigator()
+        try:
+            self._clear_timeslice_crosshair()
+        except Exception:
+            pass
 
     def _channel_signal_score(self, data: np.ndarray) -> float:
         arr = np.asarray(data, dtype=np.float64)
@@ -669,7 +789,7 @@ class GprProfileViewer(QMainWindow):
         except Exception:
             ok = False
         if ok:
-            self._lbl_status.setText("Progetto QGIS salvato.")
+            self._safe_set_text(self._lbl_status, "Progetto QGIS salvato.")
         else:
             QMessageBox.warning(
                 self,
@@ -1711,14 +1831,8 @@ class GprProfileViewer(QMainWindow):
         )
         if not paths:
             return
-        # Nuova sessione profili: reset vista timeslice locale finche' non si rigenera.
-        self._slice_catalog = []
-        self._slice_current_idx = None
-        self._slice_current_path = None
-        self._slice_view_xlim = None
-        self._slice_view_ylim = None
-        self._update_slice_navigator()
-        self._redraw_slice_view(force=True)
+        # Nuova sessione import: reset completo stato+UI per evitare riferimenti stale a widget Qt.
+        self._reset_session_state()
         errors = []
         imported_warnings = []
         for p in paths:
@@ -1848,12 +1962,15 @@ class GprProfileViewer(QMainWindow):
             return
         prof = self._profiles[self._prof_idx]
         self._update_slice_profile_info()
-        self._lbl_profile.setText(
+        self._safe_set_text(
+            self._lbl_profile,
             f"{self._prof_idx + 1}/{len(self._profiles)}  "
             f"{os.path.basename(prof.path)}"
         )
+        if not self._is_qt_alive(self._cb_channel):
+            return
         self._cb_channel.blockSignals(True)
-        self._cb_channel.clear()
+        self._safe_cb_clear(self._cb_channel)
         for i in range(prof.n_channels):
             self._cb_channel.addItem(f"Ch {i}")
 
@@ -1870,7 +1987,10 @@ class GprProfileViewer(QMainWindow):
                 best_idx = i
         self._ch_idx = int(best_idx)
         self._cb_channel.setCurrentIndex(self._ch_idx)
-        self._cb_channel.blockSignals(False)
+        try:
+            self._cb_channel.blockSignals(False)
+        except Exception:
+            pass
         try:
             self._update_trim_controls_for_channel(int(prof.channel(self._ch_idx).data.shape[1]))
         except Exception:
@@ -1883,7 +2003,8 @@ class GprProfileViewer(QMainWindow):
             pass
         self._reload_data()
         if self._ch_idx != 0:
-            self._lbl_status.setText(
+            self._safe_set_text(
+                self._lbl_status,
                 f"Canale auto-selezionato: Ch {self._ch_idx} (segnale migliore)."
             )
         self._draw_profile_line_on_canvas()
@@ -1966,7 +2087,8 @@ class GprProfileViewer(QMainWindow):
         if finite_ratio < 0.5 or spread < 1e-6:
             try:
                 self._proc_data = np.asarray(self._raw_data, dtype=np.float32)
-                self._lbl_status.setText(
+                self._safe_set_text(
+                    self._lbl_status,
                     "Processing inconcludente: visualizzazione fallback su dato grezzo."
                 )
             except Exception:
@@ -2099,7 +2221,7 @@ class GprProfileViewer(QMainWindow):
 
     def _on_hyperbola_rdp_changed(self, value: float):
         v = self._rdp_to_velocity_m_s(float(value))
-        self._lbl_hyperbola_vel.setText(f"v={v:.3e} m/s")
+        self._safe_set_text(self._lbl_hyperbola_vel, f"v={v:.3e} m/s")
         if self._chk_hyperbola.isChecked():
             self._redraw()
 
@@ -2272,7 +2394,8 @@ class GprProfileViewer(QMainWindow):
             return
 
         self._spin_hyperbola_rdp.setValue(float(best_rdp))
-        self._lbl_status.setText(
+        self._safe_set_text(
+            self._lbl_status,
             f"Hyperbola auto-fit: RDP={best_rdp:.2f}  score={best_score:.4g}  traces={best_count}"
         )
         if self._chk_hyperbola.isChecked():
@@ -2368,7 +2491,7 @@ class GprProfileViewer(QMainWindow):
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2, ensure_ascii=True)
-            self._lbl_status.setText(f"Preset salvato: {path}")
+            self._safe_set_text(self._lbl_status, f"Preset salvato: {path}")
         except Exception as exc:
             QMessageBox.critical(self, "Save Preset", f"Errore salvataggio preset:\n{exc}")
 
@@ -2385,7 +2508,7 @@ class GprProfileViewer(QMainWindow):
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             self._apply_gain_hyper_preset(payload)
-            self._lbl_status.setText(f"Preset caricato: {path}")
+            self._safe_set_text(self._lbl_status, f"Preset caricato: {path}")
         except Exception as exc:
             QMessageBox.critical(self, "Load Preset", f"Errore caricamento preset:\n{exc}")
 
@@ -2495,7 +2618,8 @@ class GprProfileViewer(QMainWindow):
         else:
             disp_min = float("nan")
             disp_max = float("nan")
-        self._lbl_status.setText(
+        self._safe_set_text(
+            self._lbl_status,
             f"proc: min={self._proc_data.min():.3f}  "
             f"max={self._proc_data.max():.3f}  "
             f"disp: min={disp_min:.3f} max={disp_max:.3f}  "
@@ -2569,14 +2693,14 @@ class GprProfileViewer(QMainWindow):
             if not can_pan:
                 self._xpan_slider.setValue(0)
                 if self._lbl_xpan is not None:
-                    self._lbl_xpan.setText("Full")
+                    self._safe_set_text(self._lbl_xpan, "Full")
                 return
             movable = full_w - view_w
             ratio = (float(min(x_view)) - x_full_min) / max(movable, 1e-9)
             ratio = float(np.clip(ratio, 0.0, 1.0))
             self._xpan_slider.setValue(int(round(ratio * 1000.0)))
             if self._lbl_xpan is not None:
-                self._lbl_xpan.setText(f"{min(x_view):.1f}-{max(x_view):.1f} m")
+                self._safe_set_text(self._lbl_xpan, f"{min(x_view):.1f}-{max(x_view):.1f} m")
         finally:
             self._updating_xpan = False
 
@@ -2682,7 +2806,7 @@ class GprProfileViewer(QMainWindow):
             path = f"{path}.png"
         try:
             fig.savefig(path, dpi=int(dpi), bbox_inches="tight", facecolor="white")
-            self._lbl_status.setText(f"Radargram export: {path}  dpi={int(dpi)}")
+            self._safe_set_text(self._lbl_status, f"Radargram export: {path}  dpi={int(dpi)}")
         except Exception as exc:
             QMessageBox.critical(self, "Export Radargram", f"Errore export:\n{exc}")
 
@@ -3047,7 +3171,8 @@ class GprProfileViewer(QMainWindow):
         if not m:
             z_str = f"{self._cursor_z:.3f} m" if self._cursor_z is not None else "\u2014"
             x_str = f"{self._cursor_x:.2f} m" if self._cursor_x is not None else "\u2014"
-            self._lbl_status.setText(
+            self._safe_set_text(
+                self._lbl_status,
                 f"Dist: {x_str}  |  Profondita': {z_str}"
             )
             return
@@ -3057,7 +3182,8 @@ class GprProfileViewer(QMainWindow):
         north = m.get("north")
         east_str = f"{float(east):.2f}" if east is not None else "n/a"
         north_str = f"{float(north):.2f}" if north is not None else "n/a"
-        self._lbl_status.setText(
+        self._safe_set_text(
+            self._lbl_status,
             f"Trace={int(m['idx_trace'])}  Sample={int(m['idx_sample'])}  "
             f"Amp={amp_str}  Time={float(m['time_ns']):.3f} ns  "
             f"Depth={float(m['depth_m']):.3f} m  Dist={float(m['distance_m']):.3f} m  "
@@ -3126,12 +3252,18 @@ class GprProfileViewer(QMainWindow):
     # ------------------------------------------------------------------
 
     def _flush_canvas_update(self):
-        self._update_rubber_band()
-        self._update_dial()
-        self._update_timeslice_visibility_in_canvas()
-        self._update_timeslice_crosshair()
-        self._emit_cursor_moved()
-        self._redraw_slice_view()
+        if not self._is_qt_alive(self):
+            return
+        try:
+            self._update_rubber_band()
+            self._update_dial()
+            self._update_timeslice_visibility_in_canvas()
+            self._update_timeslice_crosshair()
+            self._emit_cursor_moved()
+            if self._is_qt_alive(getattr(self, "_canvas_slice", None)):
+                self._redraw_slice_view()
+        except RuntimeError:
+            pass
 
     def _to_canvas_point(self, prof, east: float, north: float) -> QgsPointXY:
         pt = QgsPointXY(float(east), float(north))
@@ -3773,7 +3905,8 @@ class GprProfileViewer(QMainWindow):
                 pass
             return
         try:
-            self._lbl_status.setText(
+            self._safe_set_text(
+                self._lbl_status,
                 f"Slice cursor: x {float(event.xdata):.1f}  y {float(event.ydata):.1f}"
             )
         except Exception:
@@ -4108,11 +4241,11 @@ class GprProfileViewer(QMainWindow):
                 self._slider_slice_depth.setEnabled(False)
             finally:
                 self._updating_slice_nav = False
-            self._lbl_slice_nav.setText("\u2014 nessuna slice \u2014")
+            self._safe_set_text(self._lbl_slice_nav, "\u2014 nessuna slice \u2014")
             if hasattr(self, "_lbl_slice_depth_top"):
-                self._lbl_slice_depth_top.setText("0.00 m")
+                self._safe_set_text(self._lbl_slice_depth_top, "0.00 m")
             if hasattr(self, "_lbl_slice_depth_bottom"):
-                self._lbl_slice_depth_bottom.setText("\u2014")
+                self._safe_set_text(self._lbl_slice_depth_bottom, "\u2014")
             return
 
         idx = int(self._slice_current_idx if self._slice_current_idx is not None else 0)
@@ -4131,12 +4264,12 @@ class GprProfileViewer(QMainWindow):
         finally:
             self._updating_slice_nav = False
 
-        self._lbl_slice_nav.setText(f"Slice {idx + 1}/{n}  |  {z_top:.2f}-{z_bot:.2f} m")
+        self._safe_set_text(self._lbl_slice_nav, f"Slice {idx + 1}/{n}  |  {z_top:.2f}-{z_bot:.2f} m")
         if hasattr(self, "_lbl_slice_depth_top"):
-            self._lbl_slice_depth_top.setText("0.00 m")
+            self._safe_set_text(self._lbl_slice_depth_top, "0.00 m")
         if hasattr(self, "_lbl_slice_depth_bottom"):
             z_max = float(self._slice_catalog[-1].get("z_bot", z_bot) or z_bot)
-            self._lbl_slice_depth_bottom.setText(f"{z_max:.2f} m")
+            self._safe_set_text(self._lbl_slice_depth_bottom, f"{z_max:.2f} m")
 
     def _on_timeslice_build_finished(self, ok: bool, payload: dict | None = None):
         if not bool(ok):
@@ -4192,7 +4325,7 @@ class GprProfileViewer(QMainWindow):
             return
         n_prof = int(len(self._profiles or []))
         if n_prof <= 0:
-            self._lbl_slice_profiles.setText("Nessun profilo caricato")
+            self._safe_set_text(self._lbl_slice_profiles, "Nessun profilo caricato")
             return
         total_traces = 0
         for prof in self._profiles:
@@ -4202,7 +4335,7 @@ class GprProfileViewer(QMainWindow):
                 total_traces += int(prof.channel(0).data.shape[1])
             except Exception:
                 continue
-        self._lbl_slice_profiles.setText(f"{n_prof} profili  |  ~{total_traces} tracce")
+        self._safe_set_text(self._lbl_slice_profiles, f"{n_prof} profili  |  ~{total_traces} tracce")
 
     def _import_slices_to_canvas(self):
         outdir = str(getattr(self, "_le_slice_outdir", None).text() if hasattr(self, "_le_slice_outdir") else "").strip()
@@ -4248,7 +4381,8 @@ class GprProfileViewer(QMainWindow):
                 self.iface.mapCanvas().refresh()
             except Exception:
                 pass
-        self._lbl_status.setText(
+        self._safe_set_text(
+            self._lbl_status,
             f"Import completato: {added} layer nel gruppo 'GPR Timeslices'."
         )
         if added <= 0:
@@ -4419,7 +4553,7 @@ class GprProfileViewer(QMainWindow):
         self._spin_amplitude_sigma.setEnabled(bool(self._chk_amplitude_filter.isChecked()))
         self._spin_smooth_sigma.setEnabled(bool(self._chk_smooth.isChecked()))
         self._spin_slice_profile_workers.setEnabled(bool(self._chk_slice_parallel_profiles.isChecked()))
-        self._lbl_status.setText(lbl)
+        self._safe_set_text(self._lbl_status, lbl)
 
     def get_slice_params(self) -> dict:
         slice_bg_auto = bool(self._chk_slice_bg_auto.isChecked())
