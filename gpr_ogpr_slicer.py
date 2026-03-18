@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 
@@ -1670,12 +1671,19 @@ def compute_ogpr_slice_grids(
     """Compute IDW grids for each slice and return (grids, meta)."""
     from .gpr_processing import DEFAULT_PIPELINE
 
+    t_total_start = perf_counter()
+    t_preprocess_s = 0.0
+    t_grid_setup_s = 0.0
+    t_interp_s = 0.0
+    t_slice_loop_s = 0.0
+
     if not profiles:
         return [], {}
 
     params = {**DEFAULT_PIPELINE, **(pipeline_params or {})} if use_processing else {}
     idw_mode_norm = _normalize_idw_mode(idw_mode)
 
+    t0 = perf_counter()
     processed_result = _process_profiles(
         profiles,
         channel,
@@ -1697,17 +1705,27 @@ def compute_ogpr_slice_grids(
         parallel_profiles=parallel_profiles,
         profile_workers=profile_workers,
     )
+    t_preprocess_s = max(0.0, perf_counter() - t0)
     if isinstance(processed_result, tuple):
         processed, proc_diag = processed_result
     else:
         processed = processed_result
         proc_diag = {}
     if not processed:
+        t_total_s = max(0.0, perf_counter() - t_total_start)
         return [], {
             "profiles_total": int(proc_diag.get("profiles_total", len(profiles))),
             "profiles_geo_valid": int(proc_diag.get("profiles_geo_valid", 0)),
             "profiles_geo_skipped": int(proc_diag.get("profiles_geo_skipped", 0)),
             "using_synthetic_coords": bool(proc_diag.get("using_synthetic_coords", False)),
+            "timing_s": {
+                "total": float(round(t_total_s, 6)),
+                "preprocess": float(round(t_preprocess_s, 6)),
+                "grid_setup": 0.0,
+                "slice_loop": 0.0,
+                "interpolation": 0.0,
+                "interpolation_avg_per_slice": 0.0,
+            },
         }
     per_slice_balance_eff = bool(per_slice_balance) and (not bool(balance_profiles))
     if bool(per_slice_balance) and bool(balance_profiles) and emit_diagnostics:
@@ -1716,6 +1734,7 @@ def compute_ogpr_slice_grids(
             "global balance_profiles e' gia' attivo."
         )
 
+    t0 = perf_counter()
     gp0 = _build_grid_params(
         processed,
         resolution,
@@ -1784,6 +1803,7 @@ def compute_ogpr_slice_grids(
             mode=topo_reference_mode,
             custom_elevation=topo_reference_elevation,
         )
+    t_grid_setup_s = max(0.0, perf_counter() - t0)
 
     z_levels = np.arange(float(z_min), float(z_max) + z_step * 0.5, float(z_step))
 
@@ -1841,11 +1861,13 @@ def compute_ogpr_slice_grids(
         bounds_margin_m=float(gp.get("bounds_margin_m", 0.0) or 0.0),
     )
 
+    t_loop_start = perf_counter()
     for iz, z_lev in enumerate(z_levels):
         z_from = float(z_lev - z_step / 2.0)
         z_to = float(z_lev + z_step / 2.0)
         radius_z = _depth_adaptive_radius(base_radius, float(z_lev), float(z_max), depth_radius_factor)
         effective_radius = radius_z * (max(1.0, ratio_for_radius) if use_anisotropic_idw else 1.0)
+        t_i0 = perf_counter()
         grid, n_pts, amp_diag = _interpolate_z_level(
             processed, z_from, z_to, combine_method,
             {
@@ -1865,6 +1887,7 @@ def compute_ogpr_slice_grids(
             topographic_correction=bool(topographic_correction),
             topo_reference_elevation=topo_ref,
         )
+        t_interp_s += max(0.0, perf_counter() - t_i0)
         if grid is None:
             if emit_diagnostics:
                 print(
@@ -1910,6 +1933,12 @@ def compute_ogpr_slice_grids(
             "amplitude_diag": amp_diag,
         })
 
+    t_slice_loop_s = max(0.0, perf_counter() - t_loop_start)
+    t_total_s = max(0.0, perf_counter() - t_total_start)
+    n_slice_total = int(len(z_levels))
+    n_slice_done = int(len(grids))
+    interp_avg = float(t_interp_s / max(1, n_slice_done))
+
     if grids:
         fill_vals = np.asarray([g.get("fill_pct", 0.0) for g in grids], dtype=np.float64)
         low_fill_count = int(np.count_nonzero(fill_vals < 60.0))
@@ -1932,6 +1961,27 @@ def compute_ogpr_slice_grids(
                 f"[OGPR slicer][WARN] low fill slices: {low_fill_count}/{len(grids)} "
                 f"(threshold < 60%)"
             )
+
+    meta["timing_s"] = {
+        "total": float(round(t_total_s, 6)),
+        "preprocess": float(round(t_preprocess_s, 6)),
+        "grid_setup": float(round(t_grid_setup_s, 6)),
+        "slice_loop": float(round(t_slice_loop_s, 6)),
+        "interpolation": float(round(t_interp_s, 6)),
+        "interpolation_avg_per_slice": float(round(interp_avg, 6)),
+    }
+    meta["timing_counts"] = {
+        "slices_requested": int(n_slice_total),
+        "slices_computed": int(n_slice_done),
+    }
+    if emit_diagnostics:
+        print(
+            "[OGPR slicer][TIMING] "
+            f"total={t_total_s:.3f}s preprocess={t_preprocess_s:.3f}s "
+            f"grid_setup={t_grid_setup_s:.3f}s slice_loop={t_slice_loop_s:.3f}s "
+            f"idw={t_interp_s:.3f}s idw_avg={interp_avg:.3f}s/slice "
+            f"slices={n_slice_done}/{n_slice_total}"
+        )
 
     return grids, meta
 

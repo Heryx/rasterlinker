@@ -307,6 +307,12 @@ class GprOgprVolumeMixin:
                 task_meta = dict(getattr(done_task, "meta", {}) or {})
                 epsg_written = task_meta.get("epsg_written", epsg)
                 georef_warning = str(task_meta.get("georef_warning", "") or "").strip()
+                timing_s = task_meta.get("timing_s") if isinstance(task_meta.get("timing_s"), dict) else {}
+                task_timing_s = (
+                    task_meta.get("task_timing_s")
+                    if isinstance(task_meta.get("task_timing_s"), dict)
+                    else {}
+                )
                 if georef_warning:
                     try:
                         self.iface.messageBar().pushWarning("GeoSurvey Studio", georef_warning)
@@ -364,6 +370,10 @@ class GprOgprVolumeMixin:
                     "depth_radius_factor": float(extra_slice_params.get("depth_radius_factor", 0.6) or 0.0),
                     "balance_profiles": bool(extra_slice_params.get("balance_profiles", True)),
                 }
+                if timing_s:
+                    sidecar_params["timing_s"] = dict(timing_s)
+                if task_timing_s:
+                    sidecar_params["task_timing_s"] = dict(task_timing_s)
                 if extra_slice_params.get("amplitude_sigma") is not None:
                     sidecar_params["amplitude_sigma"] = extra_slice_params.get("amplitude_sigma")
                 save_ogpr_slicer_params(output_dir, sidecar_params)
@@ -481,6 +491,17 @@ class GprOgprVolumeMixin:
                     QMessageBox.information(
                         getattr(self, "dlg", None), "Slice completate", msg
                     )
+                if hasattr(self, "_notify_info") and task_timing_s:
+                    try:
+                        self._notify_info(
+                            "Timing OGPR->Slice: "
+                            f"tot={float(task_timing_s.get('total', 0.0)):.2f}s, "
+                            f"compute={float(task_timing_s.get('compute', 0.0)):.2f}s, "
+                            f"write={float(task_timing_s.get('write', 0.0)):.2f}s.",
+                            duration=12,
+                        )
+                    except Exception:
+                        pass
             finally:
                 self._ogpr_slice_task_active = False
 

@@ -1,5 +1,6 @@
 import os
 import shutil
+from time import perf_counter
 
 from qgis.PyQt.QtCore import QEventLoop, Qt
 from qgis.PyQt.QtWidgets import QProgressDialog
@@ -298,12 +299,17 @@ class OgprSliceBuildTask(CallbackTask):
             self.error_message = "Nessun profilo OGPR disponibile."
             return False
 
+        task_start = perf_counter()
+        compute_s = 0.0
+        write_s = 0.0
+
         self.setProgress(5.0)
         if self.isCanceled():
             self.cancelled = True
             return False
 
         try:
+            t0 = perf_counter()
             grids, meta = compute_ogpr_slice_grids(
                 profiles=self.profiles,
                 channel=self.params["channel"],
@@ -340,6 +346,7 @@ class OgprSliceBuildTask(CallbackTask):
                 parallel_profiles=bool(self.extra_slice_params.get("parallel_profiles", True)),
                 profile_workers=int(self.extra_slice_params.get("profile_workers", 0) or 0),
             )
+            compute_s = max(0.0, perf_counter() - t0)
         except Exception as e:
             self.error_message = str(e)
             return False
@@ -354,6 +361,12 @@ class OgprSliceBuildTask(CallbackTask):
 
         if not self.grids:
             self.no_grids = True
+            total_s = max(0.0, perf_counter() - task_start)
+            self.meta["task_timing_s"] = {
+                "total": float(round(total_s, 6)),
+                "compute": float(round(compute_s, 6)),
+                "write": 0.0,
+            }
             self.setProgress(100.0)
             return True
 
@@ -378,12 +391,14 @@ class OgprSliceBuildTask(CallbackTask):
         self.meta["epsg_written"] = int(epsg_to_write) if epsg_to_write else None
 
         try:
+            t0 = perf_counter()
             self.slices = write_grids_to_tifs(
                 self.grids,
                 self.meta,
                 self.output_dir,
                 epsg=epsg_to_write,
             )
+            write_s = max(0.0, perf_counter() - t0)
         except Exception as e:
             self.error_message = str(e)
             return False
@@ -391,6 +406,12 @@ class OgprSliceBuildTask(CallbackTask):
         if self.isCanceled():
             self.cancelled = True
             return False
+        total_s = max(0.0, perf_counter() - task_start)
+        self.meta["task_timing_s"] = {
+            "total": float(round(total_s, 6)),
+            "compute": float(round(compute_s, 6)),
+            "write": float(round(write_s, 6)),
+        }
         self.setProgress(100.0)
         return True
 
