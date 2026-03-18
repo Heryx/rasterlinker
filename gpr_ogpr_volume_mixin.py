@@ -55,10 +55,27 @@ class GprOgprVolumeMixin:
         except (AttributeError, ValueError):
             default_step = 0.05
 
+        forced_z_step = None
+        try:
+            forced_z_step = float((slice_params or {}).get("z_step_override"))
+            if not (forced_z_step > 0.0):
+                forced_z_step = None
+        except Exception:
+            forced_z_step = None
+        if forced_z_step is None:
+            try:
+                forced_z_step = float((slice_params or {}).get("thickness_m"))
+                if not (forced_z_step > 0.0):
+                    forced_z_step = None
+            except Exception:
+                forced_z_step = None
+
         if saved:
             default_res   = saved.get("resolution",  default_res)
             default_step  = saved.get("z_step",       default_step)
             depth_max_m   = saved.get("z_max",        depth_max_m)
+        if forced_z_step is not None:
+            default_step = float(forced_z_step)
 
         default_radius = (
             saved.get("radius", default_res * 2 ** 0.5) if saved
@@ -167,12 +184,15 @@ class GprOgprVolumeMixin:
             return None
 
         ch_val, comb_val = cb_ch.currentData()
+        z_step_value = sp_step.value()
+        if forced_z_step is not None:
+            z_step_value = float(forced_z_step)
         return {
             "channel":        ch_val,
             "combine_method": comb_val,
             "z_min":          sp_zmin.value(),
             "z_max":          sp_zmax.value(),
-            "z_step":         sp_step.value(),
+            "z_step":         z_step_value,
             "resolution":     sp_res.value(),
             "radius":         sp_radius.value(),
             "group_name":     le_group.text().strip() or default_group,
@@ -186,6 +206,7 @@ class GprOgprVolumeMixin:
         self,
         profiles: list,
         slice_params: dict | None = None,
+        completion_callback=None,
     ) -> None:
         """
         Punto di ingresso chiamato da GprProfileViewer._open_slice_dialog().
@@ -291,9 +312,21 @@ class GprOgprVolumeMixin:
         extra_slice_params.update(slice_params or {})
 
         def _on_task_done(done_task, ok):
+            cb_ok = False
+            cb_payload = {
+                "ok": bool(ok),
+                "output_dir": output_dir,
+                "group_name": group_name,
+                "z_step": float(params.get("z_step", 0.0) or 0.0),
+                "z_min": float(params.get("z_min", 0.0) or 0.0),
+                "z_max": float(params.get("z_max", 0.0) or 0.0),
+                "slices": [],
+                "error": "",
+            }
             try:
                 if not ok:
                     if bool(getattr(done_task, "cancelled", False)):
+                        cb_payload["error"] = "Operazione annullata."
                         QMessageBox.information(
                             getattr(self, "dlg", None),
                             "OGPR -> Timeslice",
@@ -301,6 +334,7 @@ class GprOgprVolumeMixin:
                         )
                     else:
                         err = str(getattr(done_task, "error_message", "") or "Errore sconosciuto")
+                        cb_payload["error"] = err
                         QMessageBox.critical(
                             getattr(self, "dlg", None),
                             "Errore OGPR -> Timeslice",
@@ -328,6 +362,9 @@ class GprOgprVolumeMixin:
                             georef_warning,
                         )
                 if bool(getattr(done_task, "no_grids", False)) or not slices:
+                    cb_payload["error"] = (
+                        f"Nessun punto nel range Z [{params['z_min']:.4f}, {params['z_max']:.4f}] m."
+                    )
                     QMessageBox.warning(
                         getattr(self, "dlg", None), "Nessuna slice prodotta",
                         f"Nessun punto nel range Z [{params['z_min']:.4f}, "
@@ -496,6 +533,15 @@ class GprOgprVolumeMixin:
                     QMessageBox.information(
                         getattr(self, "dlg", None), "Slice completate", msg
                     )
+                cb_ok = True
+                cb_payload.update(
+                    {
+                        "ok": True,
+                        "slices": list(slices or []),
+                        "epsg": epsg_written,
+                        "meta": dict(task_meta or {}),
+                    }
+                )
                 if hasattr(self, "_notify_info") and task_timing_s:
                     try:
                         self._notify_info(
@@ -508,6 +554,11 @@ class GprOgprVolumeMixin:
                     except Exception:
                         pass
             finally:
+                if callable(completion_callback):
+                    try:
+                        completion_callback(bool(cb_ok), dict(cb_payload))
+                    except Exception:
+                        pass
                 self._ogpr_slice_task_active = False
 
         build_task = OgprSliceBuildTask(

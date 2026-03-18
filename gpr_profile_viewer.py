@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import glob
+import re
 from typing import Optional
 
 import numpy as np
@@ -306,6 +307,10 @@ class GprProfileViewer(QMainWindow):
         self._slice_current_extent: Optional[tuple[float, float, float, float]] = None
         self._slice_current_shape: Optional[tuple[int, int]] = None
         self._slice_current_cmap: str = ""
+        self._slice_catalog: list[dict] = []
+        self._slice_catalog_source_dir: str = ""
+        self._slice_catalog_dz: float = 0.0
+        self._updating_slice_nav: bool = False
         self._show_wiggle: bool = True
         self._ax_main_bounds_default = None
         self._ax_wiggle_bounds_default = None
@@ -994,6 +999,26 @@ class GprProfileViewer(QMainWindow):
         out_lay.addWidget(self._le_slice_outdir, 1)
         out_lay.addWidget(self._btn_slice_outdir, 0)
 
+        self._spin_slice_thickness = QDoubleSpinBox()
+        self._spin_slice_thickness.setRange(0.01, 2.0)
+        self._spin_slice_thickness.setSingleStep(0.05)
+        self._spin_slice_thickness.setDecimals(2)
+        self._spin_slice_thickness.setValue(0.10)
+        self._spin_slice_thickness.setSuffix(" m")
+        self._spin_slice_thickness.setToolTip(
+            "Spessore verticale di ogni timeslice (dz)."
+        )
+        self._chk_slice_thickness_locked = QCheckBox("Blocca spessore")
+        self._chk_slice_thickness_locked.setChecked(False)
+        self._chk_slice_thickness_locked.setToolTip(
+            "Blocca il valore di spessore finche' non vuoi rigenerare le slice."
+        )
+
+        def _on_thickness_lock_toggled(locked: bool):
+            self._spin_slice_thickness.setEnabled(not bool(locked))
+
+        self._chk_slice_thickness_locked.toggled.connect(_on_thickness_lock_toggled)
+
         self._cb_slice_cmap = QComboBox()
         self._cb_slice_cmap.addItems(GPR_CMAPS)
         self._cb_slice_cmap.setCurrentText(DEFAULT_CMAP)
@@ -1198,6 +1223,8 @@ class GprProfileViewer(QMainWindow):
 
         fl_slice.addRow("Profili:",           self._lbl_slice_profiles)
         fl_slice.addRow("Output folder:",     out_row)
+        fl_slice.addRow("Spessore slice:",    self._spin_slice_thickness)
+        fl_slice.addRow("  lock:",            self._chk_slice_thickness_locked)
         fl_slice.addRow("Preset:",            self._cb_slice_preset)
         fl_slice.addRow("  azione:",          self._btn_slice_preset_apply)
         fl_slice.addRow("Slice colormap:",    self._cb_slice_cmap)
@@ -1235,6 +1262,53 @@ class GprProfileViewer(QMainWindow):
         btn_slice = QPushButton("\U0001f5fa  Crea Timeslice\u2026")
         btn_slice.clicked.connect(self._open_slice_dialog)
         fl_slice.addRow(btn_slice)
+
+        self._lbl_slice_nav = QLabel("\u2014 nessuna slice \u2014")
+        self._lbl_slice_nav.setAlignment(Qt.AlignCenter)
+        self._slider_slice_depth = QSlider(Qt.Vertical)
+        self._slider_slice_depth.setRange(0, 0)
+        self._slider_slice_depth.setValue(0)
+        self._slider_slice_depth.setEnabled(False)
+        self._slider_slice_depth.setMinimumHeight(180)
+        self._slider_slice_depth.setInvertedAppearance(True)
+        self._slider_slice_depth.setInvertedControls(True)
+        self._slider_slice_depth.setToolTip(
+            "Navigator verticale delle slice gia' calcolate.\n"
+            "Su = superficiale, giu' = profondo."
+        )
+        self._slider_slice_depth.valueChanged.connect(self._on_slice_depth_slider)
+
+        self._lbl_slice_depth_top = QLabel("0.00 m")
+        self._lbl_slice_depth_bottom = QLabel("\u2014")
+        self._lbl_slice_depth_top.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self._lbl_slice_depth_bottom.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+
+        nav_widget = QWidget()
+        nav_layout = QHBoxLayout(nav_widget)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(6)
+        nav_layout.addWidget(self._slider_slice_depth, 0)
+        nav_labels = QVBoxLayout()
+        nav_labels.setContentsMargins(0, 0, 0, 0)
+        nav_labels.addWidget(self._lbl_slice_depth_top)
+        nav_labels.addStretch(1)
+        nav_labels.addWidget(self._lbl_slice_depth_bottom)
+        nav_layout.addLayout(nav_labels, 1)
+
+        btn_slice_up = QPushButton("\u25b2 Slice su")
+        btn_slice_up.clicked.connect(lambda: self._step_slice(-1))
+        btn_slice_down = QPushButton("\u25bc Slice giu'")
+        btn_slice_down.clicked.connect(lambda: self._step_slice(+1))
+        nav_btn_row = QWidget()
+        nav_btn_layout = QHBoxLayout(nav_btn_row)
+        nav_btn_layout.setContentsMargins(0, 0, 0, 0)
+        nav_btn_layout.setSpacing(4)
+        nav_btn_layout.addWidget(btn_slice_up)
+        nav_btn_layout.addWidget(btn_slice_down)
+
+        fl_slice.addRow("Navigator:", self._lbl_slice_nav)
+        fl_slice.addRow(nav_widget)
+        fl_slice.addRow(nav_btn_row)
 
         btn_slice_import = QPushButton("Import to Canvas")
         btn_slice_import.setToolTip(
@@ -1308,6 +1382,16 @@ class GprProfileViewer(QMainWindow):
         except Exception:
             pass
         self._update_slice_profile_info()
+        try:
+            dz0 = float(self._spin_slice_thickness.value())
+        except Exception:
+            dz0 = 0.10
+        self._refresh_slice_catalog(
+            str(self._le_slice_outdir.text() or "").strip(),
+            dz=dz0,
+            reset_index=True,
+            redraw=False,
+        )
         return processing_scroll, timeslice_scroll
 
     def _current_dt_ns(self) -> float:
@@ -1553,6 +1637,18 @@ class GprProfileViewer(QMainWindow):
         if self._profiles:
             self._prof_idx = min(len(self._profiles) - 1, self._prof_idx + 1)
             self._load_current_profile()
+
+    def keyPressEvent(self, event):
+        key = int(event.key()) if event is not None else 0
+        if key == int(Qt.Key_Up):
+            self._step_slice(-1)
+            event.accept()
+            return
+        if key == int(Qt.Key_Down):
+            self._step_slice(+1)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _on_channel_changed(self, idx):
         if idx >= 0:
@@ -3286,7 +3382,15 @@ class GprProfileViewer(QMainWindow):
         if not HAS_MPL or self._ax_slice is None or self._canvas_slice is None:
             return
 
-        grp, slices = self._active_group_timeslices_context()
+        local_catalog = list(getattr(self, "_slice_catalog", []) or [])
+        using_local_catalog = len(local_catalog) > 0
+        grp = None
+        slices = None
+        if using_local_catalog:
+            slices = local_catalog
+        else:
+            grp, slices = self._active_group_timeslices_context()
+
         if not slices:
             self._ax_slice.clear()
             self._slice_im = None
@@ -3302,15 +3406,21 @@ class GprProfileViewer(QMainWindow):
             self._canvas_slice.draw_idle()
             return
 
-        if self._cursor_z is None:
-            idx = 0
+        if using_local_catalog:
+            idx = 0 if self._slice_current_idx is None else int(self._slice_current_idx)
         else:
-            idx = self._nearest_timeslice_index(slices, float(self._cursor_z))
-            if idx is None:
+            if self._cursor_z is None:
                 idx = 0
+            else:
+                idx = self._nearest_timeslice_index(slices, float(self._cursor_z))
+                if idx is None:
+                    idx = 0
         idx = int(np.clip(idx, 0, len(slices) - 1))
-        ts = slices[idx]
-        raster_path = self._resolve_timeslice_raster_path(ts)
+        ts = dict(slices[idx] or {})
+        if using_local_catalog:
+            raster_path = str(ts.get("path") or "").strip()
+        else:
+            raster_path = self._resolve_timeslice_raster_path(ts)
         cmap = (
             self._cb_slice_cmap.currentText()
             if hasattr(self, "_cb_slice_cmap") and self._cb_slice_cmap is not None
@@ -3440,15 +3550,25 @@ class GprProfileViewer(QMainWindow):
             for spine in self._ax_slice.spines.values():
                 spine.set_visible(False)
 
-            try:
-                d0 = float(ts.get("depth_from", 0.0) or 0.0)
-                d1 = float(ts.get("depth_to", d0) or d0)
-            except Exception:
-                d0 = 0.0
-                d1 = 0.0
-            group_name = str((grp or {}).get("name") or "").strip()
+            if using_local_catalog:
+                try:
+                    d0 = float(ts.get("z_top", 0.0) or 0.0)
+                    d1 = float(ts.get("z_bot", d0) or d0)
+                except Exception:
+                    d0 = 0.0
+                    d1 = 0.0
+                source_name = os.path.basename(str(self._slice_catalog_source_dir or "")) or "local"
+                title_left = f"{source_name} | "
+            else:
+                try:
+                    d0 = float(ts.get("depth_from", 0.0) or 0.0)
+                    d1 = float(ts.get("depth_to", d0) or d0)
+                except Exception:
+                    d0 = 0.0
+                    d1 = 0.0
+                group_name = str((grp or {}).get("name") or "").strip()
+                title_left = f"{group_name} | " if group_name else ""
             base = os.path.basename(raster_path)
-            title_left = f"{group_name} | " if group_name else ""
             self._ax_slice.set_title(f"{title_left}Timeslice {d0:.2f}-{d1:.2f} m  |  {base}")
 
             self._slice_current_idx = idx
@@ -3658,6 +3778,214 @@ class GprProfileViewer(QMainWindow):
     # Timeslice
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_slice_depth_label(label: str) -> Optional[float]:
+        tok = str(label or "").strip().lower()
+        if not tok:
+            return None
+        sign = -1.0 if tok.startswith("m") else 1.0
+        if tok.startswith("m"):
+            tok = tok[1:]
+        if "_" in tok:
+            tok = tok.replace("_", ".", 1)
+        try:
+            return sign * float(tok)
+        except Exception:
+            return None
+
+    def _scan_slice_catalog(self, outdir: str, dz: float) -> list[dict]:
+        base = str(outdir or "").strip()
+        if not base or not os.path.isdir(base):
+            return []
+
+        paths = sorted(glob.glob(os.path.join(base, "slice_*.tif")))
+        if not paths:
+            paths = sorted(glob.glob(os.path.join(base, "slice_*.tiff")))
+        if not paths:
+            return []
+
+        catalog = []
+        centers = []
+        for fallback_idx, path in enumerate(paths):
+            name = os.path.basename(path)
+            idx = fallback_idx
+            z_center = None
+            m = re.search(r"^slice_(\d+)_z([A-Za-z0-9_]+)\.tiff?$", name, flags=re.IGNORECASE)
+            if m:
+                try:
+                    idx = int(m.group(1))
+                except Exception:
+                    idx = fallback_idx
+                z_center = self._parse_slice_depth_label(m.group(2))
+            if z_center is not None and np.isfinite(z_center):
+                centers.append(float(z_center))
+            catalog.append(
+                {
+                    "path": os.path.normpath(path),
+                    "index": int(idx),
+                    "z_center": float(z_center) if z_center is not None else None,
+                    "name": os.path.splitext(name)[0],
+                }
+            )
+
+        catalog.sort(key=lambda item: (int(item.get("index", 0)), str(item.get("path", ""))))
+
+        dz_use = float(dz) if np.isfinite(dz) and float(dz) > 0.0 else 0.0
+        if dz_use <= 0.0:
+            z_vals = [
+                float(item["z_center"])
+                for item in catalog
+                if item.get("z_center") is not None and np.isfinite(float(item.get("z_center")))
+            ]
+            if len(z_vals) >= 2:
+                z_vals = sorted(z_vals)
+                diffs = np.diff(np.asarray(z_vals, dtype=np.float64))
+                diffs = diffs[np.isfinite(diffs) & (diffs > 1e-9)]
+                if diffs.size > 0:
+                    dz_use = float(np.nanmedian(diffs))
+        if dz_use <= 0.0:
+            dz_use = 0.10
+
+        for i, item in enumerate(catalog):
+            zc = item.get("z_center")
+            if zc is None or not np.isfinite(float(zc)):
+                z_top = float(i) * dz_use
+                z_center = z_top + 0.5 * dz_use
+            else:
+                z_center = float(zc)
+                z_top = z_center - 0.5 * dz_use
+            item["z_top"] = float(z_top)
+            item["z_bot"] = float(z_top + dz_use)
+            item["z_center"] = float(z_center)
+        return catalog
+
+    def _refresh_slice_catalog(
+        self,
+        outdir: str,
+        dz: float,
+        reset_index: bool = False,
+        redraw: bool = True,
+    ):
+        base = os.path.normpath(str(outdir or "").strip()) if str(outdir or "").strip() else ""
+        catalog = self._scan_slice_catalog(base, dz)
+        self._slice_catalog = list(catalog or [])
+        self._slice_catalog_source_dir = base
+        try:
+            self._slice_catalog_dz = float(dz) if np.isfinite(float(dz)) else 0.0
+        except Exception:
+            self._slice_catalog_dz = 0.0
+        if not self._slice_catalog:
+            self._slice_current_idx = None
+        else:
+            if reset_index or self._slice_current_idx is None:
+                self._slice_current_idx = 0
+            else:
+                self._slice_current_idx = int(
+                    np.clip(int(self._slice_current_idx), 0, len(self._slice_catalog) - 1)
+                )
+        self._update_slice_navigator()
+        if redraw:
+            self._slice_view_xlim = None
+            self._slice_view_ylim = None
+            self._redraw_slice_view(force=True)
+
+    def _on_slice_depth_slider(self, value: int):
+        if self._updating_slice_nav:
+            return
+        if not self._slice_catalog:
+            return
+        idx = int(np.clip(int(value), 0, len(self._slice_catalog) - 1))
+        if self._slice_current_idx == idx:
+            return
+        self._slice_current_idx = idx
+        try:
+            center = float(self._slice_catalog[idx].get("z_center"))
+            if np.isfinite(center):
+                self._cursor_z = center
+        except Exception:
+            pass
+        self._update_slice_navigator()
+        self._redraw_slice_view(force=True)
+        self._update_timeslice_visibility_in_canvas()
+
+    def _step_slice(self, delta: int):
+        if not self._slice_catalog:
+            return
+        curr = int(self._slice_current_idx if self._slice_current_idx is not None else 0)
+        nxt = int(np.clip(curr + int(delta), 0, len(self._slice_catalog) - 1))
+        if self._slider_slice_depth is not None:
+            self._slider_slice_depth.setValue(nxt)
+        else:
+            self._on_slice_depth_slider(nxt)
+
+    def _update_slice_navigator(self):
+        has_slider = hasattr(self, "_slider_slice_depth") and self._slider_slice_depth is not None
+        if (not has_slider) or (not hasattr(self, "_lbl_slice_nav")):
+            return
+        if not self._slice_catalog:
+            self._updating_slice_nav = True
+            try:
+                self._slider_slice_depth.setRange(0, 0)
+                self._slider_slice_depth.setValue(0)
+                self._slider_slice_depth.setEnabled(False)
+            finally:
+                self._updating_slice_nav = False
+            self._lbl_slice_nav.setText("\u2014 nessuna slice \u2014")
+            if hasattr(self, "_lbl_slice_depth_top"):
+                self._lbl_slice_depth_top.setText("0.00 m")
+            if hasattr(self, "_lbl_slice_depth_bottom"):
+                self._lbl_slice_depth_bottom.setText("\u2014")
+            return
+
+        idx = int(self._slice_current_idx if self._slice_current_idx is not None else 0)
+        idx = int(np.clip(idx, 0, len(self._slice_catalog) - 1))
+        self._slice_current_idx = idx
+        n = int(len(self._slice_catalog))
+        entry = self._slice_catalog[idx]
+        z_top = float(entry.get("z_top", 0.0) or 0.0)
+        z_bot = float(entry.get("z_bot", z_top) or z_top)
+
+        self._updating_slice_nav = True
+        try:
+            self._slider_slice_depth.setRange(0, n - 1)
+            self._slider_slice_depth.setValue(idx)
+            self._slider_slice_depth.setEnabled(True)
+        finally:
+            self._updating_slice_nav = False
+
+        self._lbl_slice_nav.setText(f"Slice {idx + 1}/{n}  |  {z_top:.2f}-{z_bot:.2f} m")
+        if hasattr(self, "_lbl_slice_depth_top"):
+            self._lbl_slice_depth_top.setText("0.00 m")
+        if hasattr(self, "_lbl_slice_depth_bottom"):
+            z_max = float(self._slice_catalog[-1].get("z_bot", z_bot) or z_bot)
+            self._lbl_slice_depth_bottom.setText(f"{z_max:.2f} m")
+
+    def _on_timeslice_build_finished(self, ok: bool, payload: dict | None = None):
+        if not bool(ok):
+            return
+        data = dict(payload or {})
+        outdir = str(data.get("output_dir") or "").strip()
+        if not outdir:
+            outdir = str(getattr(self, "_le_slice_outdir", None).text() if hasattr(self, "_le_slice_outdir") else "").strip()
+        if outdir and hasattr(self, "_le_slice_outdir") and self._le_slice_outdir is not None:
+            try:
+                self._le_slice_outdir.setText(os.path.normpath(outdir))
+            except Exception:
+                pass
+        dz = data.get("z_step")
+        if dz is None:
+            try:
+                dz = float(self._spin_slice_thickness.value())
+            except Exception:
+                dz = 0.10
+        try:
+            dz_f = float(dz)
+        except Exception:
+            dz_f = 0.10
+        if hasattr(self, "_chk_slice_thickness_locked") and self._chk_slice_thickness_locked is not None:
+            self._chk_slice_thickness_locked.setChecked(True)
+        self._refresh_slice_catalog(outdir, dz=dz_f, reset_index=True, redraw=True)
+
     def _default_slice_output_dir(self) -> str:
         project_root = self._active_project_root()
         if project_root and os.path.isdir(project_root):
@@ -3671,7 +3999,13 @@ class GprProfileViewer(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Output folder Timeslice", start)
         if folder:
             try:
-                self._le_slice_outdir.setText(os.path.normpath(folder))
+                norm = os.path.normpath(folder)
+                self._le_slice_outdir.setText(norm)
+                try:
+                    dz = float(self._spin_slice_thickness.value())
+                except Exception:
+                    dz = 0.10
+                self._refresh_slice_catalog(norm, dz=dz, reset_index=True, redraw=True)
             except Exception:
                 pass
 
@@ -3742,10 +4076,11 @@ class GprProfileViewer(QMainWindow):
         if added <= 0:
             QMessageBox.warning(self, "Import Timeslice", "Nessun layer valido importato.")
         else:
-            # aggiorna contesto visualizzazione slice verso il nuovo output
-            self._slice_view_xlim = None
-            self._slice_view_ylim = None
-            self._redraw_slice_view(force=True)
+            try:
+                dz = float(self._spin_slice_thickness.value())
+            except Exception:
+                dz = 0.10
+            self._refresh_slice_catalog(outdir, dz=dz, reset_index=False, redraw=True)
 
     @staticmethod
     def _set_combo_to_data(combo: QComboBox, value) -> None:
@@ -3954,12 +4289,28 @@ class GprProfileViewer(QMainWindow):
             QMessageBox.information(self, "Nessun profilo",
                                     "Importa almeno un file .ogpr prima.")
             return
+        try:
+            dz = float(self._spin_slice_thickness.value())
+        except Exception:
+            dz = 0.10
+        if (not np.isfinite(dz)) or dz <= 0.0:
+            QMessageBox.warning(self, "Timeslice", "Spessore slice non valido.")
+            return
         slice_params = self.get_slice_params()
+        slice_params["z_step_override"] = float(dz)
+        slice_params["thickness_m"] = float(dz)
         outdir = str(getattr(self, "_le_slice_outdir", None).text() if hasattr(self, "_le_slice_outdir") else "").strip()
         if outdir:
             slice_params["output_dir"] = outdir
         if self.plugin and hasattr(self.plugin, "import_ogpr_as_slices"):
-            self.plugin.import_ogpr_as_slices(self._profiles, slice_params=slice_params)
+            try:
+                self.plugin.import_ogpr_as_slices(
+                    self._profiles,
+                    slice_params=slice_params,
+                    completion_callback=self._on_timeslice_build_finished,
+                )
+            except TypeError:
+                self.plugin.import_ogpr_as_slices(self._profiles, slice_params=slice_params)
         else:
             QMessageBox.information(
                 self, "Timeslice",
