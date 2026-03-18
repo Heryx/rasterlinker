@@ -307,6 +307,7 @@ class GprProfileViewer(QMainWindow):
         self._slice_current_extent: Optional[tuple[float, float, float, float]] = None
         self._slice_current_shape: Optional[tuple[int, int]] = None
         self._slice_current_cmap: str = ""
+        self._slice_pan_anchor: Optional[tuple[float, float, tuple[float, float], tuple[float, float]]] = None
         self._slice_catalog: list[dict] = []
         self._slice_catalog_source_dir: str = ""
         self._slice_catalog_dz: float = 0.0
@@ -457,6 +458,8 @@ class GprProfileViewer(QMainWindow):
             self._ax_slice = self._fig_slice.add_subplot(111)
             self._canvas_slice = FigureCanvasQTAgg(self._fig_slice)
             self._canvas_slice.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self._canvas_slice.mpl_connect("button_press_event", self._on_slice_press)
+            self._canvas_slice.mpl_connect("button_release_event", self._on_slice_release)
             self._canvas_slice.mpl_connect("motion_notify_event", self._on_slice_mouse_move)
             self._canvas_slice.mpl_connect("scroll_event", self._on_slice_scroll_zoom)
             slice_host = QWidget()
@@ -470,8 +473,8 @@ class GprProfileViewer(QMainWindow):
             gs = self._fig.add_gridspec(
                 1,
                 2,
-                width_ratios=[3.0, 1.0],
-                wspace=0.06,
+                width_ratios=[4.0, 0.6],
+                wspace=0.02,
                 left=0.07,
                 right=0.98,
                 top=0.94,
@@ -533,6 +536,7 @@ class GprProfileViewer(QMainWindow):
 
         self._processing_panel_widget, self._timeslice_panel_widget = self._build_processing_panel()
         self._init_aux_windows()
+        self._build_menu()
         root.addLayout(center)
 
         self._lbl_status = QLabel("Importa un file .ogpr per iniziare.")
@@ -645,6 +649,136 @@ class GprProfileViewer(QMainWindow):
             return
         self._timeslice_dock.show()
         self._timeslice_dock.raise_()
+
+    def _open_project_manager(self):
+        if self.plugin is not None and hasattr(self.plugin, "open_project_manager"):
+            try:
+                self.plugin.open_project_manager()
+                return
+            except Exception:
+                pass
+        QMessageBox.information(
+            self,
+            "Project Manager",
+            "Project Manager non disponibile in questo contesto.",
+        )
+
+    def _save_project_file(self):
+        try:
+            ok = bool(QgsProject.instance().write())
+        except Exception:
+            ok = False
+        if ok:
+            self._lbl_status.setText("Progetto QGIS salvato.")
+        else:
+            QMessageBox.warning(
+                self,
+                "Salva progetto",
+                "Impossibile salvare il progetto QGIS corrente.",
+            )
+
+    def _toggle_wiggle_panel(self, checked: bool):
+        try:
+            self._chk_show_wiggle.setChecked(bool(checked))
+        except Exception:
+            self._show_wiggle = bool(checked)
+            self._apply_wiggle_visibility_layout()
+            self._redraw()
+
+    def _build_menu(self):
+        mb = self.menuBar()
+        if mb is None:
+            return
+        try:
+            mb.clear()
+        except Exception:
+            pass
+
+        m_file = mb.addMenu("File")
+        act_import = QAction("Importa .ogpr...", self)
+        act_import.setShortcut("Ctrl+O")
+        act_import.triggered.connect(self.import_files)
+        m_file.addAction(act_import)
+
+        act_open_pm = QAction("Apri Project Manager...", self)
+        act_open_pm.setShortcut("Ctrl+Shift+O")
+        act_open_pm.triggered.connect(self._open_project_manager)
+        m_file.addAction(act_open_pm)
+
+        act_save_proj = QAction("Salva progetto", self)
+        act_save_proj.setShortcut("Ctrl+S")
+        act_save_proj.triggered.connect(self._save_project_file)
+        m_file.addAction(act_save_proj)
+
+        m_file.addSeparator()
+        act_export = QAction("Export Radargram...", self)
+        act_export.triggered.connect(self._export_radargram_image)
+        m_file.addAction(act_export)
+
+        act_import_slice = QAction("Import Timeslices to Canvas", self)
+        act_import_slice.triggered.connect(self._import_slices_to_canvas)
+        m_file.addAction(act_import_slice)
+
+        m_file.addSeparator()
+        act_close = QAction("Chiudi", self)
+        act_close.setShortcut("Ctrl+W")
+        act_close.triggered.connect(self.close)
+        m_file.addAction(act_close)
+
+        m_view = mb.addMenu("View")
+        if self._processing_dock is not None:
+            act_proc = QAction("Processing", self)
+            act_proc.setCheckable(True)
+            act_proc.setChecked(bool(self._processing_dock.isVisible()))
+            act_proc.toggled.connect(self._processing_dock.setVisible)
+            self._processing_dock.visibilityChanged.connect(act_proc.setChecked)
+            m_view.addAction(act_proc)
+
+        if self._timeslice_dock is not None:
+            act_slice = QAction("Timeslice", self)
+            act_slice.setCheckable(True)
+            act_slice.setChecked(bool(self._timeslice_dock.isVisible()))
+            act_slice.toggled.connect(self._timeslice_dock.setVisible)
+            self._timeslice_dock.visibilityChanged.connect(act_slice.setChecked)
+            m_view.addAction(act_slice)
+
+        act_wiggle = QAction("Wiggle", self)
+        act_wiggle.setCheckable(True)
+        act_wiggle.setChecked(bool(self._show_wiggle))
+        act_wiggle.toggled.connect(self._toggle_wiggle_panel)
+        m_view.addAction(act_wiggle)
+
+        m_view.addSeparator()
+        act_reset = QAction("Reset Zoom", self)
+        act_reset.setShortcut("Ctrl+0")
+        act_reset.triggered.connect(self._reset_zoom)
+        m_view.addAction(act_reset)
+
+        act_real_scale = QAction("Scala reale", self)
+        act_real_scale.setCheckable(True)
+        act_real_scale.setChecked(bool(self._chk_real_aspect.isChecked()))
+        act_real_scale.toggled.connect(self._chk_real_aspect.setChecked)
+        self._chk_real_aspect.toggled.connect(act_real_scale.setChecked)
+        m_view.addAction(act_real_scale)
+
+        m_proc = mb.addMenu("Processing")
+        act_apply = QAction("Applica pipeline", self)
+        act_apply.setShortcut("F5")
+        act_apply.triggered.connect(self._apply_processing)
+        m_proc.addAction(act_apply)
+
+        act_gain = QAction("Aggiorna gain", self)
+        act_gain.setShortcut("F6")
+        act_gain.triggered.connect(self._apply_gain_only)
+        m_proc.addAction(act_gain)
+
+        act_save_preset = QAction("Salva preset gain/hyperbola...", self)
+        act_save_preset.triggered.connect(self._save_gain_hyper_preset)
+        m_proc.addAction(act_save_preset)
+
+        act_load_preset = QAction("Carica preset gain/hyperbola...", self)
+        act_load_preset.triggered.connect(self._load_gain_hyper_preset)
+        m_proc.addAction(act_load_preset)
 
     def _apply_wiggle_visibility_layout(self):
         if not HAS_MPL or not hasattr(self, "_ax") or not hasattr(self, "_ax_wiggle"):
@@ -1577,6 +1711,14 @@ class GprProfileViewer(QMainWindow):
         )
         if not paths:
             return
+        # Nuova sessione profili: reset vista timeslice locale finche' non si rigenera.
+        self._slice_catalog = []
+        self._slice_current_idx = None
+        self._slice_current_path = None
+        self._slice_view_xlim = None
+        self._slice_view_ylim = None
+        self._update_slice_navigator()
+        self._redraw_slice_view(force=True)
         errors = []
         imported_warnings = []
         for p in paths:
@@ -2791,12 +2933,12 @@ class GprProfileViewer(QMainWindow):
         # Compressione dolce delle code: evita "spike" visivi dominanti.
         tr_plot = np.tanh(tr_plot * 1.15)
 
-        axw.plot(tr_plot, depth_axis, color="#1f1f1f", lw=0.9, antialiased=True)
+        axw.plot(tr_plot, depth_axis, color="#e0e0e0", lw=0.7, antialiased=True)
         axw.fill_betweenx(
-            depth_axis, 0.0, tr_plot, where=tr_plot >= 0.0, color="#d94f3d", alpha=0.22
+            depth_axis, 0.0, tr_plot, where=tr_plot >= 0.0, color="#ef5350", alpha=0.45
         )
         axw.fill_betweenx(
-            depth_axis, 0.0, tr_plot, where=tr_plot < 0.0, color="#2d6ba3", alpha=0.22
+            depth_axis, 0.0, tr_plot, where=tr_plot < 0.0, color="#42a5f5", alpha=0.45
         )
         self._wiggle_depth_line = None
         if 0 <= idx_s < depth_axis.size:
@@ -2807,14 +2949,18 @@ class GprProfileViewer(QMainWindow):
                 ls="--",
             )
         axw.set_ylim(float(depth_max), 0.0)
-        axw.set_xlim(-1.05, 1.05)
-        axw.set_title("")
+        axw.set_xlim(-1.2, 1.2)
+        axw.set_title(f"T{idx_t}", fontsize=7, pad=2)
         axw.set_xlabel("")
         axw.set_ylabel("")
         axw.set_xticks([])
         axw.set_yticks([])
         axw.grid(False)
-        axw.set_facecolor("#fafafa")
+        axw.axvline(0.0, color="#555555", lw=0.5)
+        axw.set_facecolor("#1a1a1a")
+        for spine in axw.spines.values():
+            spine.set_edgecolor("#333333")
+            spine.set_linewidth(0.5)
         self._wiggle_trace_idx = int(idx_t)
         if draw:
             self._canvas_mpl.draw_idle()
@@ -3384,12 +3530,7 @@ class GprProfileViewer(QMainWindow):
 
         local_catalog = list(getattr(self, "_slice_catalog", []) or [])
         using_local_catalog = len(local_catalog) > 0
-        grp = None
-        slices = None
-        if using_local_catalog:
-            slices = local_catalog
-        else:
-            grp, slices = self._active_group_timeslices_context()
+        slices = local_catalog if using_local_catalog else []
 
         if not slices:
             self._ax_slice.clear()
@@ -3400,27 +3541,27 @@ class GprProfileViewer(QMainWindow):
             self._slice_current_path = None
             self._slice_current_extent = None
             self._slice_current_shape = None
-            self._ax_slice.set_title("Nessuna timeslice attiva")
+            self._slice_current_cmap = ""
+            self._ax_slice.text(
+                0.5,
+                0.5,
+                "Nessuna timeslice calcolata.\nUsa 'Crea Timeslice...' nel pannello Timeslice.",
+                transform=self._ax_slice.transAxes,
+                ha="center",
+                va="center",
+                fontsize=9,
+                color="#666666",
+            )
+            self._ax_slice.set_title("Timeslice locale")
             self._ax_slice.set_xticks([])
             self._ax_slice.set_yticks([])
             self._canvas_slice.draw_idle()
             return
 
-        if using_local_catalog:
-            idx = 0 if self._slice_current_idx is None else int(self._slice_current_idx)
-        else:
-            if self._cursor_z is None:
-                idx = 0
-            else:
-                idx = self._nearest_timeslice_index(slices, float(self._cursor_z))
-                if idx is None:
-                    idx = 0
+        idx = 0 if self._slice_current_idx is None else int(self._slice_current_idx)
         idx = int(np.clip(idx, 0, len(slices) - 1))
         ts = dict(slices[idx] or {})
-        if using_local_catalog:
-            raster_path = str(ts.get("path") or "").strip()
-        else:
-            raster_path = self._resolve_timeslice_raster_path(ts)
+        raster_path = str(ts.get("path") or "").strip()
         cmap = (
             self._cb_slice_cmap.currentText()
             if hasattr(self, "_cb_slice_cmap") and self._cb_slice_cmap is not None
@@ -3550,24 +3691,14 @@ class GprProfileViewer(QMainWindow):
             for spine in self._ax_slice.spines.values():
                 spine.set_visible(False)
 
-            if using_local_catalog:
-                try:
-                    d0 = float(ts.get("z_top", 0.0) or 0.0)
-                    d1 = float(ts.get("z_bot", d0) or d0)
-                except Exception:
-                    d0 = 0.0
-                    d1 = 0.0
-                source_name = os.path.basename(str(self._slice_catalog_source_dir or "")) or "local"
-                title_left = f"{source_name} | "
-            else:
-                try:
-                    d0 = float(ts.get("depth_from", 0.0) or 0.0)
-                    d1 = float(ts.get("depth_to", d0) or d0)
-                except Exception:
-                    d0 = 0.0
-                    d1 = 0.0
-                group_name = str((grp or {}).get("name") or "").strip()
-                title_left = f"{group_name} | " if group_name else ""
+            try:
+                d0 = float(ts.get("z_top", 0.0) or 0.0)
+                d1 = float(ts.get("z_bot", d0) or d0)
+            except Exception:
+                d0 = 0.0
+                d1 = 0.0
+            source_name = os.path.basename(str(self._slice_catalog_source_dir or "")) or "local"
+            title_left = f"{source_name} | "
             base = os.path.basename(raster_path)
             self._ax_slice.set_title(f"{title_left}Timeslice {d0:.2f}-{d1:.2f} m  |  {base}")
 
@@ -3594,10 +3725,52 @@ class GprProfileViewer(QMainWindow):
         if changed or needs_full_redraw:
             self._canvas_slice.draw_idle()
 
+    def _on_slice_press(self, event):
+        if event is None or event.inaxes != self._ax_slice:
+            return
+        if int(getattr(event, "button", 0) or 0) != 1:
+            return
+        if self._slice_im is None or event.xdata is None or event.ydata is None:
+            return
+        try:
+            xlim0 = tuple(self._ax_slice.get_xlim())
+            ylim0 = tuple(self._ax_slice.get_ylim())
+            self._slice_pan_anchor = (
+                float(event.xdata),
+                float(event.ydata),
+                (float(xlim0[0]), float(xlim0[1])),
+                (float(ylim0[0]), float(ylim0[1])),
+            )
+        except Exception:
+            self._slice_pan_anchor = None
+
+    def _on_slice_release(self, _event):
+        self._slice_pan_anchor = None
+
     def _on_slice_mouse_move(self, event):
         if event is None or event.inaxes != self._ax_slice:
             return
         if event.xdata is None or event.ydata is None:
+            return
+        if self._slice_pan_anchor is not None and self._slice_im is not None:
+            try:
+                px, py, xlim0, ylim0 = self._slice_pan_anchor
+                dx = float(px) - float(event.xdata)
+                dy = float(py) - float(event.ydata)
+                nx0 = float(xlim0[0]) + dx
+                nx1 = float(xlim0[1]) + dx
+                ny0 = float(ylim0[0]) + dy
+                ny1 = float(ylim0[1]) + dy
+                ex0, ex1, ey0, ey1 = self._slice_im.get_extent()
+                x_min, x_max = float(min(ex0, ex1)), float(max(ex0, ex1))
+                y_min, y_max = float(min(ey0, ey1)), float(max(ey0, ey1))
+                self._slice_view_xlim = self._clamp_axis_limits(nx0, nx1, x_min, x_max)
+                self._slice_view_ylim = self._clamp_axis_limits(ny0, ny1, y_min, y_max)
+                self._ax_slice.set_xlim(*self._slice_view_xlim)
+                self._ax_slice.set_ylim(*self._slice_view_ylim)
+                self._canvas_slice.draw_idle()
+            except Exception:
+                pass
             return
         try:
             self._lbl_status.setText(
@@ -3654,12 +3827,17 @@ class GprProfileViewer(QMainWindow):
         if dial is None:
             return
         try:
-            _grp, slices = self._active_group_timeslices_context()
-            if not slices:
-                return
-            idx = self._nearest_timeslice_index(slices, float(self._cursor_z))
-            if idx is None:
-                return
+            slices = list(getattr(self, "_slice_catalog", []) or [])
+            if slices:
+                idx = int(self._slice_current_idx if self._slice_current_idx is not None else 0)
+                idx = int(np.clip(idx, 0, len(slices) - 1))
+            else:
+                _grp, slices = self._active_group_timeslices_context()
+                if not slices:
+                    return
+                idx = self._nearest_timeslice_index(slices, float(self._cursor_z))
+                if idx is None:
+                    return
             dial_val = int(np.clip(idx, 0, int(dial.maximum())))
             if dial.value() != dial_val:
                 dial.setValue(dial_val)
