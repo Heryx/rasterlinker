@@ -932,6 +932,25 @@ class GprProfileViewer(QDialog):
             "Punti minimi per stimare una cella IDW (LAS default = 1)."
         )
 
+        self._chk_slice_parallel_profiles = QCheckBox()
+        self._chk_slice_parallel_profiles.setChecked(True)
+        self._chk_slice_parallel_profiles.setToolTip(
+            "Elabora i profili in parallelo durante la creazione timeslice/volume."
+        )
+        self._spin_slice_profile_workers = QSpinBox()
+        self._spin_slice_profile_workers.setRange(0, max(0, int(os.cpu_count() or 32)))
+        self._spin_slice_profile_workers.setValue(0)
+        self._spin_slice_profile_workers.setToolTip(
+            "Numero worker per profili (0 = automatico)."
+        )
+        self._spin_slice_profile_workers.setEnabled(True)
+
+        def _toggle_profile_workers(checked):
+            self._spin_slice_profile_workers.setEnabled(bool(checked))
+
+        self._chk_slice_parallel_profiles.toggled.connect(_toggle_profile_workers)
+        _toggle_profile_workers(self._chk_slice_parallel_profiles.isChecked())
+
         self._chk_smooth = QCheckBox(); self._chk_smooth.setChecked(False)
         self._spin_smooth_sigma = QDoubleSpinBox()
         self._spin_smooth_sigma.setRange(0.5, 10.0); self._spin_smooth_sigma.setSingleStep(0.5)
@@ -963,6 +982,8 @@ class GprProfileViewer(QDialog):
         fl_slice.addRow("Bilancia profili:",   self._chk_slice_balance_profiles)
         fl_slice.addRow("Raggio vs profondita':", self._spin_slice_depth_radius_factor)
         fl_slice.addRow("  min points:",       self._spin_slice_min_points)
+        fl_slice.addRow("Profili paralleli:",  self._chk_slice_parallel_profiles)
+        fl_slice.addRow("  workers (0=auto):", self._spin_slice_profile_workers)
         fl_slice.addRow("Fill NoData:",        self._chk_fill_nodata)
         fl_slice.addRow("Smooth gaussiano:",   self._chk_smooth)
         fl_slice.addRow("  sigma:",            self._spin_smooth_sigma)
@@ -2974,6 +2995,8 @@ class GprProfileViewer(QDialog):
                 "balance_profiles": True,
                 "depth_radius_factor": 0.8,
                 "min_points": 2,
+                "parallel_profiles": True,
+                "profile_workers": 0,
                 "fill_nodata": True,
                 "smooth": True,
                 "smooth_sigma": 1.0,
@@ -3004,6 +3027,8 @@ class GprProfileViewer(QDialog):
                 "balance_profiles": True,
                 "depth_radius_factor": 1.0,
                 "min_points": 3,
+                "parallel_profiles": True,
+                "profile_workers": 0,
                 "fill_nodata": True,
                 "smooth": True,
                 "smooth_sigma": 1.5,
@@ -3034,6 +3059,8 @@ class GprProfileViewer(QDialog):
                 "balance_profiles": True,
                 "depth_radius_factor": 0.6,
                 "min_points": 1,
+                "parallel_profiles": True,
+                "profile_workers": 0,
                 "fill_nodata": False,
                 "smooth": False,
                 "smooth_sigma": 1.0,
@@ -3063,6 +3090,8 @@ class GprProfileViewer(QDialog):
         self._chk_slice_balance_profiles.setChecked(bool(cfg["balance_profiles"]))
         self._spin_slice_depth_radius_factor.setValue(float(cfg["depth_radius_factor"]))
         self._spin_slice_min_points.setValue(int(cfg["min_points"]))
+        self._chk_slice_parallel_profiles.setChecked(bool(cfg["parallel_profiles"]))
+        self._spin_slice_profile_workers.setValue(int(cfg["profile_workers"]))
         self._chk_fill_nodata.setChecked(bool(cfg["fill_nodata"]))
         self._chk_smooth.setChecked(bool(cfg["smooth"]))
         self._spin_smooth_sigma.setValue(float(cfg["smooth_sigma"]))
@@ -3082,6 +3111,7 @@ class GprProfileViewer(QDialog):
         )
         self._spin_amplitude_sigma.setEnabled(bool(self._chk_amplitude_filter.isChecked()))
         self._spin_smooth_sigma.setEnabled(bool(self._chk_smooth.isChecked()))
+        self._spin_slice_profile_workers.setEnabled(bool(self._chk_slice_parallel_profiles.isChecked()))
         self._lbl_status.setText(lbl)
 
     def get_slice_params(self) -> dict:
@@ -3116,6 +3146,8 @@ class GprProfileViewer(QDialog):
             "balance_profiles":    self._chk_slice_balance_profiles.isChecked(),
             "depth_radius_factor": float(self._spin_slice_depth_radius_factor.value()),
             "min_points":          int(self._spin_slice_min_points.value()),
+            "parallel_profiles":   self._chk_slice_parallel_profiles.isChecked(),
+            "profile_workers":     int(self._spin_slice_profile_workers.value()),
             "fill_nodata":         self._chk_fill_nodata.isChecked(),
             "smooth_sigma":        (
                 float(self._spin_smooth_sigma.value())
@@ -3229,6 +3261,8 @@ class GprProfileViewer(QDialog):
                 topographic_correction=bool(extra.get("topographic_correction", False)),
                 topo_reference_mode=str(extra.get("topo_reference_mode", "median") or "median"),
                 topo_reference_elevation=extra.get("topo_reference_elevation"),
+                parallel_profiles=bool(extra.get("parallel_profiles", True)),
+                profile_workers=int(extra.get("profile_workers", 0) or 0),
                 emit_diagnostics=True,
             )
         except Exception as exc:
