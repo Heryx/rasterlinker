@@ -540,8 +540,21 @@ class GprProfileViewer(QMainWindow):
             "Mantiene proporzioni metriche reali distanza/profondita'.\n"
             "Disattiva per adattare il profilo alla finestra."
         )
-        self._chk_real_aspect.toggled.connect(self._redraw)
+        self._chk_real_aspect.toggled.connect(self._on_real_aspect_toggled)
         tb.addWidget(self._chk_real_aspect)
+        tb.addWidget(QLabel(" VE:"))
+        self._spin_vertical_exag = QDoubleSpinBox()
+        self._spin_vertical_exag.setRange(0.5, 20.0)
+        self._spin_vertical_exag.setSingleStep(0.5)
+        self._spin_vertical_exag.setValue(5.0)
+        self._spin_vertical_exag.setDecimals(1)
+        self._spin_vertical_exag.setEnabled(bool(self._chk_real_aspect.isChecked()))
+        self._spin_vertical_exag.setToolTip(
+            "Vertical Exaggeration (VE): 1.0 = scala reale.\n"
+            "Valori > 1 aumentano l'enfasi verticale del radargramma."
+        )
+        self._spin_vertical_exag.valueChanged.connect(lambda _v: self._redraw())
+        tb.addWidget(self._spin_vertical_exag)
 
         self._chk_show_wiggle = QCheckBox("Mostra Wiggle")
         self._chk_show_wiggle.setChecked(True)
@@ -824,6 +837,14 @@ class GprProfileViewer(QMainWindow):
             self._apply_wiggle_visibility_layout()
             self._redraw()
 
+    def _on_real_aspect_toggled(self, checked: bool):
+        try:
+            if hasattr(self, "_spin_vertical_exag") and self._spin_vertical_exag is not None:
+                self._spin_vertical_exag.setEnabled(bool(checked))
+        except Exception:
+            pass
+        self._redraw()
+
     def _build_menu(self):
         mb = self.menuBar()
         if mb is None:
@@ -1025,7 +1046,7 @@ class GprProfileViewer(QMainWindow):
         # Finestra temporale
         self._spin_bg_sample_start = QSpinBox()
         self._spin_bg_sample_start.setRange(0, 9999)
-        self._spin_bg_sample_start.setValue(0)
+        self._spin_bg_sample_start.setValue(10)
         self._spin_bg_sample_start.setEnabled(False)
         self._spin_bg_sample_start.setToolTip(
             "Primo campione incluso nel BG removal (0 = dall'inizio).\n\n"
@@ -1062,7 +1083,7 @@ class GprProfileViewer(QMainWindow):
 
         # AGC
         self._chk_agc  = QCheckBox(); self._chk_agc.setChecked(True)
-        self._spin_agc = QSpinBox();  self._spin_agc.setRange(8, 512); self._spin_agc.setValue(128)
+        self._spin_agc = QSpinBox();  self._spin_agc.setRange(8, 512); self._spin_agc.setValue(64)
 
         # Bandpass
         self._chk_bp     = QCheckBox(); self._chk_bp.setChecked(False)
@@ -1112,7 +1133,7 @@ class GprProfileViewer(QMainWindow):
         self._spin_gain_surface = QDoubleSpinBox()
         self._spin_gain_surface.setRange(0.1, 20.0)
         self._spin_gain_surface.setSingleStep(0.1)
-        self._spin_gain_surface.setValue(1.0)
+        self._spin_gain_surface.setValue(0.3)
         self._spin_gain_surface.setEnabled(False)
         self._spin_gain_deep = QDoubleSpinBox()
         self._spin_gain_deep.setRange(0.1, 60.0)
@@ -1962,6 +1983,9 @@ class GprProfileViewer(QMainWindow):
             self._update_slice_profile_info()
             return
         prof = self._profiles[self._prof_idx]
+        # Reset zoom when changing profile to avoid carrying tiny previous windows.
+        self._view_xlim = None
+        self._view_ylim = None
         self._update_slice_profile_info()
         self._safe_set_text(
             self._lbl_profile,
@@ -2298,8 +2322,14 @@ class GprProfileViewer(QMainWindow):
             distances = np.interp(idx, ok, distances[finite]).astype(np.float64)
         d0 = float(distances[0]) if np.isfinite(distances[0]) else 0.0
         distances = distances - d0
-        if distances[-1] <= 0:
-            distances = np.linspace(0.0, float(max(1, n_t - 1)), n_t, dtype=np.float64)
+        if distances.size > 1:
+            # Enforce monotonic axis for noisy/raw cumulative distance vectors.
+            distances = np.maximum.accumulate(distances)
+        span = float(distances[-1] - distances[0]) if distances.size > 1 else 0.0
+        if (not np.isfinite(span)) or span <= 1e-9:
+            step = float(getattr(prof, "sampling_step_m", 0.1) or 0.1)
+            step = max(step, 1e-6)
+            distances = (np.arange(n_t, dtype=np.float64) * step).astype(np.float64)
         return distances
 
     def _auto_fit_hyperbola_rdp(self):
@@ -2780,12 +2810,23 @@ class GprProfileViewer(QMainWindow):
         cmap = self._cb_cmap.currentText()
         interpolation_mode = str(self._cb_interp.currentData() or "bilinear")
         real_aspect = bool(self._chk_real_aspect.isChecked())
+        vertical_exag = 1.0
+        if hasattr(self, "_spin_vertical_exag") and self._spin_vertical_exag is not None:
+            try:
+                vertical_exag = float(self._spin_vertical_exag.value())
+            except Exception:
+                vertical_exag = 1.0
+        vertical_exag = float(np.clip(vertical_exag, 0.5, 20.0))
 
         fig = Figure(figsize=(12.0, 5.5), tight_layout=True)
         ax = fig.add_subplot(111)
+        aspect_export = "auto"
+        if real_aspect and dist_max > 1e-9 and depth_max > 1e-9:
+            # VE=1.0 preserves metric scale; VE>1 increases vertical readability.
+            aspect_export = float(vertical_exag)
         ax.imshow(
             self._disp_data,
-            aspect="equal" if real_aspect else "auto",
+            aspect=aspect_export,
             cmap=cmap,
             vmin=vmin,
             vmax=vmax,
@@ -2868,11 +2909,14 @@ class GprProfileViewer(QMainWindow):
         self._ax.set_xlim(*x_view)
         self._ax.set_ylim(*y_view)
         if real_aspect and dist_max > 1e-9 and depth_max > 1e-9:
-            # Evita l'effetto "radargramma schiacciato in un box piccolo":
-            # usa datalim invece di box per preservare meglio l'area visibile.
-            ratio = float(depth_max / dist_max)
-            ratio = float(np.clip(ratio, 1e-4, 1e4))
-            self._ax.set_aspect(ratio, adjustable="datalim")
+            ve = 1.0
+            if hasattr(self, "_spin_vertical_exag") and self._spin_vertical_exag is not None:
+                try:
+                    ve = float(self._spin_vertical_exag.value())
+                except Exception:
+                    ve = 1.0
+            # VE=1.0 keeps metric proportions, VE>1.0 increases vertical emphasis.
+            self._ax.set_aspect(float(np.clip(ve, 0.5, 20.0)), adjustable="box")
         else:
             self._ax.set_aspect("auto", adjustable="box")
         self._ax.set_xlabel("Distanza (m)")
@@ -4436,7 +4480,7 @@ class GprProfileViewer(QMainWindow):
                 "pre_slice_bg_mode": "line_by_line",
                 "pre_slice_bg_auto": True,
                 "pre_slice_bg_window": 200,
-                "pre_slice_bg_sample_start": 0,
+                "pre_slice_bg_sample_start": 10,
                 "pre_slice_bg_sample_end": 0,
                 "stack_n": 3,
                 "stack_kernel": "triangular",
@@ -4468,7 +4512,7 @@ class GprProfileViewer(QMainWindow):
                 "pre_slice_bg_mode": "grid_by_grid",
                 "pre_slice_bg_auto": False,
                 "pre_slice_bg_window": 300,
-                "pre_slice_bg_sample_start": 0,
+                "pre_slice_bg_sample_start": 10,
                 "pre_slice_bg_sample_end": 0,
                 "stack_n": 5,
                 "stack_kernel": "triangular",
@@ -4500,7 +4544,7 @@ class GprProfileViewer(QMainWindow):
                 "pre_slice_bg_mode": "line_by_line",
                 "pre_slice_bg_auto": True,
                 "pre_slice_bg_window": 200,
-                "pre_slice_bg_sample_start": 0,
+                "pre_slice_bg_sample_start": 10,
                 "pre_slice_bg_sample_end": 0,
                 "stack_n": 1,
                 "stack_kernel": "boxcar",
@@ -4578,6 +4622,22 @@ class GprProfileViewer(QMainWindow):
         topo_custom = None
         if topo_mode == "custom":
             topo_custom = float(self._spin_slice_topo_ref_custom.value())
+        proc_params = dict(self._current_processing_params() or {})
+        # For timeslice pre-processing, avoid surface over-saturation with conservative defaults
+        # when the panel is still using broad generic values.
+        if bool(self._chk_slice_use_processing.isChecked()):
+            try:
+                if int(proc_params.get("bg_sample_start", 0) or 0) <= 0:
+                    proc_params["bg_sample_start"] = 10
+            except Exception:
+                proc_params["bg_sample_start"] = 10
+            try:
+                agc_on = bool(proc_params.get("agc", False))
+                agc_win = int(proc_params.get("agc_win", 0) or 0)
+                if agc_on and agc_win >= 96:
+                    proc_params["agc_win"] = 32
+            except Exception:
+                pass
         return {
             "normalize_channels":  self._chk_normalize_ch.isChecked(),
             "extraction_mode":     str(self._cb_slice_extraction.currentData() or "las_like"),
@@ -4590,7 +4650,7 @@ class GprProfileViewer(QMainWindow):
             "stack_n": int(self._spin_slice_stack_n.value()),
             "stack_kernel": str(self._cb_slice_stack_kernel.currentData() or "boxcar"),
             "flip_traces_mode": str(self._cb_slice_flip_mode.currentData() or "none"),
-            "pipeline_params": self._current_processing_params(),
+            "pipeline_params": proc_params,
             "topographic_correction": bool(self._chk_slice_topographic.isChecked()),
             "topo_reference_mode": topo_mode,
             "topo_reference_elevation": topo_custom,

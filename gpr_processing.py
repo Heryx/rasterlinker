@@ -51,12 +51,26 @@ def _bandpass_fft(
 
 def dewow(data: np.ndarray, window: int = 16) -> np.ndarray:
     """Rimuove componente DC lenta sottraendo la media mobile."""
-    data   = data.astype(np.float32)
-    kernel = np.ones(window, dtype=np.float32) / window
-    out    = np.empty_like(data)
-    for i in range(data.shape[1]):
-        trend     = np.convolve(data[:, i], kernel, mode="same")
-        out[:, i] = data[:, i] - trend
+    data = np.asarray(data, dtype=np.float32)
+    n_s, n_t = data.shape
+    try:
+        win = int(window)
+    except Exception:
+        win = 16
+    if win <= 1 or n_s <= 2:
+        return data.copy()
+    win = max(2, min(win, n_s))
+    kernel = np.ones(win, dtype=np.float32) / float(win)
+    half = win // 2
+    out = np.empty_like(data)
+    # Reflect padding avoids edge spikes at trace start/end.
+    for i in range(n_t):
+        tr = data[:, i].astype(np.float32, copy=False)
+        pad_left = half
+        pad_right = max(0, win - 1 - half)
+        tr_pad = np.pad(tr, (pad_left, pad_right), mode="reflect")
+        trend = np.convolve(tr_pad, kernel, mode="valid")
+        out[:, i] = tr - trend[:n_s]
     return out
 
 

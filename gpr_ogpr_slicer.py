@@ -1345,10 +1345,23 @@ def _interpolate_z_level(
     e_all = np.concatenate(pts_e)
     n_all = np.concatenate(pts_n)
     a_all = np.concatenate(pts_a)
+    e_raw = e_all
+    n_raw = n_all
+    a_raw = a_all
     amp_pre = _amplitude_diagnostics(a_all, hist_bins=amplitude_hist_bins)
     n_before = int(a_all.size)
+    sigma_filter_relaxed = False
     if amplitude_sigma is not None:
-        e_all, n_all, a_all = _remove_amplitude_outliers(e_all, n_all, a_all, n_sigma=amplitude_sigma)
+        e_f, n_f, a_f = _remove_amplitude_outliers(e_all, n_all, a_all, n_sigma=amplitude_sigma)
+        n_after_filter = int(a_f.size)
+        min_keep = max(int(min_points) * 8, int(round(0.35 * max(1, n_before))))
+        if n_after_filter >= min_keep:
+            e_all, n_all, a_all = e_f, n_f, a_f
+            sigma_filter_relaxed = False
+        else:
+            # Keep original points when sigma filter is too aggressive on sparse data.
+            e_all, n_all, a_all = e_raw, n_raw, a_raw
+            sigma_filter_relaxed = True
     amp_post = _amplitude_diagnostics(a_all, hist_bins=amplitude_hist_bins)
     n_pts = len(e_all)
     diag = {
@@ -1357,6 +1370,7 @@ def _interpolate_z_level(
         "n_before_filter": n_before,
         "n_after_filter": int(n_pts),
         "sigma_filter": (float(amplitude_sigma) if amplitude_sigma is not None else None),
+        "sigma_filter_relaxed": bool(sigma_filter_relaxed),
     }
     if n_pts <= 0:
         return None, 0, diag
