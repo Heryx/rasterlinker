@@ -474,14 +474,32 @@ def _depth_adaptive_radius(
 
 def _fill_nodata_grid(grid: np.ndarray, max_distance: int = 5) -> np.ndarray:
     from scipy.ndimage import distance_transform_edt
+    if grid is None or grid.ndim != 2:
+        return grid
+    try:
+        max_d = int(max_distance)
+    except Exception:
+        max_d = 0
+    if max_d <= 0:
+        return grid
     nan_mask = np.isnan(grid)
     if not nan_mask.any():
         return grid
-    dist, (row_idx, col_idx) = distance_transform_edt(
-        nan_mask, return_distances=True, return_indices=True,
-    )
+    # Safety guard: EDT can allocate large temporary buffers on huge grids.
+    MAX_SAFE_CELLS = 5_000_000
+    if int(nan_mask.size) > MAX_SAFE_CELLS:
+        return grid
+    mask_u8 = nan_mask.astype(np.uint8, copy=False)
+    try:
+        dist, (row_idx, col_idx) = distance_transform_edt(
+            mask_u8, return_distances=True, return_indices=True,
+        )
+    except MemoryError:
+        return grid
+    except Exception:
+        return grid
     filled = grid.copy()
-    fw = nan_mask & (dist <= max_distance)
+    fw = nan_mask & np.isfinite(dist) & (dist <= float(max_d))
     filled[fw] = grid[row_idx[fw], col_idx[fw]]
     return filled
 
@@ -1660,6 +1678,12 @@ def compute_preview_slice(
         depth_radius_factor,
     )
     bounds_margin = float(radius_margin) * float(ratio_for_margin)
+    try:
+        max_margin = float(gp.get("radius", radius if radius is not None else resolution) or resolution) * 2.0
+    except Exception:
+        max_margin = 0.0
+    if np.isfinite(max_margin) and max_margin > 0.0:
+        bounds_margin = min(float(bounds_margin), float(max_margin))
     if np.isfinite(bounds_margin) and bounds_margin > 0.0:
         gp = _build_grid_params(
             processed, resolution, radius,
@@ -1874,6 +1898,10 @@ def compute_ogpr_slice_grids(
     bounds_margin = float(radius_margin_max) * (
         ratio_for_margin if use_anisotropic_idw else 1.0
     )
+    # Keep margins bounded so sparse surveys do not explode grid extents.
+    max_margin = float(radius) * 2.0
+    if np.isfinite(max_margin) and max_margin > 0.0:
+        bounds_margin = min(float(bounds_margin), float(max_margin))
     if np.isfinite(bounds_margin) and bounds_margin > 0.0:
         gp = _build_grid_params(
             processed,
@@ -1892,9 +1920,29 @@ def compute_ogpr_slice_grids(
     x_max = float(gp["x_max"])
     y_min = float(gp["y_min"])
     y_max = float(gp["y_max"])
+    radius_eff = float(gp.get("radius", radius))
     n_x = int(gp["n_x"])
     n_y = int(gp["n_y"])
-    radius = float(gp["radius"])
+    n_cells = int(n_x) * int(n_y)
+    MAX_CELLS_WARN = 5_000_000
+    MAX_CELLS_ABORT = 50_000_000
+    if emit_diagnostics:
+        print(
+            f"[OGPR slicer][INFO] griglia: {n_x}x{n_y} = {n_cells:,} celle "
+            f"(risoluzione={float(resolution):.4f}m, raggio={radius_eff:.4f}m)"
+        )
+    if n_cells > MAX_CELLS_WARN:
+        print(
+            f"[OGPR slicer][WARN] griglia molto grande ({n_cells:,} celle). "
+            "Aumenta la risoluzione o riduci il raggio IDW."
+        )
+    if n_cells > MAX_CELLS_ABORT:
+        raise MemoryError(
+            f"Griglia troppo grande ({n_cells:,} celle, shape {n_y}x{n_x}). "
+            f"Aumenta la risoluzione da {float(resolution):.4f}m "
+            f"a {float(resolution) * 3.0:.2f}m o superiore."
+        )
+    radius = radius_eff
     eff_ratio = gp.get("eff_ratio")
     eff_angle = gp.get("eff_angle")
 
