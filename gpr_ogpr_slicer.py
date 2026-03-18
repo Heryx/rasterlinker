@@ -1852,6 +1852,68 @@ def compute_preview_slice(
     }
 
 
+def compute_timeslice_preview(
+    profiles: list,
+    z_from: float,
+    z_to: float,
+    resolution: float = 0.10,
+    chain_order: list[str] | None = None,
+    **kwargs,
+) -> tuple[np.ndarray | None, tuple[float, float, float, float] | None]:
+    """
+    Compute a single timeslice in RAM without writing files.
+
+    This is a thin wrapper around ``compute_preview_slice`` used by the profile
+    viewer inline preview workflow.
+    """
+    try:
+        z0 = float(z_from)
+        z1 = float(z_to)
+    except Exception:
+        return None, None
+    if not (np.isfinite(z0) and np.isfinite(z1)):
+        return None, None
+    if z1 < z0:
+        z0, z1 = z1, z0
+    dz = float(max(1e-6, z1 - z0))
+    zc = float(0.5 * (z0 + z1))
+
+    # Merge optional chain order into processing params used by preview pipeline.
+    pipeline_params = dict(kwargs.pop("pipeline_params", {}) or {})
+    if chain_order is not None:
+        try:
+            chain_ids = [str(s) for s in list(chain_order)]
+        except Exception:
+            chain_ids = []
+        if chain_ids:
+            pipeline_params["chain_order"] = chain_ids
+
+    result = compute_preview_slice(
+        profiles=profiles,
+        z_center=zc,
+        z_step=dz,
+        resolution=float(resolution),
+        pipeline_params=pipeline_params,
+        **kwargs,
+    )
+    if not result:
+        return None, None
+    try:
+        grid = np.asarray(result.get("grid"), dtype=np.float32)
+        x_min = float(result.get("x_min"))
+        y_min = float(result.get("y_min"))
+        res = float(result.get("resolution", resolution) or resolution)
+        if grid.ndim != 2 or grid.size <= 0:
+            return None, None
+        n_y, n_x = int(grid.shape[0]), int(grid.shape[1])
+        x_max = x_min + float(n_x) * res
+        y_max = y_min + float(n_y) * res
+        extent = (float(x_min), float(x_max), float(y_min), float(y_max))
+        return grid, extent
+    except Exception:
+        return None, None
+
+
 # ---------------------------------------------------------------------------
 # Compute grids for multiple slices (no I/O)
 # ---------------------------------------------------------------------------

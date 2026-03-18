@@ -23,6 +23,7 @@ from qgis.PyQt.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QSpinBox,
     QSlider,
     QSplitter,
+    QToolButton,
     QWidget,
     QInputDialog,
     QFileDialog, QMessageBox, QSizePolicy,
@@ -399,6 +400,12 @@ class GprProfileViewer(QMainWindow):
         self._filter_chain_widget = None
         self._filter_chain_blocks: dict[str, object] = {}
         self._syncing_filter_chain = False
+        self._preview_mode_active: bool = False
+        self._preview_slice_grid: Optional[np.ndarray] = None
+        self._preview_slice_extent: Optional[tuple[float, float, float, float]] = None
+        self._preview_slice_z_from: Optional[float] = None
+        self._preview_slice_z_to: Optional[float] = None
+        self._preview_signature: Optional[tuple] = None
         self._profile_view_initialized: bool = True
         self._allow_close: bool = False
 
@@ -412,6 +419,10 @@ class GprProfileViewer(QMainWindow):
         self._canvas_timer.setSingleShot(True)
         self._canvas_timer.setInterval(50)
         self._canvas_timer.timeout.connect(self._flush_canvas_update)
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(300)
+        self._preview_timer.timeout.connect(self._compute_and_show_preview)
         self._updating_xpan = False
 
         self._build_ui()
@@ -461,6 +472,10 @@ class GprProfileViewer(QMainWindow):
             self._canvas_timer.stop()
         except Exception:
             pass
+        try:
+            self._preview_timer.stop()
+        except Exception:
+            pass
 
         self._profiles = []
         self._prof_idx = 0
@@ -492,6 +507,12 @@ class GprProfileViewer(QMainWindow):
         self._slice_cache_mtime = None
         self._slice_cache_arr = None
         self._slice_cache_extent = None
+        self._preview_mode_active = False
+        self._preview_slice_grid = None
+        self._preview_slice_extent = None
+        self._preview_slice_z_from = None
+        self._preview_slice_z_to = None
+        self._preview_signature = None
 
         self._safe_set_text(self._lbl_profile, "\u2014")
         self._safe_set_text(self._lbl_status, "Importa un file .ogpr per iniziare.")
@@ -690,12 +711,37 @@ class GprProfileViewer(QMainWindow):
                 "Scorri tra le slice calcolate.\nSu = superficiale | Giu = profondo"
             )
             self._slider_slice_depth.valueChanged.connect(self._on_slice_depth_slider)
+            self._btn_slice_up = QToolButton()
+            self._btn_slice_up.setArrowType(Qt.UpArrow)
+            self._btn_slice_up.setFixedSize(20, 20)
+            self._btn_slice_up.setAutoRepeat(True)
+            self._btn_slice_up.setAutoRepeatDelay(250)
+            self._btn_slice_up.setAutoRepeatInterval(150)
+            self._btn_slice_up.setToolTip("Slice precedente")
+            self._btn_slice_up.clicked.connect(lambda: self._step_slice(-1))
+            self._btn_slice_down = QToolButton()
+            self._btn_slice_down.setArrowType(Qt.DownArrow)
+            self._btn_slice_down.setFixedSize(20, 20)
+            self._btn_slice_down.setAutoRepeat(True)
+            self._btn_slice_down.setAutoRepeatDelay(250)
+            self._btn_slice_down.setAutoRepeatInterval(150)
+            self._btn_slice_down.setToolTip("Slice successiva")
+            self._btn_slice_down.clicked.connect(lambda: self._step_slice(+1))
+
+            nav_col = QWidget()
+            nav_col_lay = QVBoxLayout(nav_col)
+            nav_col_lay.setContentsMargins(0, 0, 0, 0)
+            nav_col_lay.setSpacing(2)
+            nav_col_lay.setAlignment(Qt.AlignHCenter)
+            nav_col_lay.addWidget(self._btn_slice_up, 0, Qt.AlignHCenter)
+            nav_col_lay.addWidget(self._slider_slice_depth, 1, Qt.AlignHCenter)
+            nav_col_lay.addWidget(self._btn_slice_down, 0, Qt.AlignHCenter)
             slice_host = QWidget()
             slice_lay = QHBoxLayout(slice_host)
             slice_lay.setContentsMargins(0, 0, 0, 0)
             slice_lay.setSpacing(4)
             slice_lay.addWidget(self._canvas_slice, stretch=1)
-            slice_lay.addWidget(self._slider_slice_depth, stretch=0)
+            slice_lay.addWidget(nav_col, stretch=0)
 
             # Lower panel: radargram + wiggle + pan slider.
             self._fig = Figure(figsize=(9, 3), tight_layout=False)
@@ -1168,6 +1214,7 @@ class GprProfileViewer(QMainWindow):
 
         if self._raw_data is not None:
             self._apply_processing()
+            self._request_preview_update(immediate=False)
 
     def _on_filter_chain_source_toggled(self, _value=None):
         self._sync_filter_chain_from_controls()
@@ -1551,6 +1598,7 @@ class GprProfileViewer(QMainWindow):
             self._spin_slice_thickness.setEnabled(not bool(locked))
 
         self._chk_slice_thickness_locked.toggled.connect(_on_thickness_lock_toggled)
+        self._spin_slice_thickness.valueChanged.connect(lambda _v: self._request_preview_update(immediate=False))
 
         self._cb_slice_cmap = QComboBox()
         self._cb_slice_cmap.addItems(GPR_CMAPS)
@@ -1824,7 +1872,31 @@ class GprProfileViewer(QMainWindow):
         fl_slice.addRow("Smooth gaussiano:",   self._chk_smooth)
         fl_slice.addRow("  sigma:",            self._spin_smooth_sigma)
 
-        btn_slice = QPushButton("Crea Timeslice...")
+        self._cb_preview_quality = QComboBox()
+        self._cb_preview_quality.addItem("Bassa", "low")
+        self._cb_preview_quality.addItem("Media", "medium")
+        self._cb_preview_quality.addItem("Alta", "high")
+        self._cb_preview_quality.setCurrentIndex(1)
+        self._cb_preview_quality.setToolTip(
+            "Qualita' preview RAM: bassa=veloce, alta=piu' dettaglio."
+        )
+        self._cb_preview_quality.currentIndexChanged.connect(lambda _v: self._request_preview_update(immediate=False))
+        fl_slice.addRow("Qualita' preview:", self._cb_preview_quality)
+
+        btn_preview = QPushButton("Preview")
+        btn_preview.setCheckable(True)
+        btn_preview.setChecked(False)
+        btn_preview.setToolTip(
+            "Anteprima in RAM della slice corrente (non crea file, non aggiorna catalogo)."
+        )
+        btn_preview.toggled.connect(self._on_toggle_preview_mode)
+        self._btn_preview_slice = btn_preview
+        fl_slice.addRow(btn_preview)
+
+        btn_slice = QPushButton("Salva gruppo")
+        btn_slice.setToolTip(
+            "Esegue il calcolo completo su disco e registra il gruppo timeslice nel catalogo."
+        )
         btn_slice.clicked.connect(self._open_slice_dialog)
         fl_slice.addRow(btn_slice)
 
@@ -1842,20 +1914,8 @@ class GprProfileViewer(QMainWindow):
         depth_layout.addStretch(1)
         depth_layout.addWidget(self._lbl_slice_depth_bottom)
 
-        btn_slice_up = QPushButton("\u25b2 Slice su")
-        btn_slice_up.clicked.connect(lambda: self._step_slice(-1))
-        btn_slice_down = QPushButton("\u25bc Slice giu'")
-        btn_slice_down.clicked.connect(lambda: self._step_slice(+1))
-        nav_btn_row = QWidget()
-        nav_btn_layout = QHBoxLayout(nav_btn_row)
-        nav_btn_layout.setContentsMargins(0, 0, 0, 0)
-        nav_btn_layout.setSpacing(4)
-        nav_btn_layout.addWidget(btn_slice_up)
-        nav_btn_layout.addWidget(btn_slice_down)
-
         fl_slice.addRow("Navigator:", self._lbl_slice_nav)
         fl_slice.addRow(depth_row)
-        fl_slice.addRow(nav_btn_row)
 
         btn_slice_import = QPushButton("Import to Canvas")
         btn_slice_import.setToolTip(
@@ -2434,6 +2494,7 @@ class GprProfileViewer(QMainWindow):
 
         self._refresh_bp_histogram()
         self._apply_gain_only()
+        self._request_preview_update(immediate=False)
 
     def _sanitize_range_gain_breakpoints(self, points):
         arr = np.asarray(points if points is not None else [], dtype=np.float64).reshape(-1, 2)
@@ -3444,8 +3505,9 @@ class GprProfileViewer(QMainWindow):
             idx_s = int(metrics["idx_sample"])
             depth_max = float(metrics["depth_max_m"])
 
-        trace = np.asarray(self._disp_data[:, idx_t], dtype=np.float64)
-        if trace.size <= 0:
+        filt_src = self._proc_data if self._proc_data is not None else self._disp_data
+        raw_src = self._raw_data if self._raw_data is not None else filt_src
+        if filt_src is None or raw_src is None:
             axw.clear()
             axw.set_xticks([])
             axw.set_yticks([])
@@ -3455,7 +3517,33 @@ class GprProfileViewer(QMainWindow):
                 self._safe_draw_idle(self._canvas_mpl)
             return
 
-        depth_axis = np.linspace(0.0, float(depth_max), trace.size, dtype=np.float64)
+        idx_t_f = int(np.clip(idx_t, 0, max(0, int(filt_src.shape[1]) - 1)))
+        idx_t_r = int(np.clip(idx_t, 0, max(0, int(raw_src.shape[1]) - 1)))
+        trace_f = np.asarray(filt_src[:, idx_t_f], dtype=np.float64)
+        trace_r = np.asarray(raw_src[:, idx_t_r], dtype=np.float64)
+        if trace_f.size <= 0 or trace_r.size <= 0:
+            axw.clear()
+            axw.set_xticks([])
+            axw.set_yticks([])
+            self._wiggle_trace_idx = None
+            self._wiggle_depth_line = None
+            if draw:
+                self._safe_draw_idle(self._canvas_mpl)
+            return
+
+        # Resample raw to filtered length so both traces share identical depth axis.
+        n = int(trace_f.size)
+        if int(trace_r.size) != n and n > 1:
+            try:
+                x_old = np.linspace(0.0, 1.0, int(trace_r.size), dtype=np.float64)
+                x_new = np.linspace(0.0, 1.0, n, dtype=np.float64)
+                trace_r_plot = np.interp(x_new, x_old, trace_r)
+            except Exception:
+                trace_r_plot = trace_r[:n]
+        else:
+            trace_r_plot = trace_r[:n]
+        trace_f_plot = trace_f[:n]
+        depth_axis = np.linspace(0.0, float(depth_max), n, dtype=np.float64)
         can_incremental = (
             (not bool(force))
             and self._wiggle_trace_idx is not None
@@ -3477,33 +3565,19 @@ class GprProfileViewer(QMainWindow):
 
         # Full redraw only when trace index or data changes.
         axw.clear()
-        finite = np.isfinite(trace)
-        if finite.any():
-            vmax = float(np.nanpercentile(np.abs(trace[finite]), 98.0))
-            if not np.isfinite(vmax) or vmax <= 1e-9:
-                vmax = float(np.nanmax(np.abs(trace[finite])))
-            if not np.isfinite(vmax) or vmax <= 1e-9:
-                vmax = 1.0
-            trn = np.clip(trace / vmax, -1.25, 1.25)
+        finite_raw = np.isfinite(trace_r_plot)
+        if finite_raw.any():
+            scale = float(np.nanmax(np.abs(trace_r_plot[finite_raw])))
         else:
-            trn = np.zeros_like(trace)
-        # Leggero smoothing visivo del wiggle per ridurre seghettature ad alta frequenza.
-        if trn.size >= 5:
-            kernel = np.asarray([1.0, 2.0, 3.0, 2.0, 1.0], dtype=np.float64)
-            kernel /= float(np.sum(kernel))
-            tr_plot = np.convolve(trn, kernel, mode="same")
-        else:
-            tr_plot = trn
-        # Compressione dolce delle code: evita "spike" visivi dominanti.
-        tr_plot = np.tanh(tr_plot * 1.15)
+            scale = 1.0
+        if (not np.isfinite(scale)) or scale <= 1e-9:
+            scale = 1.0
 
-        axw.plot(tr_plot, depth_axis, color="#e0e0e0", lw=0.7, antialiased=True)
-        axw.fill_betweenx(
-            depth_axis, 0.0, tr_plot, where=tr_plot >= 0.0, color="#ef5350", alpha=0.45
-        )
-        axw.fill_betweenx(
-            depth_axis, 0.0, tr_plot, where=tr_plot < 0.0, color="#42a5f5", alpha=0.45
-        )
+        raw_norm = np.nan_to_num(trace_r_plot / scale, nan=0.0, posinf=0.0, neginf=0.0)
+        fil_norm = np.nan_to_num(trace_f_plot / scale, nan=0.0, posinf=0.0, neginf=0.0)
+
+        axw.plot(raw_norm, depth_axis, color="#dc5050", lw=0.9, alpha=0.45, antialiased=True)
+        axw.plot(fil_norm, depth_axis, color="#50dc78", lw=0.9, alpha=0.95, antialiased=True)
         self._wiggle_depth_line = None
         if 0 <= idx_s < depth_axis.size:
             self._wiggle_depth_line = axw.axhline(
@@ -3513,8 +3587,12 @@ class GprProfileViewer(QMainWindow):
                 ls="--",
             )
         axw.set_ylim(float(depth_max), 0.0)
-        axw.set_xlim(-1.2, 1.2)
-        axw.set_title(f"T{idx_t}", fontsize=7, pad=2)
+        xlim = float(np.nanmax(np.abs(np.r_[raw_norm, fil_norm]))) if raw_norm.size > 0 else 1.0
+        if (not np.isfinite(xlim)) or xlim <= 0.1:
+            xlim = 1.0
+        xlim = float(np.clip(xlim * 1.05, 0.5, 5.0))
+        axw.set_xlim(-xlim, xlim)
+        axw.set_title(f"A-scan T{idx_t}", fontsize=7, pad=2)
         axw.set_xlabel("")
         axw.set_ylabel("")
         axw.set_xticks([])
@@ -3700,6 +3778,8 @@ class GprProfileViewer(QMainWindow):
             self._update_timeslice_visibility_in_canvas()
             self._update_timeslice_crosshair()
             self._emit_cursor_moved()
+            if bool(getattr(self, "_preview_mode_active", False)):
+                self._request_preview_update(immediate=False)
             if self._is_qt_alive(getattr(self, "_canvas_slice", None)):
                 self._redraw_slice_view()
         except RuntimeError:
@@ -4095,9 +4175,287 @@ class GprProfileViewer(QMainWindow):
                 finally:
                     self._spin_slice_vmin_pct.blockSignals(False)
         self._redraw_slice_view(force=True)
+        self._request_preview_update(immediate=False)
+
+    def _preview_resolution_m(self) -> float:
+        quality = "medium"
+        try:
+            quality = str(self._cb_preview_quality.currentData() or "medium").strip().lower()
+        except Exception:
+            quality = "medium"
+        mapping = {
+            "low": 0.20,
+            "medium": 0.10,
+            "high": 0.05,
+        }
+        return float(mapping.get(quality, 0.10))
+
+    def _preview_depth_window(self) -> tuple[float, float]:
+        try:
+            step = float(self._spin_slice_thickness.value())
+        except Exception:
+            step = 0.10
+        if (not np.isfinite(step)) or step <= 0.0:
+            step = 0.10
+        z0 = 0.0
+        if self._cursor_z is not None:
+            try:
+                z0 = float(self._cursor_z)
+            except Exception:
+                z0 = 0.0
+        if not np.isfinite(z0):
+            z0 = 0.0
+        z0 = float(max(0.0, z0))
+        z1 = float(z0 + step)
+        return z0, z1
+
+    def _on_toggle_preview_mode(self, checked: bool):
+        self._preview_mode_active = bool(checked)
+        if not self._preview_mode_active:
+            try:
+                self._preview_timer.stop()
+            except Exception:
+                pass
+            self._preview_slice_grid = None
+            self._preview_slice_extent = None
+            self._preview_slice_z_from = None
+            self._preview_slice_z_to = None
+            self._preview_signature = None
+            self._redraw_slice_view(force=True)
+            return
+        if not self._profiles:
+            if self._is_qt_alive(getattr(self, "_btn_preview_slice", None)):
+                self._btn_preview_slice.blockSignals(True)
+                try:
+                    self._btn_preview_slice.setChecked(False)
+                finally:
+                    self._btn_preview_slice.blockSignals(False)
+            self._preview_mode_active = False
+            QMessageBox.information(self, "Preview", "Importa almeno un profilo .ogpr.")
+            return
+        self._request_preview_update(immediate=True)
+
+    def _request_preview_update(self, immediate: bool = False):
+        if not bool(getattr(self, "_preview_mode_active", False)):
+            return
+        if not self._profiles:
+            return
+        if not self._is_qt_alive(getattr(self, "_preview_timer", None)):
+            return
+        try:
+            self._preview_timer.start(1 if immediate else 300)
+        except Exception:
+            pass
+
+    def _compute_and_show_preview(self):
+        if not bool(getattr(self, "_preview_mode_active", False)):
+            return
+        if not self._profiles:
+            return
+        try:
+            from .gpr_ogpr_slicer import compute_timeslice_preview
+        except Exception as exc:
+            self._safe_set_text(self._lbl_status, f"Preview non disponibile: {exc}")
+            return
+
+        z_from, z_to = self._preview_depth_window()
+        res = self._preview_resolution_m()
+        slice_params = dict(self.get_slice_params() or {})
+        chain_order = list(self._current_chain_order() or [])
+        sig = (
+            round(float(z_from), 4),
+            round(float(z_to), 4),
+            round(float(res), 4),
+            int(self._ch_idx),
+            tuple(chain_order),
+            bool(slice_params.get("use_processing", False)),
+            str(slice_params.get("extraction_mode", "las_like") or "las_like"),
+            bool(slice_params.get("use_hilbert", True)),
+            bool(slice_params.get("use_anisotropic_idw", False)),
+            str(slice_params.get("idw_mode", "quality") or "quality"),
+            float(slice_params.get("idw_power", 2) or 2.0),
+            int(slice_params.get("min_points", 1) or 1),
+        )
+        if sig == self._preview_signature:
+            return
+
+        kwargs = {
+            "channel": int(self._ch_idx),
+            "combine_method": "mean",
+            "pipeline_params": dict(slice_params.get("pipeline_params") or {}),
+            "normalize_channels": bool(slice_params.get("normalize_channels", False)),
+            "extraction_mode": str(slice_params.get("extraction_mode", "las_like") or "las_like"),
+            "use_hilbert": bool(slice_params.get("use_hilbert", True)),
+            "use_processing": bool(slice_params.get("use_processing", False)),
+            "amplitude_sigma": slice_params.get("amplitude_sigma"),
+            "use_anisotropic_idw": bool(slice_params.get("use_anisotropic_idw", False)),
+            "auto_radius": bool(slice_params.get("auto_radius", True)),
+            "idw_mode": str(slice_params.get("idw_mode", "quality") or "quality"),
+            "idw_power": float(slice_params.get("idw_power", 2) or 2),
+            "min_points": int(slice_params.get("min_points", 1) or 1),
+            "fill_nodata": bool(slice_params.get("fill_nodata", True)),
+            "fill_nodata_max_distance": 0.0,
+            "blanking_distance": float(slice_params.get("blanking_distance", 0.0) or 0.0),
+            "smooth_sigma": float(slice_params.get("smooth_sigma", 0.0) or 0.0),
+            "depth_radius_factor": float(slice_params.get("depth_radius_factor", 0.6) or 0.0),
+            "balance_profiles": bool(slice_params.get("balance_profiles", True)),
+            "pre_slice_bg_removal": bool(slice_params.get("pre_slice_bg_removal", False)),
+            "pre_slice_bg_mode": str(slice_params.get("pre_slice_bg_mode", "line_by_line") or "line_by_line"),
+            "pre_slice_bg_window": int(slice_params.get("pre_slice_bg_window", 0) or 0),
+            "pre_slice_bg_sample_start": int(slice_params.get("pre_slice_bg_sample_start", 0) or 0),
+            "pre_slice_bg_sample_end": int(slice_params.get("pre_slice_bg_sample_end", 0) or 0),
+            "stack_n": int(slice_params.get("stack_n", 1) or 1),
+            "stack_kernel": str(slice_params.get("stack_kernel", "boxcar") or "boxcar"),
+            "flip_traces_mode": str(slice_params.get("flip_traces_mode", "none") or "none"),
+            "topographic_correction": bool(slice_params.get("topographic_correction", False)),
+            "topo_reference_mode": str(slice_params.get("topo_reference_mode", "median") or "median"),
+            "topo_reference_elevation": slice_params.get("topo_reference_elevation"),
+            "parallel_profiles": bool(slice_params.get("parallel_profiles", False)),
+            "profile_workers": int(slice_params.get("profile_workers", 0) or 0),
+        }
+        try:
+            grid, extent = compute_timeslice_preview(
+                profiles=self._profiles,
+                z_from=float(z_from),
+                z_to=float(z_to),
+                resolution=float(res),
+                chain_order=chain_order,
+                **kwargs,
+            )
+        except MemoryError:
+            self._safe_set_text(
+                self._lbl_status,
+                "Preview non eseguibile: memoria insufficiente. Aumenta risoluzione preview.",
+            )
+            return
+        except Exception as exc:
+            self._safe_set_text(self._lbl_status, f"Preview errore: {exc}")
+            return
+
+        self._preview_signature = sig
+        if grid is None or extent is None:
+            self._safe_set_text(self._lbl_status, "Preview: nessun dato nella finestra selezionata.")
+            return
+
+        self._preview_slice_grid = np.asarray(grid, dtype=np.float32)
+        self._preview_slice_extent = tuple(float(v) for v in extent)
+        self._preview_slice_z_from = float(z_from)
+        self._preview_slice_z_to = float(z_to)
+        self._redraw_slice_view(force=True)
 
     def _redraw_slice_view(self, force: bool = False):
         if not HAS_MPL or self._ax_slice is None or self._canvas_slice is None:
+            return
+
+        if bool(getattr(self, "_preview_mode_active", False)):
+            arr = np.asarray(getattr(self, "_preview_slice_grid", None)) if getattr(self, "_preview_slice_grid", None) is not None else None
+            extent = getattr(self, "_preview_slice_extent", None)
+            if arr is None or extent is None or arr.ndim != 2 or arr.size <= 0:
+                self._ax_slice.clear()
+                self._slice_im = None
+                self._slice_vline = None
+                self._slice_hline = None
+                self._ax_slice.text(
+                    0.5,
+                    0.5,
+                    "Preview in attesa...\nMuovi il cursore nel radargramma.",
+                    transform=self._ax_slice.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="#666666",
+                )
+                self._ax_slice.set_title("Timeslice preview")
+                self._ax_slice.set_xticks([])
+                self._ax_slice.set_yticks([])
+                self._safe_draw_idle(self._canvas_slice)
+                return
+
+            finite = arr[np.isfinite(arr)]
+            p_lo = 2.0
+            p_hi = 98.0
+            if hasattr(self, "_spin_slice_vmin_pct") and self._spin_slice_vmin_pct is not None:
+                try:
+                    p_lo = float(self._spin_slice_vmin_pct.value())
+                except Exception:
+                    p_lo = 2.0
+            if hasattr(self, "_spin_slice_vmax_pct") and self._spin_slice_vmax_pct is not None:
+                try:
+                    p_hi = float(self._spin_slice_vmax_pct.value())
+                except Exception:
+                    p_hi = 98.0
+            if p_hi <= p_lo + 0.1:
+                p_hi = min(100.0, p_lo + 0.1)
+            if finite.size > 0:
+                vmin = float(np.nanpercentile(finite, p_lo))
+                vmax = float(np.nanpercentile(finite, p_hi))
+                if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax <= vmin):
+                    vmin = float(np.nanmin(finite))
+                    vmax = float(np.nanmax(finite))
+            else:
+                vmin, vmax = 0.0, 1.0
+            if not np.isfinite(vmin):
+                vmin = 0.0
+            if not np.isfinite(vmax) or vmax <= vmin:
+                vmax = vmin + 1e-6
+
+            cmap = (
+                self._cb_slice_cmap.currentText()
+                if hasattr(self, "_cb_slice_cmap") and self._cb_slice_cmap is not None
+                else DEFAULT_CMAP
+            )
+            arr_masked = np.ma.masked_invalid(arr)
+            slice_cmap = cmap
+            try:
+                from matplotlib import colormaps
+
+                cm_obj = colormaps.get_cmap(str(cmap)).copy()
+                cm_obj.set_bad(color="#e6e6e6", alpha=1.0)
+                slice_cmap = cm_obj
+            except Exception:
+                slice_cmap = cmap
+            self._ax_slice.clear()
+            self._slice_im = self._ax_slice.imshow(
+                arr_masked,
+                cmap=slice_cmap,
+                vmin=vmin,
+                vmax=vmax,
+                extent=[float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3])],
+                origin="upper",
+                aspect="equal",
+                interpolation="bilinear",
+            )
+            xmin, xmax, ymin, ymax = [float(v) for v in extent]
+            x_full = (min(xmin, xmax), max(xmin, xmax))
+            y_full = (min(ymin, ymax), max(ymin, ymax))
+            if self._slice_view_xlim is None:
+                self._slice_view_xlim = x_full
+            if self._slice_view_ylim is None:
+                self._slice_view_ylim = y_full
+            self._slice_view_xlim = self._clamp_axis_limits(
+                self._slice_view_xlim[0], self._slice_view_xlim[1], x_full[0], x_full[1]
+            )
+            self._slice_view_ylim = self._clamp_axis_limits(
+                self._slice_view_ylim[0], self._slice_view_ylim[1], y_full[0], y_full[1]
+            )
+            self._ax_slice.set_xlim(*self._slice_view_xlim)
+            self._ax_slice.set_ylim(*self._slice_view_ylim)
+            self._ax_slice.set_aspect("equal", adjustable="datalim")
+            self._ax_slice.grid(False)
+            self._ax_slice.set_xticks([])
+            self._ax_slice.set_yticks([])
+            self._ax_slice.set_xlabel("")
+            self._ax_slice.set_ylabel("")
+            self._ax_slice.set_facecolor("#e6e6e6")
+            for spine in self._ax_slice.spines.values():
+                spine.set_visible(False)
+            z0 = float(getattr(self, "_preview_slice_z_from", 0.0) or 0.0)
+            z1 = float(getattr(self, "_preview_slice_z_to", z0) or z0)
+            self._ax_slice.set_title(f"Timeslice preview {z0:.2f}-{z1:.2f} m")
+            self._slice_vline = None
+            self._slice_hline = None
+            self._update_slice_crosshair_overlay(draw=False)
+            self._safe_draw_idle(self._canvas_slice)
             return
 
         local_catalog = list(getattr(self, "_slice_catalog", []) or [])
@@ -4697,6 +5055,10 @@ class GprProfileViewer(QMainWindow):
                 self._slider_slice_depth.setEnabled(False)
             finally:
                 self._updating_slice_nav = False
+            if self._is_qt_alive(getattr(self, "_btn_slice_up", None)):
+                self._btn_slice_up.setEnabled(False)
+            if self._is_qt_alive(getattr(self, "_btn_slice_down", None)):
+                self._btn_slice_down.setEnabled(False)
             self._safe_set_text(self._lbl_slice_nav, "\u2014 nessuna slice \u2014")
             if hasattr(self, "_lbl_slice_depth_top"):
                 self._safe_set_text(self._lbl_slice_depth_top, "0.00 m")
@@ -4719,6 +5081,10 @@ class GprProfileViewer(QMainWindow):
             self._slider_slice_depth.setEnabled(True)
         finally:
             self._updating_slice_nav = False
+        if self._is_qt_alive(getattr(self, "_btn_slice_up", None)):
+            self._btn_slice_up.setEnabled(idx > 0)
+        if self._is_qt_alive(getattr(self, "_btn_slice_down", None)):
+            self._btn_slice_down.setEnabled(idx < (n - 1))
 
         self._safe_set_text(self._lbl_slice_nav, f"Slice {idx + 1}/{n}  |  {z_top:.2f}-{z_bot:.2f} m")
         if hasattr(self, "_lbl_slice_depth_top"):
