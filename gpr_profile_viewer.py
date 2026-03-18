@@ -2,7 +2,7 @@
 """
 GPR Profile Viewer
 ==================
-QDialog con radargram matplotlib integrato.
+QMainWindow con radargram matplotlib integrato.
 """
 
 from __future__ import annotations
@@ -301,6 +301,7 @@ class GprProfileViewer(QMainWindow):
         self._fig_slice = None
         self._ax_slice = None
         self._canvas_slice = None
+        self._slider_slice_depth = None
         self._slice_im = None
         self._slice_vline = None
         self._slice_hline = None
@@ -423,6 +424,13 @@ class GprProfileViewer(QMainWindow):
             try:
                 self._xpan_slider.setEnabled(False)
                 self._xpan_slider.setValue(0)
+            except Exception:
+                pass
+        if self._is_qt_alive(getattr(self, "_slider_slice_depth", None)):
+            try:
+                self._slider_slice_depth.setRange(0, 0)
+                self._slider_slice_depth.setValue(0)
+                self._slider_slice_depth.setEnabled(False)
             except Exception:
                 pass
 
@@ -551,17 +559,17 @@ class GprProfileViewer(QMainWindow):
         tb.addAction(act_export)
 
         tb.addSeparator()
-        act_processing = QAction("âš™ Processing", self)
+        act_processing = QAction("Processing", self)
         act_processing.setToolTip("Apri il pannello Processing in una finestra separata.")
         act_processing.triggered.connect(self._open_processing_window)
         tb.addAction(act_processing)
 
-        act_timeslice = QAction("ðŸ—º Timeslice", self)
+        act_timeslice = QAction("Timeslice", self)
         act_timeslice.setToolTip("Apri il pannello Timeslice in una finestra separata.")
         act_timeslice.triggered.connect(self._open_timeslice_window)
         tb.addAction(act_timeslice)
 
-        act_view3d = QAction("ðŸ“¦ 3D Viewer", self)
+        act_view3d = QAction("3D Viewer", self)
         act_view3d.setToolTip("Apri il viewer 3D delle timeslice.")
         act_view3d.triggered.connect(self._open_3d_viewer)
         tb.addAction(act_view3d)
@@ -582,11 +590,22 @@ class GprProfileViewer(QMainWindow):
             self._canvas_slice.mpl_connect("button_release_event", self._on_slice_release)
             self._canvas_slice.mpl_connect("motion_notify_event", self._on_slice_mouse_move)
             self._canvas_slice.mpl_connect("scroll_event", self._on_slice_scroll_zoom)
+            self._slider_slice_depth = QSlider(Qt.Vertical)
+            self._slider_slice_depth.setRange(0, 0)
+            self._slider_slice_depth.setValue(0)
+            self._slider_slice_depth.setEnabled(False)
+            self._slider_slice_depth.setInvertedAppearance(True)
+            self._slider_slice_depth.setInvertedControls(True)
+            self._slider_slice_depth.setToolTip(
+                "Scorri tra le slice calcolate.\nSu = superficiale | Giu = profondo"
+            )
+            self._slider_slice_depth.valueChanged.connect(self._on_slice_depth_slider)
             slice_host = QWidget()
-            slice_lay = QVBoxLayout(slice_host)
+            slice_lay = QHBoxLayout(slice_host)
             slice_lay.setContentsMargins(0, 0, 0, 0)
-            slice_lay.setSpacing(2)
+            slice_lay.setSpacing(4)
             slice_lay.addWidget(self._canvas_slice, stretch=1)
+            slice_lay.addWidget(self._slider_slice_depth, stretch=0)
 
             # Lower panel: radargram + wiggle + pan slider.
             self._fig = Figure(figsize=(9, 3), tight_layout=False)
@@ -970,7 +989,7 @@ class GprProfileViewer(QMainWindow):
         self._chk_bg = QCheckBox()
         self._chk_bg.setChecked(True)
         self._chk_bg.setToolTip(
-            "Background Removal (GPR-SLICE Â§Background Removal, pag. 166).\n"
+            "Background Removal (GPR-SLICE section Background Removal, pag. 166).\n"
             "Sottrae la traccia media per eliminare banding orizzontale.\n\n"
             "ATTENZIONE: rimuove anche riflessi reali paralleli al profilo."
         )
@@ -1013,7 +1032,7 @@ class GprProfileViewer(QMainWindow):
             "Imposta > 0 per ESCLUDERE i primi N campioni dalla sottrazione.\n"
             "Effetto: preserva il ground coupling / onda diretta nei primi\n"
             "campioni, permettendo all'AGC di amplificarli correttamente.\n"
-            "Esempio: per 600 MHz con dt=0.117 ns, 0.5 m â‰ˆ 28 campioni."
+            "Esempio: per 600 MHz con dt=0.117 ns, 0.5 m ~ 28 campioni."
         )
 
         self._spin_bg_sample_end = QSpinBox()
@@ -1513,41 +1532,23 @@ class GprProfileViewer(QMainWindow):
         fl_slice.addRow("Smooth gaussiano:",   self._chk_smooth)
         fl_slice.addRow("  sigma:",            self._spin_smooth_sigma)
 
-        btn_slice = QPushButton("\U0001f5fa  Crea Timeslice\u2026")
+        btn_slice = QPushButton("Crea Timeslice...")
         btn_slice.clicked.connect(self._open_slice_dialog)
         fl_slice.addRow(btn_slice)
 
         self._lbl_slice_nav = QLabel("\u2014 nessuna slice \u2014")
         self._lbl_slice_nav.setAlignment(Qt.AlignCenter)
-        self._slider_slice_depth = QSlider(Qt.Vertical)
-        self._slider_slice_depth.setRange(0, 0)
-        self._slider_slice_depth.setValue(0)
-        self._slider_slice_depth.setEnabled(False)
-        self._slider_slice_depth.setMinimumHeight(180)
-        self._slider_slice_depth.setInvertedAppearance(True)
-        self._slider_slice_depth.setInvertedControls(True)
-        self._slider_slice_depth.setToolTip(
-            "Navigator verticale delle slice gia' calcolate.\n"
-            "Su = superficiale, giu' = profondo."
-        )
-        self._slider_slice_depth.valueChanged.connect(self._on_slice_depth_slider)
-
         self._lbl_slice_depth_top = QLabel("0.00 m")
         self._lbl_slice_depth_bottom = QLabel("\u2014")
         self._lbl_slice_depth_top.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self._lbl_slice_depth_bottom.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
-
-        nav_widget = QWidget()
-        nav_layout = QHBoxLayout(nav_widget)
-        nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(6)
-        nav_layout.addWidget(self._slider_slice_depth, 0)
-        nav_labels = QVBoxLayout()
-        nav_labels.setContentsMargins(0, 0, 0, 0)
-        nav_labels.addWidget(self._lbl_slice_depth_top)
-        nav_labels.addStretch(1)
-        nav_labels.addWidget(self._lbl_slice_depth_bottom)
-        nav_layout.addLayout(nav_labels, 1)
+        depth_row = QWidget()
+        depth_layout = QHBoxLayout(depth_row)
+        depth_layout.setContentsMargins(0, 0, 0, 0)
+        depth_layout.setSpacing(8)
+        depth_layout.addWidget(self._lbl_slice_depth_top)
+        depth_layout.addStretch(1)
+        depth_layout.addWidget(self._lbl_slice_depth_bottom)
 
         btn_slice_up = QPushButton("\u25b2 Slice su")
         btn_slice_up.clicked.connect(lambda: self._step_slice(-1))
@@ -1561,7 +1562,7 @@ class GprProfileViewer(QMainWindow):
         nav_btn_layout.addWidget(btn_slice_down)
 
         fl_slice.addRow("Navigator:", self._lbl_slice_nav)
-        fl_slice.addRow(nav_widget)
+        fl_slice.addRow(depth_row)
         fl_slice.addRow(nav_btn_row)
 
         btn_slice_import = QPushButton("Import to Canvas")
@@ -1692,7 +1693,7 @@ class GprProfileViewer(QMainWindow):
             ax.text(0.5, 0.5, "Nessun dato", ha="center", va="center", transform=ax.transAxes)
             ax.set_xticks([])
             ax.set_yticks([])
-            self._bp_canvas.draw_idle()
+            self._safe_draw_idle(self._bp_canvas)
             return
 
         n_s, n_t = int(arr.shape[0]), int(arr.shape[1])
@@ -1700,7 +1701,7 @@ class GprProfileViewer(QMainWindow):
             ax.text(0.5, 0.5, "Dati insufficienti", ha="center", va="center", transform=ax.transAxes)
             ax.set_xticks([])
             ax.set_yticks([])
-            self._bp_canvas.draw_idle()
+            self._safe_draw_idle(self._bp_canvas)
             return
 
         dt_s = self._current_dt_ns() * 1e-9
@@ -1728,7 +1729,7 @@ class GprProfileViewer(QMainWindow):
             ax.text(0.5, 0.5, "Spettro non disponibile", ha="center", va="center", transform=ax.transAxes)
             ax.set_xticks([])
             ax.set_yticks([])
-            self._bp_canvas.draw_idle()
+            self._safe_draw_idle(self._bp_canvas)
             return
 
         fx = freqs_mhz[valid]
@@ -1751,7 +1752,7 @@ class GprProfileViewer(QMainWindow):
         ax.set_title("Bandpass")
         ax.grid(True, ls=":", lw=0.4, alpha=0.6)
         try:
-            self._bp_canvas.draw_idle()
+            self._safe_draw_idle(self._bp_canvas)
         except Exception:
             pass
 
@@ -2724,7 +2725,7 @@ class GprProfileViewer(QMainWindow):
         self._view_xlim = (lo, hi)
         self._ax.set_xlim(*self._view_xlim)
         if self._canvas_mpl is not None:
-            self._canvas_mpl.draw_idle()
+            self._safe_draw_idle(self._canvas_mpl)
         self._sync_xpan_slider()
 
     def _export_radargram_image(self):
@@ -2887,7 +2888,7 @@ class GprProfileViewer(QMainWindow):
         self._apply_wiggle_visibility_layout()
         self._sync_xpan_slider()
         self._update_wiggle_plot(draw=False, force=True)
-        self._canvas_mpl.draw_idle()
+        self._safe_draw_idle(self._canvas_mpl)
         self._redraw_slice_view()
 
     def _depth_max_display(self, prof) -> float:
@@ -2991,7 +2992,7 @@ class GprProfileViewer(QMainWindow):
             self._wiggle_trace_idx = None
             self._wiggle_depth_line = None
             if draw:
-                self._canvas_mpl.draw_idle()
+                self._safe_draw_idle(self._canvas_mpl)
             return
 
         metrics = self._cursor_metrics()
@@ -3012,7 +3013,7 @@ class GprProfileViewer(QMainWindow):
             self._wiggle_trace_idx = None
             self._wiggle_depth_line = None
             if draw:
-                self._canvas_mpl.draw_idle()
+                self._safe_draw_idle(self._canvas_mpl)
             return
 
         depth_axis = np.linspace(0.0, float(depth_max), trace.size, dtype=np.float64)
@@ -3031,7 +3032,7 @@ class GprProfileViewer(QMainWindow):
                 except Exception:
                     can_incremental = False
             if can_incremental and draw:
-                self._canvas_mpl.draw_idle()
+                self._safe_draw_idle(self._canvas_mpl)
             if can_incremental:
                 return
 
@@ -3087,7 +3088,7 @@ class GprProfileViewer(QMainWindow):
             spine.set_linewidth(0.5)
         self._wiggle_trace_idx = int(idx_t)
         if draw:
-            self._canvas_mpl.draw_idle()
+            self._safe_draw_idle(self._canvas_mpl)
 
     # ------------------------------------------------------------------
     # Cursore
@@ -3148,12 +3149,12 @@ class GprProfileViewer(QMainWindow):
         self._ax.set_xlim(*self._view_xlim)
         self._ax.set_ylim(*self._view_ylim)
         self._sync_xpan_slider()
-        self._canvas_mpl.draw_idle()
+        self._safe_draw_idle(self._canvas_mpl)
 
     def _on_axes_leave(self, event):
         if self._vline: self._vline.set_visible(False)
         if self._hline: self._hline.set_visible(False)
-        self._canvas_mpl.draw_idle()
+        self._safe_draw_idle(self._canvas_mpl)
 
     def _update_cursor_lines(self):
         if self._vline and self._cursor_x is not None:
@@ -3162,7 +3163,7 @@ class GprProfileViewer(QMainWindow):
         if self._hline and self._cursor_z is not None:
             self._hline.set_ydata([self._cursor_z])
             self._hline.set_visible(True)
-        self._canvas_mpl.draw_idle()
+        self._safe_draw_idle(self._canvas_mpl)
 
     def _update_status(self):
         if not self._profiles:
@@ -3630,7 +3631,7 @@ class GprProfileViewer(QMainWindow):
         else:
             self._slice_hline.set_ydata([yw, yw])
         if draw and self._canvas_slice is not None:
-            self._canvas_slice.draw_idle()
+            self._safe_draw_idle(self._canvas_slice)
         return True
 
     def _on_slice_clip_changed(self, _value):
@@ -3687,7 +3688,7 @@ class GprProfileViewer(QMainWindow):
             self._ax_slice.set_title("Timeslice locale")
             self._ax_slice.set_xticks([])
             self._ax_slice.set_yticks([])
-            self._canvas_slice.draw_idle()
+            self._safe_draw_idle(self._canvas_slice)
             return
 
         idx = 0 if self._slice_current_idx is None else int(self._slice_current_idx)
@@ -3706,7 +3707,7 @@ class GprProfileViewer(QMainWindow):
             self._ax_slice.set_title(f"Slice {idx} - percorso raster non disponibile")
             self._ax_slice.set_xticks([])
             self._ax_slice.set_yticks([])
-            self._canvas_slice.draw_idle()
+            self._safe_draw_idle(self._canvas_slice)
             return
         if not os.path.exists(raster_path):
             self._ax_slice.clear()
@@ -3714,7 +3715,7 @@ class GprProfileViewer(QMainWindow):
             self._ax_slice.set_title(f"Slice {idx} - file non trovato")
             self._ax_slice.set_xticks([])
             self._ax_slice.set_yticks([])
-            self._canvas_slice.draw_idle()
+            self._safe_draw_idle(self._canvas_slice)
             return
 
         needs_full_redraw = bool(
@@ -3733,7 +3734,7 @@ class GprProfileViewer(QMainWindow):
                 self._ax_slice.set_title(f"Errore lettura raster: {exc}")
                 self._ax_slice.set_xticks([])
                 self._ax_slice.set_yticks([])
-                self._canvas_slice.draw_idle()
+                self._safe_draw_idle(self._canvas_slice)
                 return
             if arr is None or extent is None:
                 self._ax_slice.clear()
@@ -3741,7 +3742,7 @@ class GprProfileViewer(QMainWindow):
                 self._ax_slice.set_title("Errore lettura raster")
                 self._ax_slice.set_xticks([])
                 self._ax_slice.set_yticks([])
-                self._canvas_slice.draw_idle()
+                self._safe_draw_idle(self._canvas_slice)
                 return
 
             finite = arr[np.isfinite(arr)]
@@ -3855,7 +3856,7 @@ class GprProfileViewer(QMainWindow):
 
         changed = self._update_slice_crosshair_overlay(draw=False)
         if changed or needs_full_redraw:
-            self._canvas_slice.draw_idle()
+            self._safe_draw_idle(self._canvas_slice)
 
     def _on_slice_press(self, event):
         if event is None or event.inaxes != self._ax_slice:
@@ -3900,7 +3901,7 @@ class GprProfileViewer(QMainWindow):
                 self._slice_view_ylim = self._clamp_axis_limits(ny0, ny1, y_min, y_max)
                 self._ax_slice.set_xlim(*self._slice_view_xlim)
                 self._ax_slice.set_ylim(*self._slice_view_ylim)
-                self._canvas_slice.draw_idle()
+                self._safe_draw_idle(self._canvas_slice)
             except Exception:
                 pass
             return
@@ -3944,7 +3945,7 @@ class GprProfileViewer(QMainWindow):
         self._slice_view_ylim = self._clamp_axis_limits(ny0, ny1, y_min, y_max)
         self._ax_slice.set_xlim(*self._slice_view_xlim)
         self._ax_slice.set_ylim(*self._slice_view_ylim)
-        self._canvas_slice.draw_idle()
+        self._safe_draw_idle(self._canvas_slice)
 
     def _update_dial(self):
         if self._cursor_z is None or self.plugin is None:
@@ -3961,16 +3962,25 @@ class GprProfileViewer(QMainWindow):
             return
         try:
             slices = list(getattr(self, "_slice_catalog", []) or [])
-            if slices:
+            if not slices:
+                return
+            centers = []
+            for i, s in enumerate(slices):
+                try:
+                    zc = s.get("z_center", None)
+                    if zc is None:
+                        z0 = float(s.get("z_top", 0.0) or 0.0)
+                        z1 = float(s.get("z_bot", z0) or z0)
+                        zc = 0.5 * (z0 + z1)
+                    centers.append((i, float(zc)))
+                except Exception:
+                    continue
+            if not centers:
                 idx = int(self._slice_current_idx if self._slice_current_idx is not None else 0)
                 idx = int(np.clip(idx, 0, len(slices) - 1))
             else:
-                _grp, slices = self._active_group_timeslices_context()
-                if not slices:
-                    return
-                idx = self._nearest_timeslice_index(slices, float(self._cursor_z))
-                if idx is None:
-                    return
+                target = float(self._cursor_z)
+                idx = min(centers, key=lambda p: abs(p[1] - target))[0]
             dial_val = int(np.clip(idx, 0, int(dial.maximum())))
             if dial.value() != dial_val:
                 dial.setValue(dial_val)
@@ -3982,27 +3992,34 @@ class GprProfileViewer(QMainWindow):
             return
         if self._cursor_z is None or self.plugin is None:
             return
-        grp, slices = self._active_group_timeslices_context()
-        if grp is None or not slices:
+
+        slices = list(getattr(self, "_slice_catalog", []) or [])
+        if not slices:
             return
-        idx = self._nearest_timeslice_index(slices, float(self._cursor_z))
-        if idx is None:
+
+        centers = []
+        for i, s in enumerate(slices):
+            try:
+                zc = s.get("z_center", None)
+                if zc is None:
+                    z0 = float(s.get("z_top", 0.0) or 0.0)
+                    z1 = float(s.get("z_bot", z0) or z0)
+                    zc = 0.5 * (z0 + z1)
+                centers.append((i, float(zc)))
+            except Exception:
+                continue
+        if not centers:
             return
-        group_name = str(grp.get("name") or "").strip()
-        if not group_name:
-            return
+
+        target = float(self._cursor_z)
+        idx = min(centers, key=lambda p: abs(p[1] - target))[0]
+
         try:
-            if hasattr(self.plugin, "_sync_qgis_group_visibility_with_selection"):
-                self.plugin._sync_qgis_group_visibility_with_selection()
-        except Exception:
-            pass
-        try:
-            get_group = getattr(self.plugin, "_get_or_create_plugin_qgis_group", None)
-            if not callable(get_group):
-                return
-            qgis_group = get_group(group_name)
+            root = QgsProject.instance().layerTreeRoot()
+            qgis_group = root.findGroup("GPR Timeslices")
             if qgis_group is None:
                 return
+
             raster_nodes = []
             for child in qgis_group.children():
                 if not hasattr(child, "setItemVisibilityChecked"):
@@ -4877,4 +4894,5 @@ class GprProfileViewer(QMainWindow):
                 except Exception:
                     pass
         super().closeEvent(event)
+
 
