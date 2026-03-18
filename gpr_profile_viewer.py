@@ -54,7 +54,19 @@ except ImportError:
     HAS_MPL = False
 
 from .gpr_ogpr_reader import read_ogpr_cached, OgprProfile, OgprChannel
-from .gpr_processing  import apply_pipeline, DEFAULT_PIPELINE, normalize_display
+from .gpr_processing import (
+    apply_pipeline,
+    DEFAULT_PIPELINE,
+    DEFAULT_CHAIN_ORDER,
+    FILTER_REGISTRY,
+    normalize_display,
+)
+
+try:
+    from .filter_chain_widget import FilterChainWidget, FilterBlockWidget
+except Exception:
+    FilterChainWidget = None
+    FilterBlockWidget = None
 
 
 GPR_CMAPS    = [
@@ -384,6 +396,9 @@ class GprProfileViewer(QMainWindow):
         self._ax_main_bounds_default = None
         self._ax_wiggle_bounds_default = None
         self._last_pipeline_params: dict = {}
+        self._filter_chain_widget = None
+        self._filter_chain_blocks: dict[str, object] = {}
+        self._syncing_filter_chain = False
         self._profile_view_initialized: bool = True
         self._allow_close: bool = False
 
@@ -1030,6 +1045,133 @@ class GprProfileViewer(QMainWindow):
         self._apply_wiggle_visibility_layout()
         self._redraw()
 
+    def _pipeline_chain_help_text(self, step_id: str) -> str:
+        txt = {
+            "timezero": "Corregge il time-zero prima degli altri filtri.",
+            "dewow": "Rimuove la componente lenta/DC della traccia.",
+            "bandpass": "Applica filtro passa-banda in frequenza.",
+            "bg_removal": "Sottrae il clutter orizzontale (background).",
+            "pre_agc_gain": "Range gain applicato prima dell'AGC.",
+            "agc": "Equalizza dinamicamente l'ampiezza con finestra locale.",
+            "envelope": "Converte il segnale in inviluppo Hilbert (solo ampiezza).",
+        }
+        return txt.get(str(step_id), "")
+
+    def _build_filter_chain_controls(self):
+        if FilterChainWidget is None or FilterBlockWidget is None:
+            return None
+        try:
+            chain = FilterChainWidget(self)
+            blocks = {}
+            for sid in list(DEFAULT_CHAIN_ORDER):
+                meta = FILTER_REGISTRY.get(sid, {})
+                label = str(meta.get("label", sid))
+                block = FilterBlockWidget(
+                    sid,
+                    label,
+                    help_text=self._pipeline_chain_help_text(sid),
+                    parent=chain,
+                )
+                chain.add_block(block)
+                blocks[sid] = block
+            chain.chain_changed.connect(self._on_filter_chain_widget_changed)
+            self._filter_chain_widget = chain
+            self._filter_chain_blocks = blocks
+            return chain
+        except Exception:
+            self._filter_chain_widget = None
+            self._filter_chain_blocks = {}
+            return None
+
+    def _pipeline_enabled_map_from_controls(self) -> dict:
+        chk_rg = bool(getattr(self, "_chk_range_gain", None) and self._chk_range_gain.isChecked())
+        chk_rg_pre = bool(
+            getattr(self, "_chk_range_gain_pre_agc", None)
+            and self._chk_range_gain_pre_agc.isChecked()
+        )
+        return {
+            "dewow": bool(getattr(self, "_chk_dewow", None) and self._chk_dewow.isChecked()),
+            "timezero": bool(getattr(self, "_chk_timezero", None) and self._chk_timezero.isChecked()),
+            "bg_removal": bool(getattr(self, "_chk_bg", None) and self._chk_bg.isChecked()),
+            "pre_agc_gain": bool(chk_rg and chk_rg_pre),
+            "agc": bool(getattr(self, "_chk_agc", None) and self._chk_agc.isChecked()),
+            "bandpass": bool(getattr(self, "_chk_bp", None) and self._chk_bp.isChecked()),
+            "envelope": bool(getattr(self, "_chk_envelope", None) and self._chk_envelope.isChecked()),
+        }
+
+    def _current_chain_order(self) -> list[str]:
+        if self._is_qt_alive(self._filter_chain_widget):
+            try:
+                ids = list(self._filter_chain_widget.get_ordered_chain_ids())
+                if ids:
+                    return ids
+            except Exception:
+                pass
+        return list(DEFAULT_CHAIN_ORDER)
+
+    def _sync_filter_chain_from_controls(self):
+        if self._syncing_filter_chain:
+            return
+        if not self._is_qt_alive(self._filter_chain_widget):
+            return
+        self._syncing_filter_chain = True
+        try:
+            self._filter_chain_widget.set_enabled_map(
+                self._pipeline_enabled_map_from_controls(),
+                emit_signal=False,
+            )
+        except Exception:
+            pass
+        finally:
+            self._syncing_filter_chain = False
+
+    def _on_filter_chain_widget_changed(self):
+        if self._syncing_filter_chain:
+            return
+        if not self._is_qt_alive(self._filter_chain_widget):
+            return
+        try:
+            enabled = dict(self._filter_chain_widget.get_enabled_map() or {})
+        except Exception:
+            return
+
+        self._syncing_filter_chain = True
+        try:
+            if self._is_qt_alive(getattr(self, "_chk_dewow", None)):
+                self._chk_dewow.setChecked(bool(enabled.get("dewow", self._chk_dewow.isChecked())))
+            if self._is_qt_alive(getattr(self, "_chk_timezero", None)):
+                self._chk_timezero.setChecked(bool(enabled.get("timezero", self._chk_timezero.isChecked())))
+            if self._is_qt_alive(getattr(self, "_chk_bg", None)):
+                self._chk_bg.setChecked(bool(enabled.get("bg_removal", self._chk_bg.isChecked())))
+            if self._is_qt_alive(getattr(self, "_chk_agc", None)):
+                self._chk_agc.setChecked(bool(enabled.get("agc", self._chk_agc.isChecked())))
+            if self._is_qt_alive(getattr(self, "_chk_bp", None)):
+                self._chk_bp.setChecked(bool(enabled.get("bandpass", self._chk_bp.isChecked())))
+            if self._is_qt_alive(getattr(self, "_chk_envelope", None)):
+                self._chk_envelope.setChecked(bool(enabled.get("envelope", self._chk_envelope.isChecked())))
+
+            pre_agc_enabled = bool(
+                enabled.get(
+                    "pre_agc_gain",
+                    bool(
+                        self._is_qt_alive(getattr(self, "_chk_range_gain_pre_agc", None))
+                        and self._chk_range_gain_pre_agc.isChecked()
+                    ),
+                )
+            )
+            if pre_agc_enabled and self._is_qt_alive(getattr(self, "_chk_range_gain", None)):
+                self._chk_range_gain.setChecked(True)
+            if self._is_qt_alive(getattr(self, "_chk_range_gain_pre_agc", None)):
+                self._chk_range_gain_pre_agc.setChecked(pre_agc_enabled)
+        finally:
+            self._syncing_filter_chain = False
+
+        if self._raw_data is not None:
+            self._apply_processing()
+
+    def _on_filter_chain_source_toggled(self, _value=None):
+        self._sync_filter_chain_from_controls()
+
     def _build_processing_panel(self):
         grp = QGroupBox("Processing")
         fl  = QFormLayout(grp)
@@ -1155,6 +1297,13 @@ class GprProfileViewer(QMainWindow):
         self._spin_bp_lo.valueChanged.connect(self._on_bp_spin_changed)
         self._spin_bp_hi.valueChanged.connect(self._on_bp_spin_changed)
 
+        # Envelope
+        self._chk_envelope = QCheckBox()
+        self._chk_envelope.setChecked(False)
+        self._chk_envelope.setToolTip(
+            "Converte il segnale in inviluppo Hilbert all'interno della pipeline."
+        )
+
         # Display
         self._spin_clip = QDoubleSpinBox()
         self._spin_clip.setRange(50.0, 99.9); self._spin_clip.setSingleStep(1.0)
@@ -1242,6 +1391,20 @@ class GprProfileViewer(QMainWindow):
         self._spin_gain_deep.valueChanged.connect(self._on_range_gain_deep_changed)
         self._spin_range_gain_power.valueChanged.connect(lambda _v: self._apply_range_gain_change())
         self._cb_range_gain_curve.currentIndexChanged.connect(self._on_range_gain_mode_changed)
+        for _chk in (
+            self._chk_dewow,
+            self._chk_timezero,
+            self._chk_bg,
+            self._chk_agc,
+            self._chk_bp,
+            self._chk_envelope,
+            self._chk_range_gain,
+            self._chk_range_gain_pre_agc,
+        ):
+            try:
+                _chk.toggled.connect(self._on_filter_chain_source_toggled)
+            except Exception:
+                pass
 
         self._chk_hyperbola = QCheckBox()
         self._chk_hyperbola.setChecked(False)
@@ -1278,6 +1441,7 @@ class GprProfileViewer(QMainWindow):
         self._btn_load_gain_preset = QPushButton("Load Gain/Hyper Preset")
         self._btn_save_gain_preset.clicked.connect(self._save_gain_hyper_preset)
         self._btn_load_gain_preset.clicked.connect(self._load_gain_hyper_preset)
+        self._filter_chain_widget = self._build_filter_chain_controls()
 
         fl.addRow("Dewow:",              self._chk_dewow)
         fl.addRow("  finestra:",         self._spin_dewow)
@@ -1297,6 +1461,7 @@ class GprProfileViewer(QMainWindow):
         fl.addRow("Bandpass:",           self._chk_bp)
         fl.addRow("  low (MHz):",        self._spin_bp_lo)
         fl.addRow("  high (MHz):",       self._spin_bp_hi)
+        fl.addRow("Envelope:",           self._chk_envelope)
         if HAS_MPL:
             self._bp_figure = Figure(figsize=(3.2, 1.8), tight_layout=True)
             self._bp_ax = self._bp_figure.add_subplot(111)
@@ -1336,6 +1501,8 @@ class GprProfileViewer(QMainWindow):
         fl.addRow("  apex:",             self._btn_set_hyper_apex)
         fl.addRow("  auto-fit:",         self._btn_hyper_auto_fit)
         fl.addRow("  clear apex:",       self._btn_clear_hyper)
+        if self._is_qt_alive(self._filter_chain_widget):
+            fl.addRow("Pipeline chain:", self._filter_chain_widget)
         fl.addRow(self._btn_save_gain_preset)
         fl.addRow(self._btn_load_gain_preset)
 
@@ -1772,6 +1939,7 @@ class GprProfileViewer(QMainWindow):
             reset_index=True,
             redraw=False,
         )
+        self._sync_filter_chain_from_controls()
         return processing_scroll, timeslice_scroll
 
     def _current_dt_ns(self) -> float:
@@ -2211,8 +2379,10 @@ class GprProfileViewer(QMainWindow):
             "pre_agc_power": float(self._spin_range_gain_power.value()),
             "pre_agc_breakpoints": [[float(x), float(y)] for x, y in rg_points.tolist()],
             "bandpass": bool(self._chk_bp.isChecked()),
+            "envelope": bool(getattr(self, "_chk_envelope", None) and self._chk_envelope.isChecked()),
             "bp_low_mhz": float(bp_lo),
             "bp_high_mhz": float(bp_hi),
+            "chain_order": self._current_chain_order(),
             "clip_pct": float(self._spin_clip.value()),
         }
 
@@ -2228,6 +2398,7 @@ class GprProfileViewer(QMainWindow):
             getattr(self, "_chk_bg", None),
             getattr(self, "_chk_agc", None),
             getattr(self, "_spin_agc", None),
+            getattr(self, "_chk_envelope", None),
         ):
             if not self._is_qt_alive(w):
                 return
@@ -2236,7 +2407,11 @@ class GprProfileViewer(QMainWindow):
         prof = self._profiles[self._prof_idx]
         try:
             self._proc_data = apply_pipeline(
-                self._raw_data, params, dt_ns=prof.dt_ns, normalize_output=False
+                self._raw_data,
+                params,
+                dt_ns=prof.dt_ns,
+                normalize_output=False,
+                chain_order=params.get("chain_order"),
             )
         except Exception as e:
             QMessageBox.critical(self, "Errore processing", str(e))

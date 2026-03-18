@@ -374,8 +374,72 @@ DEFAULT_PIPELINE = {
     "bandpass":         False,
     "bp_low_mhz":       100.0,
     "bp_high_mhz":      1200.0,
+    "envelope":         False,
+    "chain_order":      None,
     "clip_pct":         98.0,
 }
+
+
+FILTER_REGISTRY = {
+    "timezero": {
+        "label": "Tempo zero",
+        "param_key": "timezero",
+    },
+    "dewow": {
+        "label": "Wobble removal (dewow)",
+        "param_key": "dewow",
+    },
+    "bandpass": {
+        "label": "Filtro passa-banda",
+        "param_key": "bandpass",
+    },
+    "bg_removal": {
+        "label": "Rimozione rumore di fondo",
+        "param_key": "bg_removal",
+    },
+    "pre_agc_gain": {
+        "label": "Range gain (pre-AGC)",
+        "param_key": "pre_agc_gain",
+    },
+    "agc": {
+        "label": "Guadagno automatico (AGC)",
+        "param_key": "agc",
+    },
+    "envelope": {
+        "label": "Inviluppo (Hilbert)",
+        "param_key": "envelope",
+    },
+}
+
+DEFAULT_CHAIN_ORDER = [
+    "dewow",
+    "timezero",
+    "bg_removal",
+    "pre_agc_gain",
+    "agc",
+    "bandpass",
+    "envelope",
+]
+
+
+def _resolve_chain_order(chain_order, params: dict) -> list[str]:
+    """Resolve pipeline order from explicit arg or params['chain_order']."""
+    raw = chain_order if chain_order is not None else params.get("chain_order")
+    if raw is None:
+        return list(DEFAULT_CHAIN_ORDER)
+    if isinstance(raw, (list, tuple)):
+        seen = set()
+        out = []
+        for step in raw:
+            sid = str(step or "").strip()
+            if sid in FILTER_REGISTRY and sid not in seen:
+                out.append(sid)
+                seen.add(sid)
+        for sid in DEFAULT_CHAIN_ORDER:
+            if sid not in seen:
+                out.append(sid)
+        return out
+    return list(DEFAULT_CHAIN_ORDER)
 
 
 def _sanitize_gain_breakpoints(points) -> np.ndarray:
@@ -472,6 +536,7 @@ def apply_pipeline(
     dt_ns: float = 0.117,
     bg_reference_trace: np.ndarray | None = None,
     normalize_output: bool = True,
+    chain_order: list[str] | None = None,
 ) -> np.ndarray:
     """
     Applica la pipeline di processing completa.
@@ -485,8 +550,9 @@ def apply_pipeline(
                           Fornita da _process_profiles() per grid_by_grid
                           a due passate; None per line_by_line.
     """
-    p   = {**DEFAULT_PIPELINE, **params}
+    p = {**DEFAULT_PIPELINE, **params}
     out = data.copy()
+    order = _resolve_chain_order(chain_order, p)
 
     def _log(tag: str, arr: np.ndarray) -> None:
         mn = float(arr.min())
@@ -497,53 +563,73 @@ def apply_pipeline(
 
     _log("raw", out)
 
-    if p["dewow"]:
-        out = dewow(out, window=int(p["dewow_win"]))
-        _log(f"dewow(win={p['dewow_win']})", out)
+    for step in order:
+        if step == "dewow":
+            if p["dewow"]:
+                out = dewow(out, window=int(p["dewow_win"]))
+                _log(f"dewow(win={p['dewow_win']})", out)
+            continue
 
-    if p["timezero"]:
-        out = time_zero_correction(
-            out,
-            method       = str(p.get("tz_method",      "peak")),
-            mode         = str(p.get("tz_mode",        "line_by_line")),
-            threshold    = float(p.get("tz_threshold",  0.2)),
-            backup_nsamp = int(p.get("tz_backup_nsamp", 4)),
-        )
-        _log("timezero", out)
+        if step == "timezero":
+            if p["timezero"]:
+                out = time_zero_correction(
+                    out,
+                    method=str(p.get("tz_method", "peak")),
+                    mode=str(p.get("tz_mode", "line_by_line")),
+                    threshold=float(p.get("tz_threshold", 0.2)),
+                    backup_nsamp=int(p.get("tz_backup_nsamp", 4)),
+                )
+                _log("timezero", out)
+            continue
 
-    if p["bg_removal"]:
-        bg_mode         = str(p.get("bg_mode",         "line_by_line"))
-        bg_window       = int(p.get("bg_window",        0))
-        bg_sample_start = int(p.get("bg_sample_start",  0))
-        bg_sample_end   = int(p.get("bg_sample_end",    0))
-        out = background_removal(
-            out,
-            mode            = bg_mode,
-            window          = bg_window,
-            reference_trace = bg_reference_trace,
-            sample_start    = bg_sample_start,
-            sample_end      = bg_sample_end,
-        )
-        win_lbl = "auto" if bg_window <= 0 else str(bg_window)
-        s_lbl   = f"{bg_sample_start}:{bg_sample_end if bg_sample_end > 0 else 'end'}"
-        _log(f"bg_removal(mode={bg_mode} win={win_lbl} s=[{s_lbl}])", out)
+        if step == "bg_removal":
+            if p["bg_removal"]:
+                bg_mode = str(p.get("bg_mode", "line_by_line"))
+                bg_window = int(p.get("bg_window", 0))
+                bg_sample_start = int(p.get("bg_sample_start", 0))
+                bg_sample_end = int(p.get("bg_sample_end", 0))
+                out = background_removal(
+                    out,
+                    mode=bg_mode,
+                    window=bg_window,
+                    reference_trace=bg_reference_trace,
+                    sample_start=bg_sample_start,
+                    sample_end=bg_sample_end,
+                )
+                win_lbl = "auto" if bg_window <= 0 else str(bg_window)
+                s_lbl = f"{bg_sample_start}:{bg_sample_end if bg_sample_end > 0 else 'end'}"
+                _log(f"bg_removal(mode={bg_mode} win={win_lbl} s=[{s_lbl}])", out)
+            continue
 
-    if bool(p.get("pre_agc_gain", False)):
-        gain = _build_pre_agc_gain(int(out.shape[0]), p)
-        out = (out.astype(np.float32, copy=False) * gain).astype(np.float32, copy=False)
-        _log("pre_agc_gain", out)
+        if step == "pre_agc_gain":
+            if bool(p.get("pre_agc_gain", False)):
+                gain = _build_pre_agc_gain(int(out.shape[0]), p)
+                out = (out.astype(np.float32, copy=False) * gain).astype(np.float32, copy=False)
+                _log("pre_agc_gain", out)
+            continue
 
-    if p["agc"]:
-        out = agc_gain(out, window=int(p["agc_win"]))
-        _log(f"agc(win={p['agc_win']})", out)
+        if step == "agc":
+            if p["agc"]:
+                out = agc_gain(out, window=int(p["agc_win"]))
+                _log(f"agc(win={p['agc_win']})", out)
+            continue
 
-    if p["bandpass"]:
-        out = bandpass_filter(
-            out, dt_ns,
-            float(p["bp_low_mhz"]),
-            float(p["bp_high_mhz"]),
-        )
-        _log(f"bandpass({p['bp_low_mhz']}-{p['bp_high_mhz']}MHz)", out)
+        if step == "bandpass":
+            if p["bandpass"]:
+                out = bandpass_filter(
+                    out,
+                    dt_ns,
+                    float(p["bp_low_mhz"]),
+                    float(p["bp_high_mhz"]),
+                )
+                _log(f"bandpass({p['bp_low_mhz']}-{p['bp_high_mhz']}MHz)", out)
+            continue
+
+        if step == "envelope":
+            if bool(p.get("envelope", False)):
+                out = hilbert_envelope(out)
+                _log("envelope(hilbert)", out)
+            continue
 
     if normalize_output:
         out = normalize_display(out, clip_pct=float(p["clip_pct"]))
