@@ -363,11 +363,75 @@ DEFAULT_PIPELINE = {
     "bg_sample_end":    0,    # 0 = auto (intera traccia)
     "agc":              True,
     "agc_win":          128,
+    # Optional depth-dependent gain applied BEFORE AGC.
+    # Useful to attenuate direct-wave/surface burst before local AGC normalization.
+    "pre_agc_gain":     False,
+    "pre_agc_surface_gain": 1.0,
+    "pre_agc_deep_gain":    1.0,
+    "pre_agc_curve":        "power",  # linear|power|exp|breakpoints
+    "pre_agc_power":        1.8,
+    "pre_agc_breakpoints":  None,     # [[x(0..1), gain], ...]
     "bandpass":         False,
     "bp_low_mhz":       100.0,
     "bp_high_mhz":      1200.0,
     "clip_pct":         98.0,
 }
+
+
+def _sanitize_gain_breakpoints(points) -> np.ndarray:
+    rows = []
+    if isinstance(points, np.ndarray):
+        pts_iter = points.tolist()
+    elif isinstance(points, (list, tuple)):
+        pts_iter = points
+    else:
+        pts_iter = []
+    for it in pts_iter:
+        try:
+            x = float(it[0])
+            y = float(it[1])
+        except Exception:
+            continue
+        if not (np.isfinite(x) and np.isfinite(y)):
+            continue
+        rows.append((float(np.clip(x, 0.0, 1.0)), max(float(y), 1e-6)))
+    if len(rows) < 2:
+        rows = [(0.0, 1.0), (1.0, 1.0)]
+    arr = np.asarray(rows, dtype=np.float64)
+    arr = arr[np.argsort(arr[:, 0], kind="mergesort")]
+    x = arr[:, 0]
+    keep = np.concatenate(([True], np.diff(x) > 1e-9))
+    arr = arr[keep]
+    if arr[0, 0] > 0.0:
+        arr = np.vstack([[0.0, arr[0, 1]], arr])
+    else:
+        arr[0, 0] = 0.0
+    if arr[-1, 0] < 1.0:
+        arr = np.vstack([arr, [1.0, arr[-1, 1]]])
+    else:
+        arr[-1, 0] = 1.0
+    return arr
+
+
+def _build_pre_agc_gain(n_samples: int, p: dict) -> np.ndarray:
+    n = max(1, int(n_samples))
+    g0 = max(float(p.get("pre_agc_surface_gain", 1.0) or 1.0), 1e-6)
+    g1 = max(float(p.get("pre_agc_deep_gain", 1.0) or 1.0), 1e-6)
+    mode = str(p.get("pre_agc_curve", "power") or "power").strip().lower()
+    t = np.linspace(0.0, 1.0, n, dtype=np.float64)
+    if mode == "breakpoints":
+        pts = _sanitize_gain_breakpoints(p.get("pre_agc_breakpoints"))
+        g = np.interp(t, pts[:, 0], pts[:, 1])
+    else:
+        power = float(np.clip(float(p.get("pre_agc_power", 1.8) or 1.8), 0.2, 8.0))
+        if mode == "linear":
+            g = g0 + (g1 - g0) * t
+        elif mode == "exp":
+            g = np.exp(np.log(g0) + (np.log(g1) - np.log(g0)) * t)
+        else:
+            g = g0 + (g1 - g0) * (t ** power)
+    g = np.clip(g, 1e-6, 1e6).astype(np.float32, copy=False)
+    return g.reshape(-1, 1)
 
 
 def apply_pre_bg_pipeline(
@@ -463,6 +527,11 @@ def apply_pipeline(
         win_lbl = "auto" if bg_window <= 0 else str(bg_window)
         s_lbl   = f"{bg_sample_start}:{bg_sample_end if bg_sample_end > 0 else 'end'}"
         _log(f"bg_removal(mode={bg_mode} win={win_lbl} s=[{s_lbl}])", out)
+
+    if bool(p.get("pre_agc_gain", False)):
+        gain = _build_pre_agc_gain(int(out.shape[0]), p)
+        out = (out.astype(np.float32, copy=False) * gain).astype(np.float32, copy=False)
+        _log("pre_agc_gain", out)
 
     if p["agc"]:
         out = agc_gain(out, window=int(p["agc_win"]))
