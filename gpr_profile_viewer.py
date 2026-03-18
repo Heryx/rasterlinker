@@ -902,6 +902,15 @@ class GprProfileViewer(QDialog):
         self._spin_amplitude_sigma.setValue(3.0); self._spin_amplitude_sigma.setEnabled(False)
         self._chk_amplitude_filter.toggled.connect(self._spin_amplitude_sigma.setEnabled)
 
+        self._cb_slice_idw_mode = QComboBox()
+        self._cb_slice_idw_mode.addItem("Fast (kNN)", "fast")
+        self._cb_slice_idw_mode.addItem("Quality (radius)", "quality")
+        self._cb_slice_idw_mode.setCurrentIndex(0)
+        self._cb_slice_idw_mode.setToolTip(
+            "Fast: molto piu' veloce su griglie grandi (kNN vettorizzato).\n"
+            "Quality: ricerca entro raggio per cella (piu' lenta ma piu' fedele localmente)."
+        )
+
         self._chk_anisotropic_idw = QCheckBox(); self._chk_anisotropic_idw.setChecked(False)
         self._chk_auto_radius     = QCheckBox(); self._chk_auto_radius.setChecked(True)
         self._chk_fill_nodata     = QCheckBox(); self._chk_fill_nodata.setChecked(False)
@@ -948,6 +957,7 @@ class GprProfileViewer(QDialog):
         fl_slice.addRow("Normalizza canali:",  self._chk_normalize_ch)
         fl_slice.addRow("Filtro ampiezza:",    self._chk_amplitude_filter)
         fl_slice.addRow("  sigma:",            self._spin_amplitude_sigma)
+        fl_slice.addRow("IDW mode:",           self._cb_slice_idw_mode)
         fl_slice.addRow("IDW anisotropo:",     self._chk_anisotropic_idw)
         fl_slice.addRow("  raggio auto:",      self._chk_auto_radius)
         fl_slice.addRow("Bilancia profili:",   self._chk_slice_balance_profiles)
@@ -2958,6 +2968,7 @@ class GprProfileViewer(QDialog):
                 "normalize_channels": False,
                 "amplitude_filter": True,
                 "amplitude_sigma": 3.0,
+                "idw_mode": "quality",
                 "use_anisotropic_idw": True,
                 "auto_radius": True,
                 "balance_profiles": True,
@@ -2987,6 +2998,7 @@ class GprProfileViewer(QDialog):
                 "normalize_channels": False,
                 "amplitude_filter": True,
                 "amplitude_sigma": 2.5,
+                "idw_mode": "quality",
                 "use_anisotropic_idw": True,
                 "auto_radius": True,
                 "balance_profiles": True,
@@ -3016,6 +3028,7 @@ class GprProfileViewer(QDialog):
                 "normalize_channels": False,
                 "amplitude_filter": False,
                 "amplitude_sigma": 3.0,
+                "idw_mode": "fast",
                 "use_anisotropic_idw": False,
                 "auto_radius": True,
                 "balance_profiles": True,
@@ -3044,6 +3057,7 @@ class GprProfileViewer(QDialog):
         self._chk_normalize_ch.setChecked(bool(cfg["normalize_channels"]))
         self._chk_amplitude_filter.setChecked(bool(cfg["amplitude_filter"]))
         self._spin_amplitude_sigma.setValue(float(cfg["amplitude_sigma"]))
+        self._set_combo_to_data(self._cb_slice_idw_mode, cfg["idw_mode"])
         self._chk_anisotropic_idw.setChecked(bool(cfg["use_anisotropic_idw"]))
         self._chk_auto_radius.setChecked(bool(cfg["auto_radius"]))
         self._chk_slice_balance_profiles.setChecked(bool(cfg["balance_profiles"]))
@@ -3096,6 +3110,7 @@ class GprProfileViewer(QDialog):
                 float(self._spin_amplitude_sigma.value())
                 if self._chk_amplitude_filter.isChecked() else None
             ),
+            "idw_mode":            str(self._cb_slice_idw_mode.currentData() or "fast"),
             "use_anisotropic_idw": self._chk_anisotropic_idw.isChecked(),
             "auto_radius":         self._chk_auto_radius.isChecked(),
             "balance_profiles":    self._chk_slice_balance_profiles.isChecked(),
@@ -3196,6 +3211,7 @@ class GprProfileViewer(QDialog):
                 use_processing=bool(extra.get("use_processing", False)),
                 amplitude_sigma=extra.get("amplitude_sigma"),
                 use_anisotropic_idw=bool(extra.get("use_anisotropic_idw", False)),
+                idw_mode=str(extra.get("idw_mode", "fast") or "fast"),
                 auto_radius=bool(extra.get("auto_radius", True)),
                 min_points=int(extra.get("min_points", 1) or 1),
                 fill_nodata=bool(extra.get("fill_nodata", False)),

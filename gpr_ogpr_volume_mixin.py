@@ -354,6 +354,7 @@ class GprOgprVolumeMixin:
                     "topo_reference_mode": str(extra_slice_params.get("topo_reference_mode", "median") or "median"),
                     "topo_reference_elevation": extra_slice_params.get("topo_reference_elevation"),
                     "use_anisotropic_idw": bool(extra_slice_params.get("use_anisotropic_idw", False)),
+                    "idw_mode": str(extra_slice_params.get("idw_mode", "fast") or "fast"),
                     "auto_radius": bool(extra_slice_params.get("auto_radius", True)),
                     "min_points": int(extra_slice_params.get("min_points", 1) or 1),
                     "fill_nodata": bool(extra_slice_params.get("fill_nodata", False)),

@@ -553,6 +553,101 @@ def _ckdtree_query_knn(tree, qpts: np.ndarray, k: int, distance_upper_bound: flo
         )
 
 
+def _normalize_idw_mode(mode: str | None) -> str:
+    txt = str(mode or "fast").strip().lower()
+    if txt in {"quality", "accurate", "radius", "ball"}:
+        return "quality"
+    return "fast"
+
+
+def _bin_with_idw_ball(
+    x_pts, y_pts, i_pts, x_min, y_min, n_x, n_y, resolution, radius, power=2.0, min_points=1
+):
+    from scipy.spatial import cKDTree
+
+    gx = x_min + np.arange(n_x) * resolution
+    gy = y_min + np.arange(n_y) * resolution
+    gxx, gyy = np.meshgrid(gx, gy)
+    gpts = np.column_stack([gxx.ravel(), gyy.ravel()])
+    tree = cKDTree(np.column_stack([x_pts, y_pts]))
+    try:
+        results = tree.query_ball_point(gpts, r=radius, workers=-1)
+    except TypeError:
+        results = tree.query_ball_point(gpts, r=radius)
+    i64 = np.asarray(i_pts, dtype=np.float64, copy=False)
+    x_arr = np.asarray(x_pts, dtype=np.float64, copy=False)
+    y_arr = np.asarray(y_pts, dtype=np.float64, copy=False)
+    pwr = float(power) if np.isfinite(power) and float(power) > 0 else 2.0
+    min_pts = max(1, int(min_points))
+
+    grid = np.full(n_x * n_y, np.nan, dtype=np.float32)
+    for k, idx_list in enumerate(results):
+        if len(idx_list) < min_pts:
+            continue
+        idx = np.asarray(idx_list, dtype=np.int64)
+        cx, cy = gpts[k]
+        d = np.sqrt((x_arr[idx] - cx) ** 2 + (y_arr[idx] - cy) ** 2)
+        w = 1.0 / (d ** pwr + 1e-9)
+        ws = w.sum()
+        if ws > 0:
+            grid[k] = float(np.dot(w, i64[idx]) / ws)
+    return grid.reshape(n_y, n_x)
+
+
+def _bin_with_idw_anisotropic_ball(
+    x_pts, y_pts, i_pts, x_min, y_min, n_x, n_y, resolution, radius, power=2.0, min_points=1,
+    anisotropy_ratio=1.0, anisotropy_angle=0.0, max_points_per_cell=4096,
+):
+    from scipy.spatial import cKDTree
+
+    if anisotropy_ratio <= 0:
+        anisotropy_ratio = 1.0
+    ar = np.radians(anisotropy_angle)
+    ca, sa = np.cos(ar), np.sin(ar)
+
+    def _ad(px, py, cx, cy):
+        dx, dy = px - cx, py - cy
+        return np.sqrt((dx * ca + dy * sa) ** 2 + ((-dx * sa + dy * ca) / anisotropy_ratio) ** 2)
+
+    gx = x_min + np.arange(n_x) * resolution
+    gy = y_min + np.arange(n_y) * resolution
+    gxx, gyy = np.meshgrid(gx, gy)
+    gpts = np.column_stack([gxx.ravel(), gyy.ravel()])
+    tree = cKDTree(np.column_stack([x_pts, y_pts]))
+    try:
+        results = tree.query_ball_point(gpts, r=radius * max(1.0, anisotropy_ratio), workers=-1)
+    except TypeError:
+        results = tree.query_ball_point(gpts, r=radius * max(1.0, anisotropy_ratio))
+
+    i64 = np.asarray(i_pts, dtype=np.float64, copy=False)
+    x_arr = np.asarray(x_pts, dtype=np.float64, copy=False)
+    y_arr = np.asarray(y_pts, dtype=np.float64, copy=False)
+    pwr = float(power) if np.isfinite(power) and float(power) > 0 else 2.0
+    min_pts = max(1, int(min_points))
+    cap_pts = int(max_points_per_cell or 0)
+
+    grid = np.full(n_x * n_y, np.nan, dtype=np.float32)
+    for k, idx_list in enumerate(results):
+        if not idx_list:
+            continue
+        idx = np.asarray(idx_list, dtype=np.int64)
+        cx, cy = gpts[k]
+        if cap_pts and idx.size > cap_pts:
+            d2 = (x_arr[idx] - cx) ** 2 + (y_arr[idx] - cy) ** 2
+            keep = np.argpartition(d2, cap_pts - 1)[:cap_pts]
+            idx = idx[keep]
+        d = _ad(x_arr[idx], y_arr[idx], cx, cy)
+        in_r = d <= radius
+        if int(np.count_nonzero(in_r)) < min_pts:
+            continue
+        d_in = d[in_r]
+        w = 1.0 / (d_in ** pwr + 1e-9)
+        ws = w.sum()
+        if ws > 0:
+            grid[k] = float(np.dot(w, i64[idx[in_r]]) / ws)
+    return grid.reshape(n_y, n_x)
+
+
 def _bin_with_idw(
     x_pts, y_pts, i_pts, x_min, y_min, n_x, n_y, resolution, radius, power=2.0, min_points=1
 ):
@@ -1093,6 +1188,7 @@ def _interpolate_z_level(
     resolution: float,
     amplitude_sigma: float | None,
     use_anisotropic_idw: bool,
+    idw_mode: str,
     idw_power: float, min_points: int,
     fill_nodata: bool, fill_nodata_max_distance: float,
     smooth_sigma: float,
@@ -1199,22 +1295,41 @@ def _interpolate_z_level(
     if n_pts <= 0:
         return None, 0, diag
 
+    mode_norm = _normalize_idw_mode(idw_mode)
     if use_anisotropic_idw:
-        grid = _bin_with_idw_anisotropic(
-            e_all, n_all, a_all,
-            gp["x_min"], gp["y_min"], gp["n_x"], gp["n_y"],
-            resolution, gp["radius"],
-            power=idw_power, min_points=min_points,
-            anisotropy_ratio=gp["eff_ratio"] or 1.0,
-            anisotropy_angle=gp["eff_angle"] or 0.0,
-        )
+        if mode_norm == "quality":
+            grid = _bin_with_idw_anisotropic_ball(
+                e_all, n_all, a_all,
+                gp["x_min"], gp["y_min"], gp["n_x"], gp["n_y"],
+                resolution, gp["radius"],
+                power=idw_power, min_points=min_points,
+                anisotropy_ratio=gp["eff_ratio"] or 1.0,
+                anisotropy_angle=gp["eff_angle"] or 0.0,
+            )
+        else:
+            grid = _bin_with_idw_anisotropic(
+                e_all, n_all, a_all,
+                gp["x_min"], gp["y_min"], gp["n_x"], gp["n_y"],
+                resolution, gp["radius"],
+                power=idw_power, min_points=min_points,
+                anisotropy_ratio=gp["eff_ratio"] or 1.0,
+                anisotropy_angle=gp["eff_angle"] or 0.0,
+            )
     else:
-        grid = _bin_with_idw(
-            e_all, n_all, a_all,
-            gp["x_min"], gp["y_min"], gp["n_x"], gp["n_y"],
-            resolution, gp["radius"],
-            power=idw_power, min_points=min_points,
-        )
+        if mode_norm == "quality":
+            grid = _bin_with_idw_ball(
+                e_all, n_all, a_all,
+                gp["x_min"], gp["y_min"], gp["n_x"], gp["n_y"],
+                resolution, gp["radius"],
+                power=idw_power, min_points=min_points,
+            )
+        else:
+            grid = _bin_with_idw(
+                e_all, n_all, a_all,
+                gp["x_min"], gp["y_min"], gp["n_x"], gp["n_y"],
+                resolution, gp["radius"],
+                power=idw_power, min_points=min_points,
+            )
     if fill_nodata:
         try:
             fill_m = float(fill_nodata_max_distance)
@@ -1225,6 +1340,7 @@ def _interpolate_z_level(
             grid = _fill_nodata_grid(grid, max_distance=fill_px)
     if smooth_sigma > 0:
         grid = _smooth_grid_gaussian(grid, sigma=smooth_sigma)
+    diag["idw_mode"] = mode_norm
     return grid, n_pts, diag
 
 
@@ -1250,6 +1366,7 @@ def compute_preview_slice(
     auto_radius: bool = True,
     anisotropy_ratio: float | None = None,
     anisotropy_angle: float | None = None,
+    idw_mode: str = "fast",
     idw_power: float = 2.0,
     min_points: int = 1,
     fill_nodata: bool = False,
@@ -1296,6 +1413,7 @@ def compute_preview_slice(
         str(stack_kernel or "boxcar"),
         str(flip_traces_mode or "none"),
         bool(use_anisotropic_idw),
+        _normalize_idw_mode(idw_mode),
         bool(auto_radius),
         (None if anisotropy_ratio is None else float(anisotropy_ratio)),
         (None if anisotropy_angle is None else float(anisotropy_angle)),
@@ -1395,6 +1513,7 @@ def compute_preview_slice(
     grid, n_pts, amp_diag = _interpolate_z_level(
         processed, z_from, z_to, combine_method, gp_slice, resolution,
         amplitude_sigma, use_anisotropic_idw,
+        idw_mode,
         idw_power, min_points,
         fill_nodata, fill_nodata_max_distance, smooth_sigma,
         balance_profiles=balance_profiles,
@@ -1458,6 +1577,7 @@ def compute_ogpr_slice_grids(
     auto_radius: bool = True,
     anisotropy_ratio: float | None = None,
     anisotropy_angle: float | None = None,
+    idw_mode: str = "fast",
     idw_power: float = 2.0,
     min_points: int = 1,
     fill_nodata: bool = False,
@@ -1487,6 +1607,7 @@ def compute_ogpr_slice_grids(
         return [], {}
 
     params = {**DEFAULT_PIPELINE, **(pipeline_params or {})} if use_processing else {}
+    idw_mode_norm = _normalize_idw_mode(idw_mode)
 
     processed_result = _process_profiles(
         profiles,
@@ -1628,6 +1749,7 @@ def compute_ogpr_slice_grids(
         effective_radius=float(effective_radius_base),
         depth_radius_factor=float(depth_radius_factor),
         use_anisotropic_idw=bool(use_anisotropic_idw),
+        idw_mode=idw_mode_norm,
         min_points=int(min_points),
         balance_profiles=bool(balance_profiles),
         per_slice_balance=bool(per_slice_balance_eff),
@@ -1661,7 +1783,11 @@ def compute_ogpr_slice_grids(
                 "eff_ratio": eff_ratio, "eff_angle": eff_angle,
             },
             resolution, amplitude_sigma, use_anisotropic_idw,
-            idw_power, min_points, fill_nodata, fill_nodata_max_distance, smooth_sigma,
+            idw_mode=idw_mode_norm,
+            idw_power=idw_power, min_points=min_points,
+            fill_nodata=fill_nodata,
+            fill_nodata_max_distance=fill_nodata_max_distance,
+            smooth_sigma=smooth_sigma,
             balance_profiles=balance_profiles,
             per_slice_balance=per_slice_balance_eff,
             amplitude_hist_bins=amplitude_hist_bins,
@@ -1802,6 +1928,7 @@ def slice_ogpr_to_tifs(
     normalize_channels: bool = False,
     extraction_mode: str = "las_like",
     use_processing: bool = False,
+    idw_mode: str = "fast",
     min_points: int = 1,
     depth_radius_factor: float = 0.6,
     balance_profiles: bool = True,
@@ -1821,6 +1948,7 @@ def slice_ogpr_to_tifs(
         normalize_channels=normalize_channels,
         extraction_mode=extraction_mode,
         use_processing=use_processing,
+        idw_mode=idw_mode,
         min_points=min_points,
         depth_radius_factor=depth_radius_factor,
         balance_profiles=balance_profiles,
