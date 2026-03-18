@@ -1335,7 +1335,7 @@ class GprProfileViewer(QMainWindow):
         )
 
         self._chk_slice_use_processing = QCheckBox()
-        self._chk_slice_use_processing.setChecked(False)
+        self._chk_slice_use_processing.setChecked(True)
         self._chk_slice_use_processing.setToolTip(
             "Applica dewow/time-zero/bg/agc/bandpass prima della creazione slice.\n"
             "Disattivato = comportamento piu' vicino al LAS."
@@ -1442,7 +1442,7 @@ class GprProfileViewer(QMainWindow):
         self._cb_slice_idw_mode = QComboBox()
         self._cb_slice_idw_mode.addItem("Fast (kNN)", "fast")
         self._cb_slice_idw_mode.addItem("Quality (radius)", "quality")
-        self._cb_slice_idw_mode.setCurrentIndex(0)
+        self._cb_slice_idw_mode.setCurrentIndex(1)
         self._cb_slice_idw_mode.setToolTip(
             "Fast: molto piu' veloce su griglie grandi (kNN vettorizzato).\n"
             "Quality: ricerca entro raggio per cella (piu' lenta ma piu' fedele localmente)."
@@ -1450,7 +1450,7 @@ class GprProfileViewer(QMainWindow):
 
         self._chk_anisotropic_idw = QCheckBox(); self._chk_anisotropic_idw.setChecked(False)
         self._chk_auto_radius     = QCheckBox(); self._chk_auto_radius.setChecked(True)
-        self._chk_fill_nodata     = QCheckBox(); self._chk_fill_nodata.setChecked(False)
+        self._chk_fill_nodata     = QCheckBox(); self._chk_fill_nodata.setChecked(True)
         self._chk_slice_balance_profiles = QCheckBox(); self._chk_slice_balance_profiles.setChecked(True)
         self._chk_slice_balance_profiles.setToolTip(
             "Bilancia l'ampiezza media tra profili prima dell'IDW per ridurre le strisce."
@@ -1488,10 +1488,10 @@ class GprProfileViewer(QMainWindow):
         self._chk_slice_parallel_profiles.toggled.connect(_toggle_profile_workers)
         _toggle_profile_workers(self._chk_slice_parallel_profiles.isChecked())
 
-        self._chk_smooth = QCheckBox(); self._chk_smooth.setChecked(False)
+        self._chk_smooth = QCheckBox(); self._chk_smooth.setChecked(True)
         self._spin_smooth_sigma = QDoubleSpinBox()
-        self._spin_smooth_sigma.setRange(0.5, 10.0); self._spin_smooth_sigma.setSingleStep(0.5)
-        self._spin_smooth_sigma.setValue(1.0); self._spin_smooth_sigma.setEnabled(False)
+        self._spin_smooth_sigma.setRange(0.5, 10.0); self._spin_smooth_sigma.setSingleStep(0.1)
+        self._spin_smooth_sigma.setValue(0.8); self._spin_smooth_sigma.setEnabled(True)
         self._chk_smooth.toggled.connect(self._spin_smooth_sigma.setEnabled)
 
         fl_slice.addRow("Profili:",           self._lbl_slice_profiles)
@@ -4495,7 +4495,7 @@ class GprProfileViewer(QMainWindow):
         else:
             cfg = {
                 "extraction_mode": "las_like",
-                "use_processing": False,
+                "use_processing": True,
                 "pre_slice_bg_removal": True,
                 "pre_slice_bg_mode": "line_by_line",
                 "pre_slice_bg_auto": True,
@@ -4511,7 +4511,7 @@ class GprProfileViewer(QMainWindow):
                 "normalize_channels": False,
                 "amplitude_filter": False,
                 "amplitude_sigma": 3.0,
-                "idw_mode": "fast",
+                "idw_mode": "quality",
                 "use_anisotropic_idw": False,
                 "auto_radius": True,
                 "balance_profiles": True,
@@ -4519,9 +4519,9 @@ class GprProfileViewer(QMainWindow):
                 "min_points": 1,
                 "parallel_profiles": True,
                 "profile_workers": 0,
-                "fill_nodata": False,
-                "smooth": False,
-                "smooth_sigma": 1.0,
+                "fill_nodata": True,
+                "smooth": True,
+                "smooth_sigma": 0.8,
             }
             lbl = "Preset timeslice: Base applicato."
 
@@ -4598,7 +4598,7 @@ class GprProfileViewer(QMainWindow):
                 float(self._spin_amplitude_sigma.value())
                 if self._chk_amplitude_filter.isChecked() else None
             ),
-            "idw_mode":            str(self._cb_slice_idw_mode.currentData() or "fast"),
+            "idw_mode":            str(self._cb_slice_idw_mode.currentData() or "quality"),
             "use_anisotropic_idw": self._chk_anisotropic_idw.isChecked(),
             "auto_radius":         self._chk_auto_radius.isChecked(),
             "balance_profiles":    self._chk_slice_balance_profiles.isChecked(),
@@ -4720,11 +4720,11 @@ class GprProfileViewer(QMainWindow):
                 use_processing=bool(extra.get("use_processing", False)),
                 amplitude_sigma=extra.get("amplitude_sigma"),
                 use_anisotropic_idw=bool(extra.get("use_anisotropic_idw", False)),
-                idw_mode=str(extra.get("idw_mode", "fast") or "fast"),
+                idw_mode=str(extra.get("idw_mode", "quality") or "quality"),
                 auto_radius=bool(extra.get("auto_radius", True)),
                 min_points=int(extra.get("min_points", 1) or 1),
-                fill_nodata=bool(extra.get("fill_nodata", False)),
-                smooth_sigma=float(extra.get("smooth_sigma", 0.0) or 0.0),
+                fill_nodata=bool(extra.get("fill_nodata", True)),
+                smooth_sigma=float(extra.get("smooth_sigma", 0.8) or 0.0),
                 depth_radius_factor=float(extra.get("depth_radius_factor", 0.6) or 0.0),
                 balance_profiles=bool(extra.get("balance_profiles", True)),
                 pre_slice_bg_removal=bool(extra.get("pre_slice_bg_removal", False)),

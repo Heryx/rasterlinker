@@ -1401,6 +1401,15 @@ def _interpolate_z_level(
             fill_m = float(fill_nodata_max_distance)
         except Exception:
             fill_m = 0.0
+        # Auto fill distance tied to active IDW radius to reduce ring artifacts.
+        if (not np.isfinite(fill_m)) or fill_m <= 0.0:
+            try:
+                radius_m = float(gp.get("radius", resolution) or resolution)
+            except Exception:
+                radius_m = float(resolution)
+            if (not np.isfinite(radius_m)) or radius_m <= 0.0:
+                radius_m = float(resolution)
+            fill_m = max(float(resolution), radius_m * 1.5)
         if np.isfinite(fill_m) and fill_m > 0.0 and resolution > 0.0:
             fill_px = max(1, int(round(fill_m / float(resolution))))
             grid = _fill_nodata_grid(grid, max_distance=fill_px)
@@ -1432,12 +1441,12 @@ def compute_preview_slice(
     auto_radius: bool = True,
     anisotropy_ratio: float | None = None,
     anisotropy_angle: float | None = None,
-    idw_mode: str = "fast",
-    idw_power: float = 2.0,
+    idw_mode: str = "quality",
+    idw_power: float = 1.5,
     min_points: int = 1,
-    fill_nodata: bool = False,
-    fill_nodata_max_distance: float = 5.0,
-    smooth_sigma: float = 0.0,
+    fill_nodata: bool = True,
+    fill_nodata_max_distance: float = 0.0,
+    smooth_sigma: float = 0.8,
     depth_radius_factor: float = 0.6,
     balance_profiles: bool = True,
     per_slice_balance: bool = False,
@@ -1643,12 +1652,12 @@ def compute_ogpr_slice_grids(
     auto_radius: bool = True,
     anisotropy_ratio: float | None = None,
     anisotropy_angle: float | None = None,
-    idw_mode: str = "fast",
-    idw_power: float = 2.0,
+    idw_mode: str = "quality",
+    idw_power: float = 1.5,
     min_points: int = 1,
-    fill_nodata: bool = False,
-    fill_nodata_max_distance: float = 5.0,
-    smooth_sigma: float = 0.0,
+    fill_nodata: bool = True,
+    fill_nodata_max_distance: float = 0.0,
+    smooth_sigma: float = 0.8,
     emit_diagnostics: bool = True,
     depth_radius_factor: float = 0.6,
     balance_profiles: bool = True,
@@ -2127,7 +2136,7 @@ def slice_ogpr_to_tifs(
     normalize_channels: bool = False,
     extraction_mode: str = "las_like",
     use_processing: bool = False,
-    idw_mode: str = "fast",
+    idw_mode: str = "quality",
     min_points: int = 1,
     depth_radius_factor: float = 0.6,
     balance_profiles: bool = True,

@@ -15,6 +15,33 @@ from .project_manager_dialog import ProjectManagerDialog
 
 
 class AppRuntimeMixin:
+    def _qt_widget_alive(self, widget):
+        """Return True only when the underlying Qt/C++ object is still alive."""
+        if widget is None:
+            return False
+        try:
+            # Accessing a Qt method raises RuntimeError when wrapped C++ is deleted.
+            widget.objectName()
+            return True
+        except RuntimeError:
+            return False
+        except Exception:
+            return False
+
+    def _on_dock_destroyed(self, *_args):
+        """Reset dock/dialog references when the dock gets destroyed by Qt."""
+        self.dock_widget = None
+        self.dlg = None
+        self.first_start = True
+        # Reset UI references that may still point to deleted Qt objects.
+        if hasattr(self, "_init_ui_layout"):
+            try:
+                self._init_ui_layout()
+            except Exception:
+                pass
+        if hasattr(self, "internal_grid_checkbox"):
+            self.internal_grid_checkbox = None
+
     def _layout_debug_enabled(self):
         """Enable layout debug logs when GEOSURVEY_LAYOUT_DEBUG=1."""
         return str(os.environ.get("GEOSURVEY_LAYOUT_DEBUG", "")).strip().lower() in ("1", "true", "yes", "on")
@@ -82,6 +109,11 @@ class AppRuntimeMixin:
 
     def run(self):
         """Esegue il plugin."""
+        if (not bool(self.first_start)) and (
+            (not self._qt_widget_alive(self.dock_widget)) or (not self._qt_widget_alive(self.dlg))
+        ):
+            self._on_dock_destroyed()
+
         if self.first_start:
             self.first_start = False
             self.dlg = GeoSurveyStudioDialog()
@@ -94,6 +126,7 @@ class AppRuntimeMixin:
                 | QDockWidget.DockWidgetClosable
             )
             self.dock_widget.setWidget(self.dlg)
+            self.dock_widget.destroyed.connect(self._on_dock_destroyed)
             self.dock_widget.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock_widget)
             self._tabify_with_existing_right_dock()
