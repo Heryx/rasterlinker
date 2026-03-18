@@ -16,10 +16,18 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 
 SIDECAR_FILENAME = ".ogpr_slicer_params.json"
+_PREVIEW_CACHE: dict[str, object] = {
+    "key": None,
+    "processed": None,
+    "gp": None,
+    "z_max_depth": None,
+    "topo_ref": None,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +56,33 @@ def load_ogpr_slicer_params(output_dir: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _stable_json_key(obj) -> str:
+    try:
+        return json.dumps(obj, sort_keys=True, ensure_ascii=True, default=str)
+    except Exception:
+        return repr(obj)
+
+
+def _profiles_cache_signature(profiles: list) -> tuple:
+    sig = []
+    for prof in list(profiles or []):
+        pth = str(getattr(prof, "path", "") or "")
+        n_samples = int(getattr(prof, "n_samples", 0) or 0)
+        n_channels = int(getattr(prof, "n_channels", 0) or 0)
+        n_slices = int(getattr(prof, "n_slices", 0) or 0)
+        mtime_ns = 0
+        fsize = 0
+        if pth:
+            try:
+                st = Path(pth).stat()
+                mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+                fsize = int(st.st_size)
+            except Exception:
+                pass
+        sig.append((pth, mtime_ns, fsize, n_samples, n_channels, n_slices))
+    return tuple(sig)
 
 
 def _envelope(data: np.ndarray) -> np.ndarray:
@@ -1091,42 +1126,95 @@ def compute_preview_slice(
     if not profiles:
         return None
     params = {**DEFAULT_PIPELINE, **(pipeline_params or {})} if use_processing else {}
-    processed = _process_profiles(
-        profiles,
-        channel,
-        combine_method,
-        params,
-        normalize_channels,
-        extraction_mode=extraction_mode,
-        use_processing=use_processing,
-        balance_profiles=balance_profiles,
-        pre_slice_bg_removal=pre_slice_bg_removal,
-        pre_slice_bg_mode=pre_slice_bg_mode,
-        pre_slice_bg_window=pre_slice_bg_window,
-        pre_slice_bg_sample_start=pre_slice_bg_sample_start,
-        pre_slice_bg_sample_end=pre_slice_bg_sample_end,
-        stack_n=stack_n,
-        stack_kernel=stack_kernel,
-        flip_traces_mode=flip_traces_mode,
-    )
-    if not processed:
-        return None
     per_slice_balance_eff = bool(per_slice_balance) and (not bool(balance_profiles))
-    gp = _build_grid_params(
-        processed, resolution, radius,
-        auto_radius, use_anisotropic_idw,
-        anisotropy_ratio, anisotropy_angle,
+    preview_key = (
+        _profiles_cache_signature(profiles),
+        int(channel),
+        str(combine_method or "mean"),
+        float(resolution),
+        (None if radius is None else float(radius)),
+        bool(normalize_channels),
+        str(extraction_mode or "las_like"),
+        bool(use_processing),
+        bool(balance_profiles),
+        bool(pre_slice_bg_removal),
+        str(pre_slice_bg_mode or "line_by_line"),
+        int(pre_slice_bg_window or 0),
+        int(pre_slice_bg_sample_start or 0),
+        int(pre_slice_bg_sample_end or 0),
+        int(stack_n or 1),
+        str(stack_kernel or "boxcar"),
+        str(flip_traces_mode or "none"),
+        bool(use_anisotropic_idw),
+        bool(auto_radius),
+        (None if anisotropy_ratio is None else float(anisotropy_ratio)),
+        (None if anisotropy_angle is None else float(anisotropy_angle)),
+        bool(topographic_correction),
+        str(topo_reference_mode or "median"),
+        (None if topo_reference_elevation is None else float(topo_reference_elevation)),
+        _stable_json_key(params),
     )
+
+    cached = _PREVIEW_CACHE.get("key") == preview_key
+    if cached:
+        processed = _PREVIEW_CACHE.get("processed") or []
+        gp = dict(_PREVIEW_CACHE.get("gp") or {})
+        z_max_depth = float(_PREVIEW_CACHE.get("z_max_depth") or 0.0)
+        topo_ref = _PREVIEW_CACHE.get("topo_ref")
+        if not processed:
+            return None
+    else:
+        processed = _process_profiles(
+            profiles,
+            channel,
+            combine_method,
+            params,
+            normalize_channels,
+            extraction_mode=extraction_mode,
+            use_processing=use_processing,
+            balance_profiles=balance_profiles,
+            pre_slice_bg_removal=pre_slice_bg_removal,
+            pre_slice_bg_mode=pre_slice_bg_mode,
+            pre_slice_bg_window=pre_slice_bg_window,
+            pre_slice_bg_sample_start=pre_slice_bg_sample_start,
+            pre_slice_bg_sample_end=pre_slice_bg_sample_end,
+            stack_n=stack_n,
+            stack_kernel=stack_kernel,
+            flip_traces_mode=flip_traces_mode,
+        )
+        if not processed:
+            _PREVIEW_CACHE["key"] = preview_key
+            _PREVIEW_CACHE["processed"] = []
+            _PREVIEW_CACHE["gp"] = {}
+            _PREVIEW_CACHE["z_max_depth"] = 0.0
+            _PREVIEW_CACHE["topo_ref"] = None
+            return None
+        gp = _build_grid_params(
+            processed, resolution, radius,
+            auto_radius, use_anisotropic_idw,
+            anisotropy_ratio, anisotropy_angle,
+        )
+        z_max_depth = max(
+            float(getattr(prof, "depth_max_m", 0.0) or 0.0)
+            for prof, _, _, _, _ in _iter_processed_entries(processed)
+        )
+        topo_ref = None
+        if topographic_correction:
+            topo_ref = _compute_topo_reference(
+                processed,
+                mode=topo_reference_mode,
+                custom_elevation=topo_reference_elevation,
+            )
+        _PREVIEW_CACHE["key"] = preview_key
+        _PREVIEW_CACHE["processed"] = processed
+        _PREVIEW_CACHE["gp"] = dict(gp)
+        _PREVIEW_CACHE["z_max_depth"] = float(z_max_depth)
+        _PREVIEW_CACHE["topo_ref"] = topo_ref
+
     z_from = z_center - z_step / 2.0
     z_to = z_center + z_step / 2.0
-    z_max_depth = max(float(getattr(prof, "depth_max_m", 0.0) or 0.0) for prof, _, _, _, _ in _iter_processed_entries(processed))
-    topo_ref = None
-    if topographic_correction:
-        topo_ref = _compute_topo_reference(
-            processed,
-            mode=topo_reference_mode,
-            custom_elevation=topo_reference_elevation,
-        )
+    if not topographic_correction:
+        topo_ref = None
     radius_z = _depth_adaptive_radius(gp["radius"], float(z_center), float(z_max_depth), depth_radius_factor)
     gp_slice = dict(gp)
     gp_slice["radius"] = radius_z

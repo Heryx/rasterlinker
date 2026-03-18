@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mmap
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,16 +37,43 @@ _MAX_PLAUSIBILITY_SAMPLE = 250_000
 # Helper: legge la prossima riga con EOL Unix o Windows
 # ---------------------------------------------------------------------------
 
-def _read_line(raw: bytes, pos: int) -> tuple[bytes, int]:
+def _read_line(raw, pos: int) -> tuple[bytes, int]:
     end = pos
     while end < len(raw) and raw[end] not in (ord('\r'), ord('\n')):
         end += 1
-    content = raw[pos:end]
+    content = bytes(raw[pos:end])
     if end < len(raw) and raw[end] == ord('\r'):
         end += 1
     if end < len(raw) and raw[end] == ord('\n'):
         end += 1
     return content, end
+
+
+def _md5_hexdigest_range(raw, start: int = 0, end: int | None = None, chunk_size: int = 4 * 1024 * 1024) -> str:
+    """Calcola MD5 su [start:end) senza copiare grandi buffer in RAM."""
+    total = len(raw)
+    s = int(max(0, start))
+    e = int(total if end is None else min(total, max(s, end)))
+    h = hashlib.md5()
+    while s < e:
+        nxt = min(e, s + int(chunk_size))
+        h.update(raw[s:nxt])
+        s = nxt
+    return h.hexdigest()
+
+
+def _md5_hexdigest_multi_ranges(raw, ranges: list[tuple[int, int]], chunk_size: int = 4 * 1024 * 1024) -> str:
+    """Calcola MD5 concatenando logicamente piu' range senza materializzare byte extra."""
+    h = hashlib.md5()
+    total = len(raw)
+    for start, end in ranges:
+        s = int(max(0, start))
+        e = int(min(total, max(s, end)))
+        while s < e:
+            nxt = min(e, s + int(chunk_size))
+            h.update(raw[s:nxt])
+            s = nxt
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -447,222 +475,268 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
     if not p.exists():
         raise OgprReadError(f"File non trovato: {path}")
 
-    with open(p, "rb") as f:
-        raw = f.read()
+    file_size = int(p.stat().st_size)
+    if file_size <= 0:
+        raise OgprReadError(f"File vuoto o non leggibile: {path}")
 
     parse_warnings: list[str] = []
 
-    # Magic
-    if raw[:6] == b"ogpr\r\n":
-        pos = 6
-    elif raw[:5] == b"ogpr\n":
-        pos = 5
-    else:
-        raise OgprReadError(f"Magic non valido: {raw[:8]!r}")
-    pos_after_magic = pos
-
-    md5_line, pos = _read_line(raw, pos)
-    pos_after_md5_line = pos
-    try:
-        md5_stored = md5_line.decode("ascii").strip()
-    except Exception as exc:
-        raise OgprReadError(f"Riga MD5 non ASCII o corrotta: {exc}") from exc
-    if not _is_valid_md5_hex(md5_stored):
-        msg = (
-            f"MD5 header non valido ('{md5_stored}'). "
-            "Possibile file OGPR corrotto/troncato."
-        )
-        if verify_md5:
-            raise OgprReadError(msg)
-        parse_warnings.append(msg)
-
-    len_line, pos = _read_line(raw, pos)
-    pos_after_len_line = pos
-    try:
-        json_len = int(len_line.decode("ascii").strip())
-    except Exception as exc:
-        raise OgprReadError(f"Lunghezza JSON non valida: {exc}") from exc
-    if json_len <= 0:
-        raise OgprReadError(f"Lunghezza JSON non valida: {json_len}")
-    if pos + json_len > len(raw):
-        raise OgprReadError(
-            f"Header JSON troncato: attesi {json_len} byte, disponibili {len(raw) - pos}."
-        )
-
-    json_bytes = raw[pos: pos + json_len]
-    try:
-        hdr = json.loads(json_bytes.decode("utf-8"))
-    except Exception as exc:
-        raise OgprReadError(f"Header JSON non parseabile: {exc}") from exc
-    pos += json_len
-
-    # Metadati
-    md         = hdr["mainDescriptor"]
-    md_meta    = md.get("metadata") if isinstance(md.get("metadata"), dict) else {}
-    n_samples  = int(md["samplesCount"])
-    n_channels = int(md["channelsCount"])
-    n_slices   = int(md["slicesCount"])
-    swath_name = md_meta.get("swathName", "")
-    swath_id   = md_meta.get("swathId",   "")
-    array_id   = int(md_meta.get("arrayId", 0))
-    v_major    = int(hdr["version"]["major"])
-    v_minor    = int(hdr["version"]["minor"])
-
-    radar_desc = None
-    geo_desc   = None
-    for blk in hdr.get("dataBlockDescriptors", []):
-        t = blk.get("type", "")
-        if t == "Radar Volume":         radar_desc = blk
-        elif t == "Sample Geolocations": geo_desc   = blk
-
-    if radar_desc is None: raise OgprReadError("'Radar Volume' non trovato")
-    if geo_desc   is None: raise OgprReadError("'Sample Geolocations' non trovato")
-
-    radar_info    = radar_desc["radar"]
-    sampling_step = float(radar_info["samplingStep_m"])
-    sampling_time = float(radar_info["samplingTime_ns"])
-    velocity      = float(radar_info["propagationVelocity_mPerSec"])
-    frequency     = float(radar_info.get("fequency_MHz",
-                           radar_info.get("frequency_MHz", 600.0)))
-    polarization  = str(radar_info.get("polarization", "horizontal"))
-    value_type_raw = str(radar_desc.get("valueType", "int16"))
-    epsg          = int(geo_desc.get("srs", {}).get("value", 32633))
-
-    # Radar Volume
-    r_offset   = int(radar_desc["byteOffset"])
-    r_bytesize = int(radar_desc["byteSize"])
-    if r_offset < 0 or r_bytesize <= 0 or (r_offset + r_bytesize) > len(raw):
-        raise OgprReadError(
-            f"Radar Volume fuori range: offset={r_offset}, size={r_bytesize}, file={len(raw)}."
-        )
-    radar_raw  = raw[r_offset: r_offset + r_bytesize]
-
-    exp = n_samples * n_channels * n_slices
-    radar_flat, value_type, raw_dtype, byte_order, radar_warnings = _decode_radar_volume(
-        radar_raw=radar_raw,
-        exp_count=exp,
-        value_type_raw=value_type_raw,
-    )
-    parse_warnings.extend(radar_warnings)
-    radar_3d = radar_flat.reshape((n_slices, n_channels, n_samples))
-
-    # Sample Geolocations
-    g_offset      = int(geo_desc["byteOffset"])
-    g_bytesize    = int(geo_desc["byteSize"])
-    if g_offset < 0 or g_bytesize <= 0 or (g_offset + g_bytesize) > len(raw):
-        raise OgprReadError(
-            f"Sample Geolocations fuori range: offset={g_offset}, size={g_bytesize}, file={len(raw)}."
-        )
-    geo_raw       = raw[g_offset: g_offset + g_bytesize]
-    md5_verified = False
-    md5_scope = ""
-    if _is_valid_md5_hex(md5_stored):
-        md5_candidates = {
-            "payload_after_json": hashlib.md5(raw[pos:]).hexdigest(),
-            "full_file": hashlib.md5(raw).hexdigest(),
-            "after_magic": hashlib.md5(raw[pos_after_magic:]).hexdigest(),
-            "after_md5_line": hashlib.md5(raw[pos_after_md5_line:]).hexdigest(),
-            "after_len_line": hashlib.md5(raw[pos_after_len_line:]).hexdigest(),
-            "radar_volume": hashlib.md5(radar_raw).hexdigest(),
-            "sample_geolocations": hashlib.md5(geo_raw).hexdigest(),
-            "radar_plus_geo": hashlib.md5(radar_raw + geo_raw).hexdigest(),
-            "geo_plus_radar": hashlib.md5(geo_raw + radar_raw).hexdigest(),
-        }
-        block_spans = []
-        for blk in hdr.get("dataBlockDescriptors", []):
-            try:
-                bo = int(blk.get("byteOffset"))
-                bs = int(blk.get("byteSize"))
-            except Exception:
-                continue
-            if bo < 0 or bs <= 0 or (bo + bs) > len(raw):
-                continue
-            block_spans.append((bo, bo + bs))
-        if block_spans:
-            block_spans.sort(key=lambda t: t[0])
-            concat_blocks = b"".join(raw[s:e] for s, e in block_spans)
-            md5_candidates["all_blocks_sorted"] = hashlib.md5(concat_blocks).hexdigest()
-
-        matched_scopes = [k for k, v in md5_candidates.items() if v == md5_stored]
-        if matched_scopes:
-            md5_verified = True
-            md5_scope = matched_scopes[0]
-            if md5_scope != "payload_after_json":
-                parse_warnings.append(
-                    f"MD5 verificato con scope '{md5_scope}' (non payload_after_json)."
-                )
-        else:
-            short = ", ".join(
-                f"{k}={v}" for k, v in md5_candidates.items() if k in {
-                    "payload_after_json",
-                    "full_file",
-                    "after_md5_line",
-                    "radar_volume",
-                    "sample_geolocations",
-                }
-            )
-            msg = (
-                f"MD5 mismatch: stored={md5_stored}. "
-                f"Candidati principali: {short}."
-            )
-            if verify_md5:
-                raise OgprReadError(
-                    msg + " Il file potrebbe essere corrotto/troncato oppure usare uno schema MD5 non standard."
-                )
-            parse_warnings.append(msg)
-    extra_doubles = _parse_geo_layout(g_bytesize, n_slices, n_channels)
-    dps           = n_channels * GEO_DOUBLES_PER_CHANNEL + extra_doubles
-
-    geo_ch, geo_raw_dtype, geo_byte_order, geo_warnings = _decode_geo_volume(
-        geo_raw=geo_raw,
-        n_slices=n_slices,
-        n_channels=n_channels,
-        extra_doubles=extra_doubles,
-        dps=dps,
-    )
-    parse_warnings.extend(geo_warnings)
-
-    # Costruisci canali
-    channels = []
-    for ch_i in range(n_channels):
-        data_ch  = radar_3d[:, ch_i, :].T.copy()   # (n_samples, n_slices)
-        east_ch  = geo_ch[:, ch_i, 0].copy()
-        north_ch = geo_ch[:, ch_i, 1].copy()
-        alt_ch   = geo_ch[:, ch_i, 2].copy()
-        head_ch  = geo_ch[:, ch_i, 3].copy()
-
-        # Sanitize coordinate arrays to avoid NaN/Inf propagation in distance axis.
-        finite_xy = np.isfinite(east_ch) & np.isfinite(north_ch)
-        if not np.all(finite_xy):
-            if finite_xy.any():
-                idx = np.arange(n_slices, dtype=np.float64)
-                idx_ok = np.where(finite_xy)[0].astype(np.float64)
-                east_ch = np.interp(idx, idx_ok, east_ch[finite_xy]).astype(np.float64)
-                north_ch = np.interp(idx, idx_ok, north_ch[finite_xy]).astype(np.float64)
+    with open(p, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as raw_mm:
+        raw = memoryview(raw_mm)
+        try:
+            # Magic
+            if raw[:6] == b"ogpr\r\n":
+                pos = 6
+            elif raw[:5] == b"ogpr\n":
+                pos = 5
             else:
-                east_ch = np.zeros(n_slices, dtype=np.float64)
-                north_ch = np.zeros(n_slices, dtype=np.float64)
-            parse_warnings.append(
-                f"Coordinate non finite nel canale {ch_i}: applicato fallback/interpolazione per asse distanza."
+                raise OgprReadError(f"Magic non valido: {bytes(raw[:8])!r}")
+            pos_after_magic = pos
+
+            md5_line, pos = _read_line(raw, pos)
+            pos_after_md5_line = pos
+            try:
+                md5_stored = md5_line.decode("ascii").strip()
+            except Exception as exc:
+                raise OgprReadError(f"Riga MD5 non ASCII o corrotta: {exc}") from exc
+            if not _is_valid_md5_hex(md5_stored):
+                msg = (
+                    f"MD5 header non valido ('{md5_stored}'). "
+                    "Possibile file OGPR corrotto/troncato."
+                )
+                if verify_md5:
+                    raise OgprReadError(msg)
+                parse_warnings.append(msg)
+
+            len_line, pos = _read_line(raw, pos)
+            pos_after_len_line = pos
+            try:
+                json_len = int(len_line.decode("ascii").strip())
+            except Exception as exc:
+                raise OgprReadError(f"Lunghezza JSON non valida: {exc}") from exc
+            if json_len <= 0:
+                raise OgprReadError(f"Lunghezza JSON non valida: {json_len}")
+            if pos + json_len > file_size:
+                raise OgprReadError(
+                    f"Header JSON troncato: attesi {json_len} byte, disponibili {file_size - pos}."
+                )
+
+            json_bytes = bytes(raw[pos: pos + json_len])
+            try:
+                hdr = json.loads(json_bytes.decode("utf-8"))
+            except Exception as exc:
+                raise OgprReadError(f"Header JSON non parseabile: {exc}") from exc
+            pos += json_len
+
+            # Metadati
+            md         = hdr["mainDescriptor"]
+            md_meta    = md.get("metadata") if isinstance(md.get("metadata"), dict) else {}
+            n_samples  = int(md["samplesCount"])
+            n_channels = int(md["channelsCount"])
+            n_slices   = int(md["slicesCount"])
+            swath_name = md_meta.get("swathName", "")
+            swath_id   = md_meta.get("swathId",   "")
+            array_id   = int(md_meta.get("arrayId", 0))
+            v_major    = int(hdr["version"]["major"])
+            v_minor    = int(hdr["version"]["minor"])
+
+            radar_desc = None
+            geo_desc   = None
+            for blk in hdr.get("dataBlockDescriptors", []):
+                t = blk.get("type", "")
+                if t == "Radar Volume":
+                    radar_desc = blk
+                elif t == "Sample Geolocations":
+                    geo_desc = blk
+
+            if radar_desc is None:
+                raise OgprReadError("'Radar Volume' non trovato")
+            if geo_desc is None:
+                raise OgprReadError("'Sample Geolocations' non trovato")
+
+            radar_info    = radar_desc["radar"]
+            sampling_step = float(radar_info["samplingStep_m"])
+            sampling_time = float(radar_info["samplingTime_ns"])
+            velocity      = float(radar_info["propagationVelocity_mPerSec"])
+            frequency     = float(radar_info.get("fequency_MHz",
+                                   radar_info.get("frequency_MHz", 600.0)))
+            polarization  = str(radar_info.get("polarization", "horizontal"))
+            value_type_raw = str(radar_desc.get("valueType", "int16"))
+            epsg          = int(geo_desc.get("srs", {}).get("value", 32633))
+
+            # Radar Volume
+            r_offset = int(radar_desc["byteOffset"])
+            r_bytesize = int(radar_desc["byteSize"])
+            if r_offset < 0 or r_bytesize <= 0 or (r_offset + r_bytesize) > file_size:
+                raise OgprReadError(
+                    f"Radar Volume fuori range: offset={r_offset}, size={r_bytesize}, file={file_size}."
+                )
+            radar_raw = raw[r_offset: r_offset + r_bytesize]
+
+            exp = n_samples * n_channels * n_slices
+            radar_flat, value_type, raw_dtype, byte_order, radar_warnings = _decode_radar_volume(
+                radar_raw=radar_raw,
+                exp_count=exp,
+                value_type_raw=value_type_raw,
             )
+            parse_warnings.extend(radar_warnings)
+            radar_3d = radar_flat.reshape((n_slices, n_channels, n_samples))
 
-        dx   = np.diff(east_ch,  prepend=east_ch[0])
-        dy   = np.diff(north_ch, prepend=north_ch[0])
-        dist = np.cumsum(np.sqrt(dx ** 2 + dy ** 2))
+            # Sample Geolocations
+            g_offset = int(geo_desc["byteOffset"])
+            g_bytesize = int(geo_desc["byteSize"])
+            if g_offset < 0 or g_bytesize <= 0 or (g_offset + g_bytesize) > file_size:
+                raise OgprReadError(
+                    f"Sample Geolocations fuori range: offset={g_offset}, size={g_bytesize}, file={file_size}."
+                )
+            geo_raw = raw[g_offset: g_offset + g_bytesize]
 
-        # Fallback: se le coordinate sono zero o costanti usa sampling_step_m
-        if (not np.isfinite(dist).all()) or (dist[-1] < 1e-3):
-            dist = np.arange(n_slices, dtype=np.float64) * sampling_step
+            md5_verified = False
+            md5_scope = ""
+            if _is_valid_md5_hex(md5_stored) and verify_md5:
+                md5_candidates: dict[str, str] = {}
 
-        channels.append(OgprChannel(
-            channel_idx = ch_i,
-            data        = data_ch,
-            easting     = east_ch,
-            northing    = north_ch,
-            altitude    = alt_ch,
-            heading     = head_ch,
-            distances   = dist,
-        ))
+                ordered_checks = [
+                    ("payload_after_json", lambda: _md5_hexdigest_range(raw, start=pos, end=file_size)),
+                    ("full_file", lambda: _md5_hexdigest_range(raw, start=0, end=file_size)),
+                    ("after_magic", lambda: _md5_hexdigest_range(raw, start=pos_after_magic, end=file_size)),
+                    ("after_md5_line", lambda: _md5_hexdigest_range(raw, start=pos_after_md5_line, end=file_size)),
+                    ("after_len_line", lambda: _md5_hexdigest_range(raw, start=pos_after_len_line, end=file_size)),
+                    ("radar_volume", lambda: _md5_hexdigest_range(raw, start=r_offset, end=r_offset + r_bytesize)),
+                    ("sample_geolocations", lambda: _md5_hexdigest_range(raw, start=g_offset, end=g_offset + g_bytesize)),
+                    (
+                        "radar_plus_geo",
+                        lambda: _md5_hexdigest_multi_ranges(
+                            raw,
+                            [
+                                (r_offset, r_offset + r_bytesize),
+                                (g_offset, g_offset + g_bytesize),
+                            ],
+                        ),
+                    ),
+                    (
+                        "geo_plus_radar",
+                        lambda: _md5_hexdigest_multi_ranges(
+                            raw,
+                            [
+                                (g_offset, g_offset + g_bytesize),
+                                (r_offset, r_offset + r_bytesize),
+                            ],
+                        ),
+                    ),
+                ]
+
+                for scope, fn in ordered_checks:
+                    try:
+                        digest = fn()
+                    except Exception:
+                        continue
+                    md5_candidates[scope] = digest
+                    if digest == md5_stored:
+                        md5_verified = True
+                        md5_scope = scope
+                        break
+
+                if not md5_verified:
+                    block_spans = []
+                    for blk in hdr.get("dataBlockDescriptors", []):
+                        try:
+                            bo = int(blk.get("byteOffset"))
+                            bs = int(blk.get("byteSize"))
+                        except Exception:
+                            continue
+                        if bo < 0 or bs <= 0 or (bo + bs) > file_size:
+                            continue
+                        block_spans.append((bo, bo + bs))
+                    if block_spans:
+                        block_spans.sort(key=lambda t: t[0])
+                        digest_blocks = _md5_hexdigest_multi_ranges(raw, block_spans)
+                        md5_candidates["all_blocks_sorted"] = digest_blocks
+                        if digest_blocks == md5_stored:
+                            md5_verified = True
+                            md5_scope = "all_blocks_sorted"
+
+                if md5_verified:
+                    if md5_scope != "payload_after_json":
+                        parse_warnings.append(
+                            f"MD5 verificato con scope '{md5_scope}' (non payload_after_json)."
+                        )
+                else:
+                    short = ", ".join(
+                        f"{k}={v}" for k, v in md5_candidates.items() if k in {
+                            "payload_after_json",
+                            "full_file",
+                            "after_md5_line",
+                            "radar_volume",
+                            "sample_geolocations",
+                        }
+                    )
+                    msg = (
+                        f"MD5 mismatch: stored={md5_stored}. "
+                        f"Candidati principali: {short}."
+                    )
+                    raise OgprReadError(
+                        msg + " Il file potrebbe essere corrotto/troncato oppure usare uno schema MD5 non standard."
+                    )
+
+            extra_doubles = _parse_geo_layout(g_bytesize, n_slices, n_channels)
+            dps = n_channels * GEO_DOUBLES_PER_CHANNEL + extra_doubles
+
+            geo_ch, geo_raw_dtype, geo_byte_order, geo_warnings = _decode_geo_volume(
+                geo_raw=geo_raw,
+                n_slices=n_slices,
+                n_channels=n_channels,
+                extra_doubles=extra_doubles,
+                dps=dps,
+            )
+            parse_warnings.extend(geo_warnings)
+
+            # Costruisci canali
+            channels = []
+            for ch_i in range(n_channels):
+                data_ch = radar_3d[:, ch_i, :].T.copy()   # (n_samples, n_slices)
+                east_ch = geo_ch[:, ch_i, 0].copy()
+                north_ch = geo_ch[:, ch_i, 1].copy()
+                alt_ch = geo_ch[:, ch_i, 2].copy()
+                head_ch = geo_ch[:, ch_i, 3].copy()
+
+                # Sanitize coordinate arrays to avoid NaN/Inf propagation in distance axis.
+                finite_xy = np.isfinite(east_ch) & np.isfinite(north_ch)
+                if not np.all(finite_xy):
+                    if finite_xy.any():
+                        idx = np.arange(n_slices, dtype=np.float64)
+                        idx_ok = np.where(finite_xy)[0].astype(np.float64)
+                        east_ch = np.interp(idx, idx_ok, east_ch[finite_xy]).astype(np.float64)
+                        north_ch = np.interp(idx, idx_ok, north_ch[finite_xy]).astype(np.float64)
+                    else:
+                        east_ch = np.zeros(n_slices, dtype=np.float64)
+                        north_ch = np.zeros(n_slices, dtype=np.float64)
+                    parse_warnings.append(
+                        f"Coordinate non finite nel canale {ch_i}: applicato fallback/interpolazione per asse distanza."
+                    )
+
+                dx = np.diff(east_ch, prepend=east_ch[0])
+                dy = np.diff(north_ch, prepend=north_ch[0])
+                dist = np.cumsum(np.sqrt(dx ** 2 + dy ** 2))
+
+                # Fallback: se le coordinate sono zero o costanti usa sampling_step_m
+                if (not np.isfinite(dist).all()) or (dist[-1] < 1e-3):
+                    dist = np.arange(n_slices, dtype=np.float64) * sampling_step
+
+                channels.append(OgprChannel(
+                    channel_idx = ch_i,
+                    data        = data_ch,
+                    easting     = east_ch,
+                    northing    = north_ch,
+                    altitude    = alt_ch,
+                    heading     = head_ch,
+                    distances   = dist,
+                ))
+
+            # Rilascia esplicitamente i buffer mappati prima di uscire dal contesto mmap.
+            del radar_3d, radar_flat, radar_raw, geo_raw, geo_ch
+        finally:
+            raw.release()
 
     for msg in parse_warnings:
         warnings.warn(f"[OGPR] {p.name}: {msg}", RuntimeWarning)
