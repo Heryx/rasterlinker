@@ -976,6 +976,7 @@ def _build_grid_params(
     use_anisotropic_idw: bool,
     anisotropy_ratio: float | None,
     anisotropy_angle: float | None,
+    bounds_margin: float = 0.0,
 ) -> dict:
     all_e = np.concatenate([x for _, x, _, _, _ in _iter_processed_entries(processed)])
     all_n = np.concatenate([y for _, _, y, _, _ in _iter_processed_entries(processed)])
@@ -986,12 +987,31 @@ def _build_grid_params(
     else:
         all_e = np.array([0.0, 1.0], dtype=np.float64)
         all_n = np.array([0.0, 1.0], dtype=np.float64)
-    x_min = float(all_e.min())
-    x_max = float(all_e.max())
-    y_min = float(all_n.min())
-    y_max = float(all_n.max())
-    n_x = max(2, int(np.round((x_max - x_min) / resolution)) + 1)
-    n_y = max(2, int(np.round((y_max - y_min) / resolution)) + 1)
+    x_min_data = float(all_e.min())
+    x_max_data = float(all_e.max())
+    y_min_data = float(all_n.min())
+    y_max_data = float(all_n.max())
+
+    try:
+        margin = float(bounds_margin)
+    except Exception:
+        margin = 0.0
+    if not np.isfinite(margin) or margin < 0.0:
+        margin = 0.0
+
+    x_min = float(x_min_data - margin)
+    x_max = float(x_max_data + margin)
+    y_min = float(y_min_data - margin)
+    y_max = float(y_max_data + margin)
+
+    try:
+        res = float(resolution)
+    except Exception:
+        res = 1.0
+    if not np.isfinite(res) or res <= 0.0:
+        res = 1.0
+    n_x = max(2, int(np.ceil(max(0.0, (x_max - x_min)) / res)) + 1)
+    n_y = max(2, int(np.ceil(max(0.0, (y_max - y_min)) / res)) + 1)
     _aniso_info = None
     need_spacing_estimate = bool(
         radius is None
@@ -1029,6 +1049,11 @@ def _build_grid_params(
         "radius": radius,
         "eff_ratio": eff_ratio,
         "eff_angle": eff_angle,
+        "bounds_margin_m": margin,
+        "x_min_data": x_min_data,
+        "x_max_data": x_max_data,
+        "y_min_data": y_min_data,
+        "y_max_data": y_max_data,
     }
 
 
@@ -1318,6 +1343,7 @@ def compute_preview_slice(
             processed, resolution, radius,
             auto_radius, use_anisotropic_idw,
             anisotropy_ratio, anisotropy_angle,
+            bounds_margin=0.0,
         )
         z_max_depth = max(
             float(getattr(prof, "depth_max_m", 0.0) or 0.0)
@@ -1338,6 +1364,29 @@ def compute_preview_slice(
 
     z_from = z_center - z_step / 2.0
     z_to = z_center + z_step / 2.0
+    ratio_for_margin = 1.0
+    if use_anisotropic_idw:
+        try:
+            ratio_for_margin = float(gp.get("eff_ratio", 1.0) or 1.0)
+        except Exception:
+            ratio_for_margin = 1.0
+        if not np.isfinite(ratio_for_margin) or ratio_for_margin <= 0.0:
+            ratio_for_margin = 1.0
+        ratio_for_margin = max(1.0, ratio_for_margin)
+    radius_margin = _depth_adaptive_radius(
+        float(gp.get("radius", radius if radius is not None else resolution)),
+        float(z_center),
+        float(z_max_depth),
+        depth_radius_factor,
+    )
+    bounds_margin = float(radius_margin) * float(ratio_for_margin)
+    if np.isfinite(bounds_margin) and bounds_margin > 0.0:
+        gp = _build_grid_params(
+            processed, resolution, radius,
+            auto_radius, use_anisotropic_idw,
+            anisotropy_ratio, anisotropy_angle,
+            bounds_margin=float(bounds_margin),
+        )
     if not topographic_correction:
         topo_ref = None
     radius_z = _depth_adaptive_radius(gp["radius"], float(z_center), float(z_max_depth), depth_radius_factor)
@@ -1477,7 +1526,7 @@ def compute_ogpr_slice_grids(
             "global balance_profiles e' gia' attivo."
         )
 
-    gp = _build_grid_params(
+    gp0 = _build_grid_params(
         processed,
         resolution,
         radius,
@@ -1485,7 +1534,49 @@ def compute_ogpr_slice_grids(
         use_anisotropic_idw,
         anisotropy_ratio,
         anisotropy_angle,
+        bounds_margin=0.0,
     )
+    radius = float(gp0["radius"])
+    eff_ratio = gp0.get("eff_ratio")
+    eff_angle = gp0.get("eff_angle")
+
+    if z_min is None:
+        z_min = 0.0
+    if z_max is None:
+        z_max = max(float(getattr(prof, "depth_max_m", 0.0) or 0.0) for prof, _, _, _, _ in _iter_processed_entries(processed))
+
+    ratio_for_margin = 1.0
+    if use_anisotropic_idw:
+        try:
+            ratio_for_margin = float(eff_ratio if eff_ratio is not None else 1.0)
+        except Exception:
+            ratio_for_margin = 1.0
+        if not np.isfinite(ratio_for_margin) or ratio_for_margin <= 0.0:
+            ratio_for_margin = 1.0
+        ratio_for_margin = max(1.0, ratio_for_margin)
+    radius_margin_max = _depth_adaptive_radius(
+        float(radius),
+        float(z_max),
+        float(z_max),
+        depth_radius_factor,
+    )
+    bounds_margin = float(radius_margin_max) * (
+        ratio_for_margin if use_anisotropic_idw else 1.0
+    )
+    if np.isfinite(bounds_margin) and bounds_margin > 0.0:
+        gp = _build_grid_params(
+            processed,
+            resolution,
+            radius,
+            auto_radius,
+            use_anisotropic_idw,
+            anisotropy_ratio,
+            anisotropy_angle,
+            bounds_margin=float(bounds_margin),
+        )
+    else:
+        gp = gp0
+
     x_min = float(gp["x_min"])
     x_max = float(gp["x_max"])
     y_min = float(gp["y_min"])
@@ -1495,11 +1586,6 @@ def compute_ogpr_slice_grids(
     radius = float(gp["radius"])
     eff_ratio = gp.get("eff_ratio")
     eff_angle = gp.get("eff_angle")
-
-    if z_min is None:
-        z_min = 0.0
-    if z_max is None:
-        z_max = max(float(getattr(prof, "depth_max_m", 0.0) or 0.0) for prof, _, _, _, _ in _iter_processed_entries(processed))
 
     topo_ref = None
     if topographic_correction:
@@ -1559,6 +1645,7 @@ def compute_ogpr_slice_grids(
         profiles_geo_valid=int(proc_diag.get("profiles_geo_valid", 0)),
         profiles_geo_skipped=int(proc_diag.get("profiles_geo_skipped", 0)),
         using_synthetic_coords=bool(proc_diag.get("using_synthetic_coords", False)),
+        bounds_margin_m=float(gp.get("bounds_margin_m", 0.0) or 0.0),
     )
 
     for iz, z_lev in enumerate(z_levels):
