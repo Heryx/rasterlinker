@@ -221,6 +221,29 @@ The **Project Health** dialog provides a diagnostic report of the current projec
 
 ---
 
+## IDW Benchmark (Developer)
+
+For performance comparison between OGPR IDW modes (`fast` vs `quality`), run:
+
+```bash
+python scripts/benchmark_ogpr_idw.py
+```
+
+Write a JSON report:
+
+```bash
+python scripts/benchmark_ogpr_idw.py --json-out benchmark_idw.json
+```
+
+Useful overrides:
+- `--profiles`, `--channels`, `--samples`, `--traces`
+- `--resolution`, `--z-step`, `--z-max`, `--radius`
+- `--repeat`
+- `--parallel-profiles` / `--no-parallel-profiles`
+- `--profile-workers` (0 = auto)
+
+---
+
 ## OGPR Format — Technical Reference
 
 The OGPR format is a binary container for georeferenced GPR profile data:
