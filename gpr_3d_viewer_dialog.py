@@ -243,6 +243,7 @@ class Gpr3dViewerDialog(QDialog):
         self._profile_curtain_prefix = "profile_curtain_"
         self._profile_actor_count = 0
         self._profile_curtain_cache = {}
+        self._drawing_volume_actor = False
 
         root = QVBoxLayout(self)
         splitter = QSplitter(Qt.Horizontal, self)
@@ -1092,35 +1093,91 @@ class Gpr3dViewerDialog(QDialog):
         self._volume_grid = image
 
     def _draw_volume_actor(self):
-        self._remove_actor(self._volume_actor_name)
-        self._remove_actor(self._volume_outline_name)
-        if self._volume_grid is None:
+        if bool(getattr(self, "_drawing_volume_actor", False)):
             return
-        if not bool(self._chk_show_volume.isChecked()):
-            return
-        clip_lo, clip_hi = self._effective_clim()
-        opacity_tf = self._volume_opacity_tf()
-        self._plotter.add_volume(
-            self._volume_grid,
-            scalars="amplitude",
-            cmap=self._section_cmap,
-            opacity=opacity_tf,
-            clim=(clip_lo, clip_hi),
-            shade=False,
-            blending="composite",
-            show_scalar_bar=True,
-            name=self._volume_actor_name,
-        )
+        self._drawing_volume_actor = True
+        error = None
+        added = False
         try:
-            self._plotter.add_mesh(
-                self._volume_grid.outline(),
-                color="black",
-                line_width=1.0,
-                opacity=0.5,
-                name=self._volume_outline_name,
-            )
-        except Exception:
-            pass
+            self._remove_actor(self._volume_actor_name)
+            self._remove_actor(self._volume_outline_name)
+            if self._volume_grid is None:
+                return
+            if not bool(self._chk_show_volume.isChecked()):
+                return
+            clip_lo, clip_hi = self._effective_clim()
+            opacity_tf = self._volume_opacity_tf()
+
+            # Prefer custom transfer function, but keep fallbacks for
+            # runtime-specific recursion issues in some PyVista/VTK builds.
+            add_attempts = [
+                dict(
+                    opacity=opacity_tf,
+                    show_scalar_bar=True,
+                    blending="composite",
+                    shade=False,
+                ),
+                dict(
+                    opacity="sigmoid",
+                    show_scalar_bar=False,
+                    blending="composite",
+                    shade=False,
+                ),
+                dict(
+                    opacity=float(np.clip(self._opacity_spin.value(), 0.05, 1.0)),
+                    show_scalar_bar=False,
+                    blending="composite",
+                    shade=False,
+                ),
+            ]
+
+            last_exc = None
+            for opts in add_attempts:
+                try:
+                    self._plotter.add_volume(
+                        self._volume_grid,
+                        scalars="amplitude",
+                        cmap=self._section_cmap,
+                        clim=(clip_lo, clip_hi),
+                        name=self._volume_actor_name,
+                        **opts,
+                    )
+                    added = True
+                    break
+                except RecursionError as exc:
+                    last_exc = exc
+                except Exception as exc:
+                    last_exc = exc
+
+            if not added and last_exc is not None:
+                error = last_exc
+                return
+
+            try:
+                self._plotter.add_mesh(
+                    self._volume_grid.outline(),
+                    color="black",
+                    line_width=1.0,
+                    opacity=0.5,
+                    name=self._volume_outline_name,
+                )
+            except Exception:
+                pass
+        finally:
+            self._drawing_volume_actor = False
+
+        if error is not None:
+            self._remove_actor(self._volume_actor_name)
+            self._remove_actor(self._volume_outline_name)
+            try:
+                self._status.setText(f"Show volume disabled: {error}")
+            except Exception:
+                pass
+            try:
+                self._updating_controls = True
+                self._chk_show_volume.setChecked(False)
+            finally:
+                self._updating_controls = False
 
     def _volume_opacity_tf(self) -> list[float]:
         op = float(np.clip(self._opacity_spin.value(), 0.05, 1.0))
@@ -1621,6 +1678,8 @@ class Gpr3dViewerDialog(QDialog):
         self._render_now()
 
     def _on_show_volume_toggled(self, _checked: bool):
+        if self._updating_controls:
+            return
         self._draw_volume_actor()
         self._render_now()
 
