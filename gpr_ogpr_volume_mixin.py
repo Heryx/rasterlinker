@@ -560,6 +560,7 @@ class GprOgprVolumeMixin:
                     "smooth_sigma": float(extra_slice_params.get("smooth_sigma", 0.8) or 0.0),
                     "depth_radius_factor": float(extra_slice_params.get("depth_radius_factor", 0.6) or 0.0),
                     "balance_profiles": bool(extra_slice_params.get("balance_profiles", True)),
+                    "open_3d_on_complete": bool(extra_slice_params.get("open_3d_on_complete", True)),
                 }
                 if timing_s:
                     sidecar_params["timing_s"] = dict(timing_s)
@@ -586,93 +587,94 @@ class GprOgprVolumeMixin:
                     except Exception:
                         pass
 
-                # --- apri viewer 3D con il volume appena calcolato ---
-                try:
-                    grids_for_viewer = list(getattr(done_task, "grids", []) or [])
-                    meta_for_viewer = dict(getattr(done_task, "meta", {}) or {})
-                    if grids_for_viewer and meta_for_viewer:
-                        from .gpr_volume_3d import build_3d_volume
-                        from .gpr_3d_viewer_dialog import Gpr3dViewerDialog
+                # --- apri viewer 3D con il volume appena calcolato (opzionale) ---
+                if bool(extra_slice_params.get("open_3d_on_complete", True)):
+                    try:
+                        grids_for_viewer = list(getattr(done_task, "grids", []) or [])
+                        meta_for_viewer = dict(getattr(done_task, "meta", {}) or {})
+                        if grids_for_viewer and meta_for_viewer:
+                            from .gpr_volume_3d import build_3d_volume
+                            from .gpr_3d_viewer_dialog import Gpr3dViewerDialog
 
-                        z_levels = []
-                        for g in grids_for_viewer:
-                            try:
-                                z_levels.append(float(g.get("z_lev")))
-                            except Exception:
-                                continue
-                        z_levels = [z for z in z_levels if z == z]
-                        z_min_view = float(min(z_levels)) if z_levels else float(params["z_min"])
-                        z_max_view = float(max(z_levels)) if z_levels else float(params["z_max"])
-
-                        if "x_min" not in meta_for_viewer or "y_min" not in meta_for_viewer:
-                            x_vals = []
-                            y_vals = []
-                            for prof in profiles:
+                            z_levels = []
+                            for g in grids_for_viewer:
                                 try:
-                                    ch0 = prof.channel(0)
+                                    z_levels.append(float(g.get("z_lev")))
                                 except Exception:
                                     continue
-                                for x in list(getattr(ch0, "easting", []) or []):
+                            z_levels = [z for z in z_levels if z == z]
+                            z_min_view = float(min(z_levels)) if z_levels else float(params["z_min"])
+                            z_max_view = float(max(z_levels)) if z_levels else float(params["z_max"])
+
+                            if "x_min" not in meta_for_viewer or "y_min" not in meta_for_viewer:
+                                x_vals = []
+                                y_vals = []
+                                for prof in profiles:
                                     try:
-                                        xf = float(x)
+                                        ch0 = prof.channel(0)
                                     except Exception:
                                         continue
-                                    if xf == xf:
-                                        x_vals.append(xf)
-                                for y in list(getattr(ch0, "northing", []) or []):
-                                    try:
-                                        yf = float(y)
-                                    except Exception:
-                                        continue
-                                    if yf == yf:
-                                        y_vals.append(yf)
-                            if x_vals and "x_min" not in meta_for_viewer:
-                                meta_for_viewer["x_min"] = float(min(x_vals))
-                            if y_vals and "y_min" not in meta_for_viewer:
-                                meta_for_viewer["y_min"] = float(min(y_vals))
+                                    for x in list(getattr(ch0, "easting", []) or []):
+                                        try:
+                                            xf = float(x)
+                                        except Exception:
+                                            continue
+                                        if xf == xf:
+                                            x_vals.append(xf)
+                                    for y in list(getattr(ch0, "northing", []) or []):
+                                        try:
+                                            yf = float(y)
+                                        except Exception:
+                                            continue
+                                        if yf == yf:
+                                            y_vals.append(yf)
+                                if x_vals and "x_min" not in meta_for_viewer:
+                                    meta_for_viewer["x_min"] = float(min(x_vals))
+                                if y_vals and "y_min" not in meta_for_viewer:
+                                    meta_for_viewer["y_min"] = float(min(y_vals))
 
-                        meta_for_viewer.update(
-                            {
-                                "z_step": float(params["z_step"]),
-                                "z_min": z_min_view,
-                                "z_max": z_max_view,
-                                "z_levels": [float(z) for z in z_levels] if z_levels else None,
-                                "epsg": int(epsg_written) if epsg_written else None,
-                                "channel": int(params.get("channel", 0) or 0),
-                                "use_processing": bool(extra_slice_params.get("use_processing", False)),
-                                "extraction_mode": str(extra_slice_params.get("extraction_mode", "las_like") or "las_like"),
-                                "use_hilbert": bool(extra_slice_params.get("use_hilbert", True)),
-                                "overlap_fraction": float(extra_slice_params.get("overlap_fraction", 0.5) or 0.0),
-                                "blanking_distance": float(extra_slice_params.get("blanking_distance", 0.0) or 0.0),
-                                "idw_power": int(extra_slice_params.get("idw_power", 2) or 2),
-                                "pipeline_params": dict(extra_slice_params.get("pipeline_params") or {}),
-                            }
-                        )
+                            meta_for_viewer.update(
+                                {
+                                    "z_step": float(params["z_step"]),
+                                    "z_min": z_min_view,
+                                    "z_max": z_max_view,
+                                    "z_levels": [float(z) for z in z_levels] if z_levels else None,
+                                    "epsg": int(epsg_written) if epsg_written else None,
+                                    "channel": int(params.get("channel", 0) or 0),
+                                    "use_processing": bool(extra_slice_params.get("use_processing", False)),
+                                    "extraction_mode": str(extra_slice_params.get("extraction_mode", "las_like") or "las_like"),
+                                    "use_hilbert": bool(extra_slice_params.get("use_hilbert", True)),
+                                    "overlap_fraction": float(extra_slice_params.get("overlap_fraction", 0.5) or 0.0),
+                                    "blanking_distance": float(extra_slice_params.get("blanking_distance", 0.0) or 0.0),
+                                    "idw_power": int(extra_slice_params.get("idw_power", 2) or 2),
+                                    "pipeline_params": dict(extra_slice_params.get("pipeline_params") or {}),
+                                }
+                            )
 
-                        volume = build_3d_volume(grids_for_viewer, meta_for_viewer)
-                        old_viewer = getattr(self, "_ogpr_3d_viewer_dialog", None)
-                        if old_viewer is not None:
-                            try:
-                                old_viewer.close()
-                            except Exception:
-                                pass
-                        viewer = Gpr3dViewerDialog(
-                            volume=volume,
-                            meta=meta_for_viewer,
-                            profiles=profiles,
-                            grids=grids_for_viewer,
-                            parent=getattr(self, "dlg", None),
-                        )
-                        self._ogpr_3d_viewer_dialog = viewer
-                        viewer.show()
-                        viewer.raise_()
-                        viewer.activateWindow()
-                except Exception as exc:
-                    if hasattr(self, "_notify_info"):
-                        self._notify_info(
-                            f"Slice create: viewer 3D non aperto ({exc}).",
-                            duration=10,
-                        )
+                            volume = build_3d_volume(grids_for_viewer, meta_for_viewer)
+                            old_viewer = getattr(self, "_ogpr_3d_viewer_dialog", None)
+                            if old_viewer is not None:
+                                try:
+                                    old_viewer.close()
+                                except Exception:
+                                    pass
+                            viewer = Gpr3dViewerDialog(
+                                volume=volume,
+                                meta=meta_for_viewer,
+                                profiles=profiles,
+                                grids=grids_for_viewer,
+                                parent=getattr(self, "dlg", None),
+                            )
+                            self._ogpr_3d_viewer_dialog = viewer
+                            viewer.show()
+                            viewer.raise_()
+                            viewer.activateWindow()
+                    except Exception as exc:
+                        if hasattr(self, "_notify_info"):
+                            self._notify_info(
+                                f"Slice create: viewer 3D non aperto ({exc}).",
+                                duration=10,
+                            )
 
                 action = "Re-slice" if is_reslice else "Import OGPR->Slice"
                 msg = (

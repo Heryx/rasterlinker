@@ -395,6 +395,7 @@ class GprProfileViewer(QMainWindow):
         self._slice_catalog_source_dir: str = ""
         self._slice_catalog_dz: float = 0.0
         self._updating_slice_nav: bool = False
+        self._chk_slice_open_3d_on_complete = None
         self._show_wiggle: bool = True
         self._ax_main_bounds_default = None
         self._ax_wiggle_bounds_default = None
@@ -1967,6 +1968,13 @@ class GprProfileViewer(QMainWindow):
         btn_view3d.clicked.connect(self._open_3d_viewer)
         fl_slice.addRow(btn_view3d)
 
+        self._chk_slice_open_3d_on_complete = QCheckBox()
+        self._chk_slice_open_3d_on_complete.setChecked(False)
+        self._chk_slice_open_3d_on_complete.setToolTip(
+            "Se attivo, apre automaticamente il viewer 3D al termine di 'Salva gruppo'."
+        )
+        fl_slice.addRow("Apri 3D al termine:", self._chk_slice_open_3d_on_complete)
+
         self._chk_timeslice_sync = QCheckBox()
         self._chk_timeslice_sync.setChecked(False)
         self._chk_timeslice_sync.setToolTip(
@@ -2866,11 +2874,22 @@ class GprProfileViewer(QMainWindow):
 
     def _collect_gain_hyper_preset(self) -> dict:
         points = self._sanitize_range_gain_breakpoints(self._range_gain_breakpoints)
+        chain_order = list(self._current_chain_order() or [])
+        chain_enabled = {}
+        if self._is_qt_alive(self._filter_chain_widget):
+            try:
+                chain_enabled = dict(self._filter_chain_widget.get_enabled_map() or {})
+            except Exception:
+                chain_enabled = {}
         preset = {
             "format": "gpr_gain_hyper_preset",
-            "version": 1,
+            "version": 2,
             "display_gain": float(self._spin_gain.value()),
             "clip_pct": float(self._spin_clip.value()),
+            "pipeline_chain": {
+                "order": [str(x) for x in chain_order],
+                "enabled": {str(k): bool(v) for k, v in chain_enabled.items()},
+            },
             "range_gain": {
                 "enabled": bool(self._chk_range_gain.isChecked()),
                 "pre_agc": bool(
@@ -2898,6 +2917,7 @@ class GprProfileViewer(QMainWindow):
         if payload.get("format") not in {"gpr_gain_hyper_preset", None}:
             raise ValueError("Preset non valido: campo format non supportato.")
 
+        chain_cfg = payload.get("pipeline_chain", {}) if isinstance(payload.get("pipeline_chain"), dict) else {}
         rg = payload.get("range_gain", {}) if isinstance(payload.get("range_gain"), dict) else {}
         hy = payload.get("hyperbola", {}) if isinstance(payload.get("hyperbola"), dict) else {}
 
@@ -2940,6 +2960,36 @@ class GprProfileViewer(QMainWindow):
         apex_d = hy.get("apex_depth")
         self._hyper_apex_x = float(apex_x) if apex_x is not None else None
         self._hyper_apex_depth = float(apex_d) if apex_d is not None else None
+
+        if self._is_qt_alive(self._filter_chain_widget):
+            order = chain_cfg.get("order")
+            enabled_map = chain_cfg.get("enabled")
+            chain_updated = False
+            try:
+                if isinstance(order, list) and order:
+                    self._filter_chain_widget.set_order(
+                        [str(x) for x in order],
+                        emit_signal=False,
+                    )
+                    chain_updated = True
+            except Exception:
+                pass
+            try:
+                if isinstance(enabled_map, dict) and enabled_map:
+                    self._filter_chain_widget.set_enabled_map(
+                        {str(k): bool(v) for k, v in enabled_map.items()},
+                        emit_signal=False,
+                    )
+                    self._on_filter_chain_widget_changed()
+                    chain_updated = True
+            except Exception:
+                pass
+            if (
+                chain_updated
+                and self._raw_data is not None
+                and not (isinstance(enabled_map, dict) and bool(enabled_map))
+            ):
+                self._apply_processing()
 
         self._apply_gain_only()
         if self._chk_hyperbola.isChecked():
@@ -5495,6 +5545,10 @@ class GprProfileViewer(QMainWindow):
             "smooth_sigma":        (
                 float(self._spin_smooth_sigma.value())
                 if self._chk_smooth.isChecked() else 0.0
+            ),
+            "open_3d_on_complete": bool(
+                self._is_qt_alive(self._chk_slice_open_3d_on_complete)
+                and self._chk_slice_open_3d_on_complete.isChecked()
             ),
         }
 
