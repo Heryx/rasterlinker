@@ -337,6 +337,8 @@ class OgprSliceBuildTask(CallbackTask):
                 topographic_correction=bool(self.extra_slice_params.get("topographic_correction", False)),
                 topo_reference_mode=str(self.extra_slice_params.get("topo_reference_mode", "median") or "median"),
                 topo_reference_elevation=self.extra_slice_params.get("topo_reference_elevation"),
+                parallel_profiles=bool(self.extra_slice_params.get("parallel_profiles", True)),
+                profile_workers=int(self.extra_slice_params.get("profile_workers", 0) or 0),
             )
         except Exception as e:
             self.error_message = str(e)

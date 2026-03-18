@@ -14,6 +14,7 @@ Flow summary:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -861,6 +862,8 @@ def _process_profiles(
     stack_kernel: str = "boxcar",
     flip_traces_mode: str = "none",
     return_diagnostics: bool = False,
+    parallel_profiles: bool = False,
+    profile_workers: int = 0,
 ) -> list[tuple] | tuple[list[tuple], dict]:
     """Process profiles and return list of (prof, x_ref, y_ref, ampl_3d).
 
@@ -870,6 +873,7 @@ def _process_profiles(
       - envelope: Hilbert envelope
       - signed: keep signed processed trace
     Optionally applies robust inter-profile balancing using global median.
+    Optionally parallelizes per-profile preprocessing with a thread pool.
     """
     from .gpr_processing import apply_pipeline, apply_pre_bg_pipeline, background_removal
 
@@ -900,6 +904,8 @@ def _process_profiles(
         "profiles_geo_valid": int(sum(1 for v in valid_geo_flags if bool(v))),
         "profiles_geo_skipped": 0,
         "using_synthetic_coords": bool(use_synthetic_coords),
+        "parallel_profiles": False,
+        "profile_workers_used": 1,
     }
     if use_synthetic_coords:
         print(
@@ -922,68 +928,127 @@ def _process_profiles(
             stacked = np.concatenate([t[:min_ns, :] for t in _pre_traces], axis=1)
             bg_reference = stacked.mean(axis=1).astype(np.float64)
 
+    def _compute_proc_channels(job: tuple[int, object, list[int]]):
+        p_idx, prof_local, ch_list_local = job
+        path_local = str(getattr(prof_local, "path", "") or "")
+        msgs: list[str] = []
+        proc_channels_local = []
+        try:
+            for ci in ch_list_local:
+                ch = prof_local.channel(ci)
+                raw = ch.data.astype(np.float32, copy=False)
+                if use_proc:
+                    try:
+                        proc = apply_pipeline(
+                            raw.copy(),
+                            params,
+                            dt_ns=prof_local.dt_ns,
+                            bg_reference_trace=bg_reference,
+                            normalize_output=False,
+                        )
+                    except Exception as exc:
+                        msgs.append(f"[OGPR slicer] pipeline error ch{ci} in {path_local}: {exc}")
+                        proc = raw
+                else:
+                    proc = raw
+
+                try:
+                    need_pre_bg = bool(pre_slice_bg_removal) and (
+                        (not use_proc) or (not bool(params.get("bg_removal", False)))
+                    )
+                    if need_pre_bg:
+                        proc = background_removal(
+                            proc,
+                            mode=str(pre_slice_bg_mode or "line_by_line"),
+                            window=int(pre_slice_bg_window or 0),
+                            sample_start=int(pre_slice_bg_sample_start or 0),
+                            sample_end=int(pre_slice_bg_sample_end or 0),
+                        )
+                except Exception as exc:
+                    msgs.append(f"[OGPR slicer] pre-slice bg_removal error ch{ci}: {exc}")
+
+                try:
+                    proc = _stack_traces(
+                        proc,
+                        stack_n=int(stack_n or 1),
+                        kernel=str(stack_kernel or "boxcar"),
+                    )
+                except Exception as exc:
+                    msgs.append(f"[OGPR slicer] trace stacking error ch{ci}: {exc}")
+
+                if mode in {"envelope", "hilbert"}:
+                    ampl = _envelope(proc)
+                elif mode in {"signed", "signed_amp"}:
+                    ampl = proc.astype(np.float32, copy=False)
+                else:
+                    # LAS-like: usa ampiezza assoluta direttamente dai campioni.
+                    ampl = np.abs(proc).astype(np.float32, copy=False)
+                if ampl.ndim != 2 or ampl.size <= 0:
+                    msgs.append(f"[OGPR slicer] skip invalid channel matrix ch{ci} in {path_local}")
+                    continue
+                proc_channels_local.append(ampl)
+        except Exception as exc:
+            msgs.append(f"[OGPR slicer] profile processing error in {path_local}: {exc}")
+            return p_idx, [], msgs
+        return p_idx, proc_channels_local, msgs
+
+    use_parallel = bool(parallel_profiles) and len(profiles) > 1
+    workers_used = 1
+    precomputed_channels: dict[int, list[np.ndarray]] = {}
+    precomputed_msgs: dict[int, list[str]] = {}
+    if use_parallel:
+        try:
+            requested_workers = int(profile_workers or 0)
+        except Exception:
+            requested_workers = 0
+        auto_workers = max(1, min(len(profiles), max(1, int(os.cpu_count() or 2) - 1)))
+        workers_used = requested_workers if requested_workers > 0 else auto_workers
+        workers_used = max(1, min(workers_used, len(profiles)))
+        use_parallel = workers_used > 1
+
+    if use_parallel:
+        jobs = []
+        for p_idx, prof in enumerate(profiles):
+            n_ch = int(getattr(prof, "n_channels", 0) or 0)
+            ch_list = list(range(n_ch)) if channel < 0 else [min(channel, max(0, n_ch - 1))]
+            jobs.append((p_idx, prof, ch_list))
+        try:
+            with ThreadPoolExecutor(max_workers=workers_used, thread_name_prefix="ogpr-prof") as ex:
+                for p_idx, proc_channels_local, msgs in ex.map(_compute_proc_channels, jobs):
+                    precomputed_channels[int(p_idx)] = list(proc_channels_local or [])
+                    precomputed_msgs[int(p_idx)] = list(msgs or [])
+            proc_diag["parallel_profiles"] = True
+            proc_diag["profile_workers_used"] = int(workers_used)
+        except Exception as exc:
+            print(f"[OGPR slicer][WARN] parallel profile processing failed, fallback to sequential: {exc}")
+            precomputed_channels.clear()
+            precomputed_msgs.clear()
+            use_parallel = False
+            workers_used = 1
+
+    if not use_parallel:
+        proc_diag["parallel_profiles"] = False
+        proc_diag["profile_workers_used"] = int(workers_used)
+
     processed = []
     for p_idx, prof in enumerate(profiles):
         n_ch = prof.n_channels
+        if int(n_ch or 0) <= 0:
+            print(f"[OGPR slicer] no channels for profile: {getattr(prof, 'path', '')}")
+            continue
         coord_idx = 0 if channel < 0 else min(channel, n_ch - 1)
         ch_ref = prof.channel(coord_idx)
         ch_list = list(range(n_ch)) if channel < 0 else [min(channel, n_ch - 1)]
-        proc_channels = []
-        for ci in ch_list:
-            ch = prof.channel(ci)
-            raw = ch.data.astype(np.float32, copy=False)
-            if use_proc:
-                try:
-                    proc = apply_pipeline(
-                        raw.copy(),
-                        params,
-                        dt_ns=prof.dt_ns,
-                        bg_reference_trace=bg_reference,
-                        normalize_output=False,
-                    )
-                except Exception as exc:
-                    print(f"[OGPR slicer] pipeline error ch{ci} in {getattr(prof, 'path', '')}: {exc}")
-                    proc = raw
-            else:
-                proc = raw
-
-            # Optional background removal for LAS-like flow (or when disabled in pipeline).
-            try:
-                need_pre_bg = bool(pre_slice_bg_removal) and (
-                    (not use_proc) or (not bool(params.get("bg_removal", False)))
-                )
-                if need_pre_bg:
-                    proc = background_removal(
-                        proc,
-                        mode=str(pre_slice_bg_mode or "line_by_line"),
-                        window=int(pre_slice_bg_window or 0),
-                        sample_start=int(pre_slice_bg_sample_start or 0),
-                        sample_end=int(pre_slice_bg_sample_end or 0),
-                    )
-            except Exception as exc:
-                print(f"[OGPR slicer] pre-slice bg_removal error ch{ci}: {exc}")
-
-            # Optional lateral trace stacking (noise reduction before extraction).
-            try:
-                proc = _stack_traces(
-                    proc,
-                    stack_n=int(stack_n or 1),
-                    kernel=str(stack_kernel or "boxcar"),
-                )
-            except Exception as exc:
-                print(f"[OGPR slicer] trace stacking error ch{ci}: {exc}")
-
-            if mode in {"envelope", "hilbert"}:
-                ampl = _envelope(proc)
-            elif mode in {"signed", "signed_amp"}:
-                ampl = proc.astype(np.float32, copy=False)
-            else:
-                # LAS-like: usa ampiezza assoluta direttamente dai campioni.
-                ampl = np.abs(proc).astype(np.float32, copy=False)
-            if ampl.ndim != 2 or ampl.size <= 0:
-                print(f"[OGPR slicer] skip invalid channel matrix ch{ci} in {getattr(prof, 'path', '')}")
-                continue
-            proc_channels.append(ampl)
+        if use_parallel:
+            for msg in precomputed_msgs.get(int(p_idx), []):
+                if msg:
+                    print(msg)
+            proc_channels = list(precomputed_channels.get(int(p_idx), []) or [])
+        else:
+            _, proc_channels, msgs = _compute_proc_channels((int(p_idx), prof, ch_list))
+            for msg in msgs:
+                if msg:
+                    print(msg)
 
         if not proc_channels:
             print(f"[OGPR slicer] no valid channels for profile: {getattr(prof, 'path', '')}")
@@ -1599,6 +1664,8 @@ def compute_ogpr_slice_grids(
     topographic_correction: bool = False,
     topo_reference_mode: str = "median",
     topo_reference_elevation: float | None = None,
+    parallel_profiles: bool = False,
+    profile_workers: int = 0,
 ) -> tuple[list[dict], dict]:
     """Compute IDW grids for each slice and return (grids, meta)."""
     from .gpr_processing import DEFAULT_PIPELINE
@@ -1627,6 +1694,8 @@ def compute_ogpr_slice_grids(
         stack_kernel=stack_kernel,
         flip_traces_mode=flip_traces_mode,
         return_diagnostics=True,
+        parallel_profiles=parallel_profiles,
+        profile_workers=profile_workers,
     )
     if isinstance(processed_result, tuple):
         processed, proc_diag = processed_result
@@ -1767,6 +1836,8 @@ def compute_ogpr_slice_grids(
         profiles_geo_valid=int(proc_diag.get("profiles_geo_valid", 0)),
         profiles_geo_skipped=int(proc_diag.get("profiles_geo_skipped", 0)),
         using_synthetic_coords=bool(proc_diag.get("using_synthetic_coords", False)),
+        parallel_profiles=bool(proc_diag.get("parallel_profiles", False)),
+        profile_workers_used=int(proc_diag.get("profile_workers_used", 1)),
         bounds_margin_m=float(gp.get("bounds_margin_m", 0.0) or 0.0),
     )
 
@@ -1933,6 +2004,8 @@ def slice_ogpr_to_tifs(
     depth_radius_factor: float = 0.6,
     balance_profiles: bool = True,
     flip_traces_mode: str = "none",
+    parallel_profiles: bool = False,
+    profile_workers: int = 0,
 ) -> list[dict]:
     """Legacy entrypoint: compute grids and write to disk."""
     grids, meta = compute_ogpr_slice_grids(
@@ -1953,6 +2026,8 @@ def slice_ogpr_to_tifs(
         depth_radius_factor=depth_radius_factor,
         balance_profiles=balance_profiles,
         flip_traces_mode=flip_traces_mode,
+        parallel_profiles=parallel_profiles,
+        profile_workers=profile_workers,
     )
     if not grids:
         return []
