@@ -1540,6 +1540,34 @@ class GprProfileViewer(QMainWindow):
             "Fast: molto piu' veloce su griglie grandi (kNN vettorizzato).\n"
             "Quality: ricerca entro raggio per cella (piu' lenta ma piu' fedele localmente)."
         )
+        self._chk_slice_use_hilbert = QCheckBox()
+        self._chk_slice_use_hilbert.setChecked(True)
+        self._chk_slice_use_hilbert.setToolTip(
+            "Usa l'envelope Hilbert come ampiezza di default per stabilizzare le timeslice."
+        )
+        self._spin_slice_overlap_pct = QSpinBox()
+        self._spin_slice_overlap_pct.setRange(0, 90)
+        self._spin_slice_overlap_pct.setSingleStep(5)
+        self._spin_slice_overlap_pct.setValue(50)
+        self._spin_slice_overlap_pct.setSuffix(" %")
+        self._spin_slice_overlap_pct.setToolTip(
+            "Overlap tra slice consecutive. 50% migliora la continuita' verticale."
+        )
+        self._spin_slice_blanking_m = QDoubleSpinBox()
+        self._spin_slice_blanking_m.setRange(0.0, 100.0)
+        self._spin_slice_blanking_m.setDecimals(3)
+        self._spin_slice_blanking_m.setSingleStep(0.05)
+        self._spin_slice_blanking_m.setValue(0.30)
+        self._spin_slice_blanking_m.setSuffix(" m")
+        self._spin_slice_blanking_m.setToolTip(
+            "Celle oltre questa distanza dai dati reali diventano NoData (0=disattiva)."
+        )
+        self._spin_slice_idw_power = QSpinBox()
+        self._spin_slice_idw_power.setRange(1, 4)
+        self._spin_slice_idw_power.setValue(2)
+        self._spin_slice_idw_power.setToolTip(
+            "Esponente potenza IDW (p). 2 standard, 3-4 enfatizza dettagli locali."
+        )
 
         self._chk_anisotropic_idw = QCheckBox(); self._chk_anisotropic_idw.setChecked(False)
         self._chk_auto_radius     = QCheckBox(); self._chk_auto_radius.setChecked(True)
@@ -1597,6 +1625,7 @@ class GprProfileViewer(QMainWindow):
         fl_slice.addRow("Slice clip min %:",  self._spin_slice_vmin_pct)
         fl_slice.addRow("Slice clip max %:",  self._spin_slice_vmax_pct)
         fl_slice.addRow("Estrazione:",         self._cb_slice_extraction)
+        fl_slice.addRow("Usa Hilbert:",        self._chk_slice_use_hilbert)
         fl_slice.addRow("Processing pre-slice:", self._chk_slice_use_processing)
         fl_slice.addRow("BG pre-slice:",       self._chk_slice_bg)
         fl_slice.addRow("  modo BG:",          self._cb_slice_bg_mode)
@@ -1614,6 +1643,9 @@ class GprProfileViewer(QMainWindow):
         fl_slice.addRow("Filtro ampiezza:",    self._chk_amplitude_filter)
         fl_slice.addRow("  sigma:",            self._spin_amplitude_sigma)
         fl_slice.addRow("IDW mode:",           self._cb_slice_idw_mode)
+        fl_slice.addRow("Potenza IDW (p):",    self._spin_slice_idw_power)
+        fl_slice.addRow("Overlap slice:",      self._spin_slice_overlap_pct)
+        fl_slice.addRow("Blanking (m):",       self._spin_slice_blanking_m)
         fl_slice.addRow("IDW anisotropo:",     self._chk_anisotropic_idw)
         fl_slice.addRow("  raggio auto:",      self._chk_auto_radius)
         fl_slice.addRow("Bilancia profili:",   self._chk_slice_balance_profiles)
@@ -4663,6 +4695,7 @@ class GprProfileViewer(QMainWindow):
         if key == "quality":
             cfg = {
                 "extraction_mode": "envelope",
+                "use_hilbert": True,
                 "use_processing": True,
                 "pre_slice_bg_removal": True,
                 "pre_slice_bg_mode": "line_by_line",
@@ -4680,6 +4713,9 @@ class GprProfileViewer(QMainWindow):
                 "amplitude_filter": True,
                 "amplitude_sigma": 3.0,
                 "idw_mode": "quality",
+                "idw_power": 2,
+                "overlap_fraction": 0.5,
+                "blanking_distance": 0.30,
                 "use_anisotropic_idw": True,
                 "auto_radius": True,
                 "balance_profiles": True,
@@ -4695,6 +4731,7 @@ class GprProfileViewer(QMainWindow):
         elif key == "aggressive":
             cfg = {
                 "extraction_mode": "envelope",
+                "use_hilbert": True,
                 "use_processing": True,
                 "pre_slice_bg_removal": True,
                 "pre_slice_bg_mode": "grid_by_grid",
@@ -4712,6 +4749,9 @@ class GprProfileViewer(QMainWindow):
                 "amplitude_filter": True,
                 "amplitude_sigma": 2.5,
                 "idw_mode": "quality",
+                "idw_power": 3,
+                "overlap_fraction": 0.5,
+                "blanking_distance": 0.30,
                 "use_anisotropic_idw": True,
                 "auto_radius": True,
                 "balance_profiles": True,
@@ -4727,6 +4767,7 @@ class GprProfileViewer(QMainWindow):
         else:
             cfg = {
                 "extraction_mode": "las_like",
+                "use_hilbert": True,
                 "use_processing": True,
                 "pre_slice_bg_removal": True,
                 "pre_slice_bg_mode": "line_by_line",
@@ -4744,6 +4785,9 @@ class GprProfileViewer(QMainWindow):
                 "amplitude_filter": False,
                 "amplitude_sigma": 3.0,
                 "idw_mode": "quality",
+                "idw_power": 2,
+                "overlap_fraction": 0.5,
+                "blanking_distance": 0.30,
                 "use_anisotropic_idw": False,
                 "auto_radius": True,
                 "balance_profiles": True,
@@ -4758,6 +4802,7 @@ class GprProfileViewer(QMainWindow):
             lbl = "Preset timeslice: Base applicato."
 
         self._set_combo_to_data(self._cb_slice_extraction, cfg["extraction_mode"])
+        self._chk_slice_use_hilbert.setChecked(bool(cfg.get("use_hilbert", True)))
         self._chk_slice_use_processing.setChecked(bool(cfg["use_processing"]))
         self._chk_slice_bg.setChecked(bool(cfg["pre_slice_bg_removal"]))
         self._set_combo_to_data(self._cb_slice_bg_mode, cfg["pre_slice_bg_mode"])
@@ -4775,6 +4820,9 @@ class GprProfileViewer(QMainWindow):
         self._chk_amplitude_filter.setChecked(bool(cfg["amplitude_filter"]))
         self._spin_amplitude_sigma.setValue(float(cfg["amplitude_sigma"]))
         self._set_combo_to_data(self._cb_slice_idw_mode, cfg["idw_mode"])
+        self._spin_slice_idw_power.setValue(int(cfg.get("idw_power", 2)))
+        self._spin_slice_overlap_pct.setValue(int(round(float(cfg.get("overlap_fraction", 0.5)) * 100.0)))
+        self._spin_slice_blanking_m.setValue(float(cfg.get("blanking_distance", 0.30)))
         self._chk_anisotropic_idw.setChecked(bool(cfg["use_anisotropic_idw"]))
         self._chk_auto_radius.setChecked(bool(cfg["auto_radius"]))
         self._chk_slice_balance_profiles.setChecked(bool(cfg["balance_profiles"]))
@@ -4829,6 +4877,7 @@ class GprProfileViewer(QMainWindow):
         return {
             "normalize_channels":  self._chk_normalize_ch.isChecked(),
             "extraction_mode":     str(self._cb_slice_extraction.currentData() or "las_like"),
+            "use_hilbert":         self._chk_slice_use_hilbert.isChecked(),
             "use_processing":      self._chk_slice_use_processing.isChecked(),
             "pre_slice_bg_removal": self._chk_slice_bg.isChecked(),
             "pre_slice_bg_mode": str(self._cb_slice_bg_mode.currentData() or "line_by_line"),
@@ -4847,6 +4896,9 @@ class GprProfileViewer(QMainWindow):
                 if self._chk_amplitude_filter.isChecked() else None
             ),
             "idw_mode":            str(self._cb_slice_idw_mode.currentData() or "quality"),
+            "idw_power":           int(self._spin_slice_idw_power.value()),
+            "overlap_fraction":    float(self._spin_slice_overlap_pct.value()) / 100.0,
+            "blanking_distance":   float(self._spin_slice_blanking_m.value()),
             "use_anisotropic_idw": self._chk_anisotropic_idw.isChecked(),
             "auto_radius":         self._chk_auto_radius.isChecked(),
             "balance_profiles":    self._chk_slice_balance_profiles.isChecked(),
@@ -4965,13 +5017,17 @@ class GprProfileViewer(QMainWindow):
                 pipeline_params=extra.get("pipeline_params"),
                 normalize_channels=bool(extra.get("normalize_channels", False)),
                 extraction_mode=str(extra.get("extraction_mode", "las_like") or "las_like"),
+                use_hilbert=bool(extra.get("use_hilbert", True)),
                 use_processing=bool(extra.get("use_processing", False)),
                 amplitude_sigma=extra.get("amplitude_sigma"),
                 use_anisotropic_idw=bool(extra.get("use_anisotropic_idw", False)),
                 idw_mode=str(extra.get("idw_mode", "quality") or "quality"),
+                idw_power=float(extra.get("idw_power", 2.0) or 2.0),
                 auto_radius=bool(extra.get("auto_radius", True)),
                 min_points=int(extra.get("min_points", 1) or 1),
                 fill_nodata=bool(extra.get("fill_nodata", True)),
+                overlap_fraction=float(extra.get("overlap_fraction", 0.5) or 0.0),
+                blanking_distance=float(extra.get("blanking_distance", 0.0) or 0.0),
                 smooth_sigma=float(extra.get("smooth_sigma", 0.8) or 0.0),
                 depth_radius_factor=float(extra.get("depth_radius_factor", 0.6) or 0.0),
                 balance_profiles=bool(extra.get("balance_profiles", True)),

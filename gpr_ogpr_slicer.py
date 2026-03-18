@@ -501,6 +501,41 @@ def _smooth_grid_gaussian(grid: np.ndarray, sigma: float = 1.0) -> np.ndarray:
     return result
 
 
+def _blanking_mask_from_distance(
+    e_pts: np.ndarray,
+    n_pts: np.ndarray,
+    x_min: float,
+    y_min: float,
+    n_x: int,
+    n_y: int,
+    resolution: float,
+    blanking_distance: float,
+) -> np.ndarray | None:
+    """Return mask for cells farther than blanking_distance from real samples."""
+    try:
+        dmax = float(blanking_distance)
+    except Exception:
+        dmax = 0.0
+    if (not np.isfinite(dmax)) or dmax <= 0.0:
+        return None
+    if len(e_pts) <= 0 or len(n_pts) <= 0:
+        return None
+    try:
+        from scipy.spatial import cKDTree
+    except Exception:
+        return None
+    try:
+        gx = float(x_min) + np.arange(int(n_x), dtype=np.float64) * float(resolution)
+        gy = float(y_min) + np.arange(int(n_y), dtype=np.float64) * float(resolution)
+        gxx, gyy = np.meshgrid(gx, gy)
+        qpts = np.column_stack([gxx.ravel(), gyy.ravel()])
+        tree = cKDTree(np.column_stack([e_pts.astype(np.float64), n_pts.astype(np.float64)]))
+        dist, _ = tree.query(qpts, k=1, workers=-1)
+        return np.asarray(dist, dtype=np.float64).reshape(int(n_y), int(n_x)) > dmax
+    except Exception:
+        return None
+
+
 def _estimate_idw_knn_k(
     x_pts: np.ndarray,
     y_pts: np.ndarray,
@@ -852,6 +887,7 @@ def _process_profiles(
     params: dict,
     normalize_channels: bool,
     extraction_mode: str = "las_like",
+    use_hilbert: bool = True,
     use_processing: bool = False,
     balance_profiles: bool = True,
     pre_slice_bg_removal: bool = False,
@@ -869,16 +905,17 @@ def _process_profiles(
     """Process profiles and return list of (prof, x_ref, y_ref, ampl_3d).
 
     Applies optional processing per channel and extracts amplitudes according to
-    extraction_mode:
-      - las_like: abs(amplitude), no envelope
-      - envelope: Hilbert envelope
+    extraction_mode + use_hilbert:
       - signed: keep signed processed trace
+      - envelope/hilbert: Hilbert envelope
+      - las_like: Hilbert envelope when use_hilbert=True, else abs(amplitude)
     Optionally applies robust inter-profile balancing using global median.
     Optionally parallelizes per-profile preprocessing with a thread pool.
     """
     from .gpr_processing import apply_pipeline, apply_pre_bg_pipeline, background_removal
 
     mode = str(extraction_mode or "las_like").strip().lower()
+    hilbert_on = bool(use_hilbert)
     use_proc = bool(use_processing)
 
     if not profiles:
@@ -977,10 +1014,10 @@ def _process_profiles(
                 except Exception as exc:
                     msgs.append(f"[OGPR slicer] trace stacking error ch{ci}: {exc}")
 
-                if mode in {"envelope", "hilbert"}:
-                    ampl = _envelope(proc)
-                elif mode in {"signed", "signed_amp"}:
+                if mode in {"signed", "signed_amp"}:
                     ampl = proc.astype(np.float32, copy=False)
+                elif mode in {"envelope", "hilbert"} or (hilbert_on and mode not in {"signed", "signed_amp"}):
+                    ampl = _envelope(proc)
                 else:
                     # LAS-like: usa ampiezza assoluta direttamente dai campioni.
                     ampl = np.abs(proc).astype(np.float32, copy=False)
@@ -1257,6 +1294,7 @@ def _interpolate_z_level(
     idw_mode: str,
     idw_power: float, min_points: int,
     fill_nodata: bool, fill_nodata_max_distance: float,
+    blanking_distance: float,
     smooth_sigma: float,
     balance_profiles: bool = True,
     per_slice_balance: bool = False,
@@ -1410,6 +1448,26 @@ def _interpolate_z_level(
                 resolution, gp["radius"],
                 power=idw_power, min_points=min_points,
             )
+    blank_mask = _blanking_mask_from_distance(
+        e_all,
+        n_all,
+        gp["x_min"],
+        gp["y_min"],
+        gp["n_x"],
+        gp["n_y"],
+        resolution,
+        blanking_distance,
+    )
+    if blank_mask is not None:
+        try:
+            diag["blanking_distance_m"] = float(blanking_distance)
+        except Exception:
+            diag["blanking_distance_m"] = 0.0
+        diag["blanked_cells"] = int(np.count_nonzero(blank_mask))
+    else:
+        diag["blanking_distance_m"] = float(0.0)
+        diag["blanked_cells"] = int(0)
+
     if fill_nodata:
         try:
             fill_m = float(fill_nodata_max_distance)
@@ -1429,6 +1487,10 @@ def _interpolate_z_level(
             grid = _fill_nodata_grid(grid, max_distance=fill_px)
     if smooth_sigma > 0:
         grid = _smooth_grid_gaussian(grid, sigma=smooth_sigma)
+    # Enforce blanking at the end so fill/smooth never reintroduce ghost values.
+    if blank_mask is not None:
+        grid = grid.astype(np.float32, copy=False)
+        grid[blank_mask] = np.nan
     diag["idw_mode"] = mode_norm
     return grid, n_pts, diag
 
@@ -1449,6 +1511,7 @@ def compute_preview_slice(
     pipeline_params: dict | None = None,
     normalize_channels: bool = False,
     extraction_mode: str = "las_like",
+    use_hilbert: bool = True,
     use_processing: bool = False,
     amplitude_sigma: float | None = None,
     use_anisotropic_idw: bool = False,
@@ -1460,6 +1523,7 @@ def compute_preview_slice(
     min_points: int = 1,
     fill_nodata: bool = True,
     fill_nodata_max_distance: float = 0.0,
+    blanking_distance: float = 0.0,
     smooth_sigma: float = 0.8,
     depth_radius_factor: float = 0.6,
     balance_profiles: bool = True,
@@ -1491,6 +1555,7 @@ def compute_preview_slice(
         (None if radius is None else float(radius)),
         bool(normalize_channels),
         str(extraction_mode or "las_like"),
+        bool(use_hilbert),
         bool(use_processing),
         bool(balance_profiles),
         bool(pre_slice_bg_removal),
@@ -1503,6 +1568,13 @@ def compute_preview_slice(
         str(flip_traces_mode or "none"),
         bool(use_anisotropic_idw),
         _normalize_idw_mode(idw_mode),
+        float(idw_power),
+        int(min_points),
+        bool(fill_nodata),
+        float(fill_nodata_max_distance or 0.0),
+        float(blanking_distance or 0.0),
+        float(smooth_sigma or 0.0),
+        float(depth_radius_factor or 0.0),
         bool(auto_radius),
         (None if anisotropy_ratio is None else float(anisotropy_ratio)),
         (None if anisotropy_angle is None else float(anisotropy_angle)),
@@ -1528,6 +1600,7 @@ def compute_preview_slice(
             params,
             normalize_channels,
             extraction_mode=extraction_mode,
+            use_hilbert=use_hilbert,
             use_processing=use_processing,
             balance_profiles=balance_profiles,
             pre_slice_bg_removal=pre_slice_bg_removal,
@@ -1604,7 +1677,9 @@ def compute_preview_slice(
         amplitude_sigma, use_anisotropic_idw,
         idw_mode,
         idw_power, min_points,
-        fill_nodata, fill_nodata_max_distance, smooth_sigma,
+        fill_nodata, fill_nodata_max_distance,
+        blanking_distance=blanking_distance,
+        smooth_sigma=smooth_sigma,
         balance_profiles=balance_profiles,
         per_slice_balance=per_slice_balance_eff,
         amplitude_hist_bins=amplitude_hist_bins,
@@ -1660,6 +1735,7 @@ def compute_ogpr_slice_grids(
     pipeline_params: dict | None = None,
     normalize_channels: bool = False,
     extraction_mode: str = "las_like",
+    use_hilbert: bool = True,
     use_processing: bool = False,
     amplitude_sigma: float | None = None,
     use_anisotropic_idw: bool = False,
@@ -1671,6 +1747,8 @@ def compute_ogpr_slice_grids(
     min_points: int = 1,
     fill_nodata: bool = True,
     fill_nodata_max_distance: float = 0.0,
+    overlap_fraction: float = 0.5,
+    blanking_distance: float = 0.0,
     smooth_sigma: float = 0.8,
     emit_diagnostics: bool = True,
     depth_radius_factor: float = 0.6,
@@ -1714,6 +1792,7 @@ def compute_ogpr_slice_grids(
         params,
         normalize_channels,
         extraction_mode=extraction_mode,
+        use_hilbert=use_hilbert,
         use_processing=use_processing,
         balance_profiles=balance_profiles,
         pre_slice_bg_removal=pre_slice_bg_removal,
@@ -1828,7 +1907,17 @@ def compute_ogpr_slice_grids(
         )
     t_grid_setup_s = max(0.0, perf_counter() - t0)
 
-    z_levels = np.arange(float(z_min), float(z_max) + z_step * 0.5, float(z_step))
+    try:
+        overlap_f = float(overlap_fraction)
+    except Exception:
+        overlap_f = 0.5
+    if not np.isfinite(overlap_f):
+        overlap_f = 0.5
+    overlap_f = float(np.clip(overlap_f, 0.0, 0.9))
+    slice_step = float(z_step) * float(1.0 - overlap_f)
+    if (not np.isfinite(slice_step)) or slice_step <= 0.0:
+        slice_step = float(z_step)
+    z_levels = np.arange(float(z_min), float(z_max) + slice_step * 0.5, slice_step)
 
     grids = []
     ratio_for_radius = 1.0
@@ -1855,17 +1944,22 @@ def compute_ogpr_slice_grids(
         channel=int(channel),
         combine_method=str(combine_method or "mean"),
         extraction_mode=str(extraction_mode or "las_like"),
+        use_hilbert=bool(use_hilbert),
         use_processing=bool(use_processing),
         pipeline_params=dict(params or {}),
         radius=float(base_radius),
         effective_radius=float(effective_radius_base),
         depth_radius_factor=float(depth_radius_factor),
+        overlap_fraction=float(overlap_f),
+        slice_step=float(slice_step),
+        idw_power=float(idw_power),
         use_anisotropic_idw=bool(use_anisotropic_idw),
         idw_mode=idw_mode_norm,
         min_points=int(min_points),
         balance_profiles=bool(balance_profiles),
         per_slice_balance=bool(per_slice_balance_eff),
         fill_nodata_max_distance_m=float(fill_nodata_max_distance),
+        blanking_distance_m=float(blanking_distance),
         pre_slice_bg_removal=bool(pre_slice_bg_removal),
         pre_slice_bg_mode=str(pre_slice_bg_mode or "line_by_line"),
         pre_slice_bg_window=int(pre_slice_bg_window or 0),
@@ -1903,6 +1997,7 @@ def compute_ogpr_slice_grids(
             idw_power=idw_power, min_points=min_points,
             fill_nodata=fill_nodata,
             fill_nodata_max_distance=fill_nodata_max_distance,
+            blanking_distance=blanking_distance,
             smooth_sigma=smooth_sigma,
             balance_profiles=balance_profiles,
             per_slice_balance=per_slice_balance_eff,

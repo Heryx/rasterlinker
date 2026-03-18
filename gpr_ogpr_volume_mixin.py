@@ -388,6 +388,7 @@ class GprOgprVolumeMixin:
                     "n_slices":        len(slices),
                     "normalize_channels": bool(extra_slice_params.get("normalize_channels", False)),
                     "extraction_mode": str(extra_slice_params.get("extraction_mode", "las_like") or "las_like"),
+                    "use_hilbert": bool(extra_slice_params.get("use_hilbert", True)),
                     "use_processing": bool(extra_slice_params.get("use_processing", False)),
                     "pre_slice_bg_removal": bool(extra_slice_params.get("pre_slice_bg_removal", False)),
                     "pre_slice_bg_mode": str(extra_slice_params.get("pre_slice_bg_mode", "line_by_line") or "line_by_line"),
@@ -403,6 +404,9 @@ class GprOgprVolumeMixin:
                     "topo_reference_elevation": extra_slice_params.get("topo_reference_elevation"),
                     "use_anisotropic_idw": bool(extra_slice_params.get("use_anisotropic_idw", False)),
                     "idw_mode": str(extra_slice_params.get("idw_mode", "quality") or "quality"),
+                    "idw_power": int(extra_slice_params.get("idw_power", 2) or 2),
+                    "overlap_fraction": float(extra_slice_params.get("overlap_fraction", 0.5) or 0.0),
+                    "blanking_distance": float(extra_slice_params.get("blanking_distance", 0.0) or 0.0),
                     "parallel_profiles": bool(extra_slice_params.get("parallel_profiles", True)),
                     "profile_workers": int(extra_slice_params.get("profile_workers", 0) or 0),
                     "auto_radius": bool(extra_slice_params.get("auto_radius", True)),
@@ -492,6 +496,10 @@ class GprOgprVolumeMixin:
                                 "channel": int(params.get("channel", 0) or 0),
                                 "use_processing": bool(extra_slice_params.get("use_processing", False)),
                                 "extraction_mode": str(extra_slice_params.get("extraction_mode", "las_like") or "las_like"),
+                                "use_hilbert": bool(extra_slice_params.get("use_hilbert", True)),
+                                "overlap_fraction": float(extra_slice_params.get("overlap_fraction", 0.5) or 0.0),
+                                "blanking_distance": float(extra_slice_params.get("blanking_distance", 0.0) or 0.0),
+                                "idw_power": int(extra_slice_params.get("idw_power", 2) or 2),
                                 "pipeline_params": dict(extra_slice_params.get("pipeline_params") or {}),
                             }
                         )
