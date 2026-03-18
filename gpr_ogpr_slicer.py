@@ -499,6 +499,60 @@ def _smooth_grid_gaussian(grid: np.ndarray, sigma: float = 1.0) -> np.ndarray:
     return result
 
 
+def _estimate_idw_knn_k(
+    x_pts: np.ndarray,
+    y_pts: np.ndarray,
+    radius: float,
+    min_points: int,
+    max_k: int = 512,
+) -> int:
+    n_pts = int(len(x_pts))
+    if n_pts <= 0:
+        return 1
+    r = float(radius)
+    if not np.isfinite(r) or r <= 0.0:
+        r = 1e-6
+
+    try:
+        area = float(np.ptp(x_pts)) * float(np.ptp(y_pts))
+    except Exception:
+        area = 0.0
+    if not np.isfinite(area) or area <= 1e-12:
+        area = max(float(n_pts), 1.0)
+
+    density = float(n_pts) / area
+    expected = np.pi * (r ** 2) * density
+    try:
+        k = int(np.ceil(expected * 1.8)) + 8
+    except Exception:
+        k = 32
+    k = max(int(min_points), k, 8)
+    k = min(k, int(max_k), n_pts)
+    return max(1, int(k))
+
+
+def _idw_chunk_size_from_k(k: int, target_elements: int = 1_500_000) -> int:
+    kk = max(1, int(k))
+    cs = int(target_elements // kk)
+    return max(1_000, cs)
+
+
+def _ckdtree_query_knn(tree, qpts: np.ndarray, k: int, distance_upper_bound: float):
+    try:
+        return tree.query(
+            qpts,
+            k=int(k),
+            distance_upper_bound=float(distance_upper_bound),
+            workers=-1,
+        )
+    except TypeError:
+        return tree.query(
+            qpts,
+            k=int(k),
+            distance_upper_bound=float(distance_upper_bound),
+        )
+
+
 def _bin_with_idw(
     x_pts, y_pts, i_pts, x_min, y_min, n_x, n_y, resolution, radius, power=2.0, min_points=1
 ):
@@ -507,20 +561,54 @@ def _bin_with_idw(
     gy = y_min + np.arange(n_y) * resolution
     gxx, gyy = np.meshgrid(gx, gy)
     gpts = np.column_stack([gxx.ravel(), gyy.ravel()])
-    tree = cKDTree(np.column_stack([x_pts, y_pts]))
-    results = tree.query_ball_point(gpts, r=radius, workers=-1)
-    i64 = i_pts.astype(np.float64)
-    grid = np.full(n_x * n_y, np.nan, dtype=np.float32)
-    for k, idx_list in enumerate(results):
-        if len(idx_list) < min_points:
+    n_cells = int(gpts.shape[0])
+    n_pts = int(np.asarray(x_pts).size)
+    if n_cells <= 0 or n_pts <= 0:
+        return np.full((n_y, n_x), np.nan, dtype=np.float32)
+
+    r = float(radius)
+    if not np.isfinite(r) or r <= 0.0:
+        r = 1e-6
+    pwr = float(power) if np.isfinite(power) and float(power) > 0.0 else 2.0
+    min_pts = max(1, int(min_points))
+
+    x_arr = np.asarray(x_pts, dtype=np.float64, copy=False)
+    y_arr = np.asarray(y_pts, dtype=np.float64, copy=False)
+    i64 = np.asarray(i_pts, dtype=np.float64, copy=False)
+
+    tree = cKDTree(np.column_stack([x_arr, y_arr]))
+    k = _estimate_idw_knn_k(x_arr, y_arr, r, min_pts, max_k=512)
+    chunk_size = _idw_chunk_size_from_k(k)
+
+    grid = np.full(n_cells, np.nan, dtype=np.float32)
+    for start in range(0, n_cells, chunk_size):
+        end = min(n_cells, start + chunk_size)
+        q = gpts[start:end]
+        dists, idxs = _ckdtree_query_knn(tree, q, k=k, distance_upper_bound=r)
+        dists = np.asarray(dists, dtype=np.float64)
+        idxs = np.asarray(idxs, dtype=np.int64)
+        if dists.ndim == 1:
+            dists = dists[:, np.newaxis]
+            idxs = idxs[:, np.newaxis]
+
+        valid = np.isfinite(dists) & (idxs >= 0) & (idxs < n_pts)
+        if not np.any(valid):
             continue
-        idx = np.asarray(idx_list, dtype=np.int64)
-        cx, cy = gpts[k]
-        d = np.sqrt((x_pts[idx] - cx) ** 2 + (y_pts[idx] - cy) ** 2)
-        w = 1.0 / (d ** power + 1e-9)
-        ws = w.sum()
-        if ws > 0:
-            grid[k] = float(np.dot(w, i64[idx]) / ws)
+
+        idx_clip = np.clip(idxs, 0, max(0, n_pts - 1))
+        vals = i64[idx_clip]
+        d_safe = np.where(valid, dists, 1.0)
+        w = np.where(valid, 1.0 / (np.power(d_safe, pwr) + 1e-9), 0.0)
+        ws = np.sum(w, axis=1)
+        cnt = np.sum(valid, axis=1)
+        ok = (cnt >= min_pts) & (ws > 1e-12)
+        if not np.any(ok):
+            continue
+        num = np.sum(w * vals, axis=1)
+        out = np.full(q.shape[0], np.nan, dtype=np.float32)
+        out[ok] = (num[ok] / ws[ok]).astype(np.float32)
+        grid[start:end] = out
+
     return grid.reshape(n_y, n_x)
 
 
@@ -542,30 +630,67 @@ def _bin_with_idw_anisotropic(
     gy = y_min + np.arange(n_y) * resolution
     gxx, gyy = np.meshgrid(gx, gy)
     gpts = np.column_stack([gxx.ravel(), gyy.ravel()])
-    tree = cKDTree(np.column_stack([x_pts, y_pts]))
-    results = tree.query_ball_point(gpts, r=radius * max(1.0, anisotropy_ratio), workers=-1)
-    i64 = i_pts.astype(np.float64)
-    grid = np.full(n_x * n_y, np.nan, dtype=np.float32)
-    for k, idx_list in enumerate(results):
-        if not idx_list:
+    n_cells = int(gpts.shape[0])
+    n_pts = int(np.asarray(x_pts).size)
+    if n_cells <= 0 or n_pts <= 0:
+        return np.full((n_y, n_x), np.nan, dtype=np.float32)
+
+    r = float(radius)
+    if not np.isfinite(r) or r <= 0.0:
+        r = 1e-6
+    r_search = r * max(1.0, float(anisotropy_ratio))
+    pwr = float(power) if np.isfinite(power) and float(power) > 0.0 else 2.0
+    min_pts = max(1, int(min_points))
+    max_k = int(max_points_per_cell) if max_points_per_cell else 512
+    max_k = max(min_pts, max(8, max_k))
+
+    x_arr = np.asarray(x_pts, dtype=np.float64, copy=False)
+    y_arr = np.asarray(y_pts, dtype=np.float64, copy=False)
+    i64 = np.asarray(i_pts, dtype=np.float64, copy=False)
+
+    tree = cKDTree(np.column_stack([x_arr, y_arr]))
+    k = _estimate_idw_knn_k(x_arr, y_arr, r_search, min_pts, max_k=max_k)
+    chunk_size = _idw_chunk_size_from_k(k)
+
+    grid = np.full(n_cells, np.nan, dtype=np.float32)
+    for start in range(0, n_cells, chunk_size):
+        end = min(n_cells, start + chunk_size)
+        q = gpts[start:end]
+        dists, idxs = _ckdtree_query_knn(tree, q, k=k, distance_upper_bound=r_search)
+        dists = np.asarray(dists, dtype=np.float64)
+        idxs = np.asarray(idxs, dtype=np.int64)
+        if dists.ndim == 1:
+            dists = dists[:, np.newaxis]
+            idxs = idxs[:, np.newaxis]
+
+        valid0 = np.isfinite(dists) & (idxs >= 0) & (idxs < n_pts)
+        if not np.any(valid0):
             continue
-        idx = np.asarray(idx_list, dtype=np.int64)
-        cx, cy = gpts[k]
-        if max_points_per_cell and idx.size > int(max_points_per_cell):
-            # Cap neighbors in dense areas to avoid pathological anisotropic costs.
-            keep_n = int(max_points_per_cell)
-            d2 = (x_pts[idx] - cx) ** 2 + (y_pts[idx] - cy) ** 2
-            keep = np.argpartition(d2, keep_n - 1)[:keep_n]
-            idx = idx[keep]
-        d = _ad(x_pts[idx], y_pts[idx], cx, cy)
-        in_r = d <= radius
-        if in_r.sum() < min_points:
+
+        idx_clip = np.clip(idxs, 0, max(0, n_pts - 1))
+        px = x_arr[idx_clip]
+        py = y_arr[idx_clip]
+        cx = q[:, 0][:, np.newaxis]
+        cy = q[:, 1][:, np.newaxis]
+
+        d_aniso = _ad(px, py, cx, cy)
+        valid = valid0 & np.isfinite(d_aniso) & (d_aniso <= r)
+        if not np.any(valid):
             continue
-        d_in = d[in_r]
-        w = 1.0 / (d_in ** power + 1e-9)
-        ws = w.sum()
-        if ws > 0:
-            grid[k] = float(np.dot(w, i64[idx[in_r]]) / ws)
+
+        vals = i64[idx_clip]
+        d_safe = np.where(valid, d_aniso, 1.0)
+        w = np.where(valid, 1.0 / (np.power(d_safe, pwr) + 1e-9), 0.0)
+        ws = np.sum(w, axis=1)
+        cnt = np.sum(valid, axis=1)
+        ok = (cnt >= min_pts) & (ws > 1e-12)
+        if not np.any(ok):
+            continue
+        num = np.sum(w * vals, axis=1)
+        out = np.full(q.shape[0], np.nan, dtype=np.float32)
+        out[ok] = (num[ok] / ws[ok]).astype(np.float32)
+        grid[start:end] = out
+
     return grid.reshape(n_y, n_x)
 
 
