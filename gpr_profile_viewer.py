@@ -303,6 +303,9 @@ class GprProfileViewer(QDialog):
         self._slice_current_extent: Optional[tuple[float, float, float, float]] = None
         self._slice_current_shape: Optional[tuple[int, int]] = None
         self._slice_current_cmap: str = ""
+        self._show_wiggle: bool = True
+        self._ax_main_bounds_default = None
+        self._ax_wiggle_bounds_default = None
 
         self._rb_point: Optional[QgsRubberBand] = None
         self._rb_line:  Optional[QgsRubberBand] = None
@@ -401,6 +404,11 @@ class GprProfileViewer(QDialog):
         self._chk_real_aspect.toggled.connect(self._redraw)
         tb.addWidget(self._chk_real_aspect)
 
+        self._chk_show_wiggle = QCheckBox("Mostra Wiggle")
+        self._chk_show_wiggle.setChecked(True)
+        self._chk_show_wiggle.toggled.connect(self._on_toggle_wiggle)
+        tb.addWidget(self._chk_show_wiggle)
+
         act_reset_zoom = QAction("Reset Zoom", self)
         act_reset_zoom.setToolTip("Ripristina l'estensione completa del profilo.")
         act_reset_zoom.triggered.connect(self._reset_zoom)
@@ -462,6 +470,8 @@ class GprProfileViewer(QDialog):
             self._ax         = self._fig.add_subplot(gs[0, 0])
             self._ax_wiggle  = self._fig.add_subplot(gs[0, 1], sharey=self._ax)
             self._ax_wiggle.tick_params(axis="y", left=False, labelleft=False)
+            self._ax_main_bounds_default = list(self._ax.get_position().bounds)
+            self._ax_wiggle_bounds_default = list(self._ax_wiggle.get_position().bounds)
             self._canvas_mpl = FigureCanvasQTAgg(self._fig)
             self._canvas_mpl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self._canvas_mpl.mpl_connect("motion_notify_event", self._on_mouse_move)
@@ -555,6 +565,34 @@ class GprProfileViewer(QDialog):
         self._timeslice_dialog.show()
         self._timeslice_dialog.raise_()
         self._timeslice_dialog.activateWindow()
+
+    def _apply_wiggle_visibility_layout(self):
+        if not HAS_MPL or not hasattr(self, "_ax") or not hasattr(self, "_ax_wiggle"):
+            return
+        if self._ax is None or self._ax_wiggle is None:
+            return
+        if self._ax_main_bounds_default is None or self._ax_wiggle_bounds_default is None:
+            try:
+                self._ax_main_bounds_default = list(self._ax.get_position().bounds)
+                self._ax_wiggle_bounds_default = list(self._ax_wiggle.get_position().bounds)
+            except Exception:
+                return
+
+        main = list(self._ax_main_bounds_default)
+        wig = list(self._ax_wiggle_bounds_default)
+        if bool(getattr(self, "_show_wiggle", True)):
+            self._ax_wiggle.set_visible(True)
+            self._ax.set_position(main)
+            self._ax_wiggle.set_position(wig)
+        else:
+            self._ax_wiggle.set_visible(False)
+            right = float(wig[0] + wig[2])
+            self._ax.set_position([float(main[0]), float(main[1]), right - float(main[0]), float(main[3])])
+
+    def _on_toggle_wiggle(self, checked: bool):
+        self._show_wiggle = bool(checked)
+        self._apply_wiggle_visibility_layout()
+        self._redraw()
 
     def _build_processing_panel(self):
         grp = QGroupBox("Processing")
@@ -2377,6 +2415,7 @@ class GprProfileViewer(QDialog):
         self._draw_hyperbola_overlay(prof, dist_max, depth_max)
         self._vline = self._ax.axvline(x=0, color="yellow", lw=1, visible=False)
         self._hline = self._ax.axhline(y=0, color="cyan",   lw=1, linestyle="--", visible=False)
+        self._apply_wiggle_visibility_layout()
         self._sync_xpan_slider()
         self._update_wiggle_plot(draw=False, force=True)
         self._canvas_mpl.draw_idle()
@@ -2465,9 +2504,19 @@ class GprProfileViewer(QDialog):
         if not HAS_MPL or not hasattr(self, "_ax_wiggle"):
             return
         axw = self._ax_wiggle
+        if not bool(getattr(self, "_show_wiggle", True)):
+            try:
+                axw.set_visible(False)
+            except Exception:
+                pass
+            return
+        else:
+            try:
+                axw.set_visible(True)
+            except Exception:
+                pass
         if self._disp_data is None or not self._profiles:
             axw.clear()
-            axw.set_title("Wiggle")
             axw.set_xticks([])
             axw.set_yticks([])
             self._wiggle_trace_idx = None
@@ -2489,7 +2538,6 @@ class GprProfileViewer(QDialog):
         trace = np.asarray(self._disp_data[:, idx_t], dtype=np.float64)
         if trace.size <= 0:
             axw.clear()
-            axw.set_title("Wiggle")
             axw.set_xticks([])
             axw.set_yticks([])
             self._wiggle_trace_idx = None
@@ -2555,12 +2603,13 @@ class GprProfileViewer(QDialog):
                 lw=0.8,
                 ls="--",
             )
-        axw.axvline(0.0, color="#444444", lw=0.7)
         axw.set_ylim(float(depth_max), 0.0)
         axw.set_xlim(-1.05, 1.05)
-        axw.set_title(f"Wiggle T{idx_t}")
-        axw.set_xlabel("Norm amp")
-        axw.set_ylabel("m")
+        axw.set_title("")
+        axw.set_xlabel("")
+        axw.set_ylabel("")
+        axw.set_xticks([])
+        axw.set_yticks([])
         axw.grid(False)
         axw.set_facecolor("#fafafa")
         self._wiggle_trace_idx = int(idx_t)
@@ -3273,6 +3322,7 @@ class GprProfileViewer(QDialog):
             )
             self._ax_slice.set_xlim(*self._slice_view_xlim)
             self._ax_slice.set_ylim(*self._slice_view_ylim)
+            self._ax_slice.set_aspect("equal", adjustable="datalim")
 
             self._ax_slice.grid(False)
             self._ax_slice.set_xticks([])
