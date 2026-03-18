@@ -586,7 +586,7 @@ def _estimate_idw_knn_k(
     return max(1, int(k))
 
 
-def _idw_chunk_size_from_k(k: int, target_elements: int = 1_500_000) -> int:
+def _idw_chunk_size_from_k(k: int, target_elements: int = 500_000) -> int:
     kk = max(1, int(k))
     cs = int(target_elements // kk)
     return max(1_000, cs)
@@ -715,6 +715,14 @@ def _bin_with_idw(
     n_pts = int(np.asarray(x_pts).size)
     if n_cells <= 0 or n_pts <= 0:
         return np.full((n_y, n_x), np.nan, dtype=np.float32)
+    MAX_CELLS = 10_000_000
+    if n_cells > MAX_CELLS:
+        print(
+            f"[OGPR slicer][ERROR] IDW abortito: griglia {n_y}x{n_x}={n_cells:,} celle "
+            f"supera il limite di sicurezza ({MAX_CELLS:,}). "
+            "Aumenta la risoluzione o riduci il raggio IDW."
+        )
+        return np.full((n_y, n_x), np.nan, dtype=np.float32)
 
     r = float(radius)
     if not np.isfinite(r) or r <= 0.0:
@@ -727,7 +735,7 @@ def _bin_with_idw(
     i64 = np.asarray(i_pts, dtype=np.float64)
 
     tree = cKDTree(np.column_stack([x_arr, y_arr]))
-    k = _estimate_idw_knn_k(x_arr, y_arr, r, min_pts, max_k=512)
+    k = _estimate_idw_knn_k(x_arr, y_arr, r, min_pts, max_k=32)
     chunk_size = _idw_chunk_size_from_k(k)
 
     grid = np.full(n_cells, np.nan, dtype=np.float32)
@@ -784,6 +792,14 @@ def _bin_with_idw_anisotropic(
     n_pts = int(np.asarray(x_pts).size)
     if n_cells <= 0 or n_pts <= 0:
         return np.full((n_y, n_x), np.nan, dtype=np.float32)
+    MAX_CELLS = 10_000_000
+    if n_cells > MAX_CELLS:
+        print(
+            f"[OGPR slicer][ERROR] IDW anisotropo abortito: griglia {n_y}x{n_x}={n_cells:,} celle "
+            f"supera il limite di sicurezza ({MAX_CELLS:,}). "
+            "Aumenta la risoluzione o riduci il raggio IDW."
+        )
+        return np.full((n_y, n_x), np.nan, dtype=np.float32)
 
     r = float(radius)
     if not np.isfinite(r) or r <= 0.0:
@@ -791,8 +807,8 @@ def _bin_with_idw_anisotropic(
     r_search = r * max(1.0, float(anisotropy_ratio))
     pwr = float(power) if np.isfinite(power) and float(power) > 0.0 else 2.0
     min_pts = max(1, int(min_points))
-    max_k = int(max_points_per_cell) if max_points_per_cell else 512
-    max_k = max(min_pts, max(8, max_k))
+    max_k = int(max_points_per_cell) if max_points_per_cell else 32
+    max_k = max(min_pts, min(32, max(8, max_k)))
 
     x_arr = np.asarray(x_pts, dtype=np.float64)
     y_arr = np.asarray(y_pts, dtype=np.float64)
@@ -1194,6 +1210,7 @@ def _build_grid_params(
     anisotropy_angle: float | None,
     bounds_margin: float = 0.0,
 ) -> dict:
+    radius_user_provided = radius is not None
     all_e = np.concatenate([x for _, x, _, _, _ in _iter_processed_entries(processed)])
     all_n = np.concatenate([y for _, _, y, _, _ in _iter_processed_entries(processed)])
     finite = np.isfinite(all_e) & np.isfinite(all_n)
@@ -1249,7 +1266,8 @@ def _build_grid_params(
             radius = radius_est
         else:
             radius = resolution * (2.0 ** 0.5)
-    if auto_radius and _aniso_info is not None:
+    # Auto-radius must never override an explicit manual radius.
+    if auto_radius and (not radius_user_provided) and _aniso_info is not None:
         radius = _aniso_info["radius"]
     eff_ratio = anisotropy_ratio
     eff_angle = anisotropy_angle
@@ -1258,6 +1276,14 @@ def _build_grid_params(
             eff_ratio = (_aniso_info or {}).get("anisotropy_ratio", 1.0)
         if eff_angle is None:
             eff_angle = (_aniso_info or {}).get("acquisition_angle", 0.0)
+        try:
+            eff_ratio = float(eff_ratio)
+        except Exception:
+            eff_ratio = 1.0
+        if (not np.isfinite(eff_ratio)) or eff_ratio <= 0.0:
+            eff_ratio = 1.0
+        # Keep anisotropy bounded to avoid extreme grid dilation/instability.
+        eff_ratio = min(float(eff_ratio), 10.0)
     return {
         "x_min": x_min, "y_min": y_min,
         "x_max": x_max, "y_max": y_max,
