@@ -960,15 +960,19 @@ def _process_profiles(
     valid_geo_flags = []
     for prof in profiles:
         n_ch = int(getattr(prof, "n_channels", 0) or 0)
-        coord_idx = 0 if channel < 0 else min(channel, max(0, n_ch - 1))
-        try:
-            ch_geo = prof.channel(coord_idx)
-            ok_geo = _has_plausible_geo_xy(
-                np.asarray(ch_geo.easting, dtype=np.float64),
-                np.asarray(ch_geo.northing, dtype=np.float64),
-            )
-        except Exception:
-            ok_geo = False
+        ch_list_geo = list(range(n_ch)) if channel < 0 else [min(channel, max(0, n_ch - 1))]
+        ok_geo = False
+        for ci in ch_list_geo:
+            try:
+                ch_geo = prof.channel(ci)
+                if _has_plausible_geo_xy(
+                    np.asarray(ch_geo.easting, dtype=np.float64),
+                    np.asarray(ch_geo.northing, dtype=np.float64),
+                ):
+                    ok_geo = True
+                    break
+            except Exception:
+                continue
         valid_geo_flags.append(ok_geo)
     use_synthetic_coords = not any(valid_geo_flags)
     proc_diag = {
@@ -1150,21 +1154,55 @@ def _process_profiles(
                     f"{getattr(prof, 'path', '')}"
                 )
                 continue
-            x_ref = np.asarray(ch_ref.easting, dtype=np.float64)
-            y_ref = np.asarray(ch_ref.northing, dtype=np.float64)
-            finite = np.isfinite(x_ref) & np.isfinite(y_ref)
-            if finite.any() and not np.all(finite):
-                idx = np.arange(x_ref.size, dtype=np.float64)
-                idx_ok = np.where(finite)[0].astype(np.float64)
-                x_ref = np.interp(idx, idx_ok, x_ref[finite]).astype(np.float64)
-                y_ref = np.interp(idx, idx_ok, y_ref[finite]).astype(np.float64)
-            elif not finite.any():
-                proc_diag["profiles_geo_skipped"] += 1
-                print(
-                    f"[OGPR slicer][WARN] skip profile senza coordinate finite: "
-                    f"{getattr(prof, 'path', '')}"
-                )
-                continue
+            # channel=-1: aggregate per-trace coordinates across valid channels
+            # so multi-array data is not collapsed onto channel 0 geometry.
+            x_candidates = []
+            y_candidates = []
+            for ci in ch_list:
+                try:
+                    ch_i = prof.channel(ci)
+                    xi = np.asarray(ch_i.easting, dtype=np.float64)
+                    yi = np.asarray(ch_i.northing, dtype=np.float64)
+                except Exception:
+                    continue
+                finite_i = np.isfinite(xi) & np.isfinite(yi)
+                if finite_i.any() and not np.all(finite_i):
+                    idx_i = np.arange(xi.size, dtype=np.float64)
+                    idx_ok_i = np.where(finite_i)[0].astype(np.float64)
+                    xi = np.interp(idx_i, idx_ok_i, xi[finite_i]).astype(np.float64)
+                    yi = np.interp(idx_i, idx_ok_i, yi[finite_i]).astype(np.float64)
+                elif not finite_i.any():
+                    continue
+                xi = _resample_vec_to_n(xi, n_traces)
+                yi = _resample_vec_to_n(yi, n_traces)
+                if _has_plausible_geo_xy(xi, yi):
+                    x_candidates.append(xi)
+                    y_candidates.append(yi)
+
+            if x_candidates:
+                try:
+                    x_ref = np.nanmean(np.stack(x_candidates, axis=0), axis=0).astype(np.float64)
+                    y_ref = np.nanmean(np.stack(y_candidates, axis=0), axis=0).astype(np.float64)
+                except Exception:
+                    x_ref = np.asarray(x_candidates[0], dtype=np.float64)
+                    y_ref = np.asarray(y_candidates[0], dtype=np.float64)
+            else:
+                # Fallback to reference channel when no valid channel geometry is available.
+                x_ref = np.asarray(ch_ref.easting, dtype=np.float64)
+                y_ref = np.asarray(ch_ref.northing, dtype=np.float64)
+                finite = np.isfinite(x_ref) & np.isfinite(y_ref)
+                if finite.any() and not np.all(finite):
+                    idx = np.arange(x_ref.size, dtype=np.float64)
+                    idx_ok = np.where(finite)[0].astype(np.float64)
+                    x_ref = np.interp(idx, idx_ok, x_ref[finite]).astype(np.float64)
+                    y_ref = np.interp(idx, idx_ok, y_ref[finite]).astype(np.float64)
+                elif not finite.any():
+                    proc_diag["profiles_geo_skipped"] += 1
+                    print(
+                        f"[OGPR slicer][WARN] skip profile senza coordinate finite: "
+                        f"{getattr(prof, 'path', '')}"
+                    )
+                    continue
 
         x_ref = _resample_vec_to_n(x_ref, n_traces)
         y_ref = _resample_vec_to_n(y_ref, n_traces)
@@ -1175,10 +1213,28 @@ def _process_profiles(
                 f"{getattr(prof, 'path', '')}"
             )
             continue
-        z_surf_ref = _resample_vec_to_n(
-            np.asarray(getattr(ch_ref, "altitude", []), dtype=np.float64),
-            n_traces,
-        )
+        z_candidates = []
+        for ci in ch_list:
+            try:
+                ch_i = prof.channel(ci)
+                zi = _resample_vec_to_n(
+                    np.asarray(getattr(ch_i, "altitude", []), dtype=np.float64),
+                    n_traces,
+                )
+                if zi.size == n_traces and np.isfinite(zi).any():
+                    z_candidates.append(zi)
+            except Exception:
+                continue
+        if z_candidates:
+            try:
+                z_surf_ref = np.nanmean(np.stack(z_candidates, axis=0), axis=0).astype(np.float64)
+            except Exception:
+                z_surf_ref = np.asarray(z_candidates[0], dtype=np.float64)
+        else:
+            z_surf_ref = _resample_vec_to_n(
+                np.asarray(getattr(ch_ref, "altitude", []), dtype=np.float64),
+                n_traces,
+            )
         if z_surf_ref.size != n_traces:
             z_surf_ref = np.full(n_traces, np.nan, dtype=np.float64)
         if not np.isfinite(z_surf_ref).any():
