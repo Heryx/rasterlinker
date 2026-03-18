@@ -249,6 +249,11 @@ class GprOgprVolumeMixin:
 
         group_name = params["group_name"]
         output_dir = os.path.join(project_root, "timeslices_2d", group_name)
+        out_override = str((slice_params or {}).get("output_dir") or "").strip()
+        if out_override:
+            if not os.path.isabs(out_override):
+                out_override = os.path.normpath(os.path.join(project_root, out_override))
+            output_dir = out_override
         epsg = QgsProject.instance().crs().postgisSrid() or None
         if not epsg:
             epsg_vals = []

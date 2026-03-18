@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 GPR Profile Viewer
 ==================
@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import json
 import os
+import glob
 from typing import Optional
 
 import numpy as np
 
-from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal, QSettings
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QToolBar,
+    QDialog, QMainWindow, QVBoxLayout, QHBoxLayout, QToolBar,
     QAction, QLabel, QComboBox,
     QCheckBox, QDoubleSpinBox, QSpinBox,
     QSlider,
@@ -24,7 +25,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
     QInputDialog,
     QFileDialog, QMessageBox, QSizePolicy,
-    QGroupBox, QFormLayout, QPushButton, QDialogButtonBox, QScrollArea,
+    QGroupBox, QFormLayout, QPushButton, QDialogButtonBox, QScrollArea, QDockWidget, QLineEdit,
 )
 from qgis.core import (
     QgsCoordinateReferenceSystem,
@@ -32,6 +33,7 @@ from qgis.core import (
     QgsPointXY,
     QgsProject,
     QgsWkbTypes,
+    QgsRasterLayer,
 )
 from qgis.gui import QgsRubberBand
 
@@ -245,15 +247,16 @@ class _RangeGainCurveDialog(QDialog):
         self._redraw()
 
 
-class GprProfileViewer(QDialog):
+class GprProfileViewer(QMainWindow):
     cursor_moved = pyqtSignal(float, float, float)  # easting, northing, depth
 
     def __init__(self, iface, plugin=None, parent=None):
-        super().__init__(parent, Qt.Window)
+        super().__init__(parent)
         self.iface  = iface
         self.plugin = plugin
         self.setWindowTitle("GPR Profile Viewer")
         self.resize(1200, 750)
+        self.setDockNestingEnabled(True)
 
         self._profiles:    list[OgprProfile] = []
         self._prof_idx:    int = 0
@@ -266,8 +269,8 @@ class GprProfileViewer(QDialog):
         self._view_xlim:   Optional[tuple[float, float]] = None
         self._view_ylim:   Optional[tuple[float, float]] = None
         self._gpr_3d_viewer = None
-        self._processing_dialog = None
-        self._timeslice_dialog = None
+        self._processing_dock = None
+        self._timeslice_dock = None
         self._processing_panel_widget = None
         self._timeslice_panel_widget = None
         self._cached_catalog = None
@@ -345,7 +348,9 @@ class GprProfileViewer(QDialog):
     # ------------------------------------------------------------------
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
 
         tb = QToolBar()
         act_open = QAction("\U0001f4c2  Importa .ogpr", self)
@@ -420,17 +425,17 @@ class GprProfileViewer(QDialog):
         tb.addAction(act_export)
 
         tb.addSeparator()
-        act_processing = QAction("⚙ Processing", self)
+        act_processing = QAction("âš™ Processing", self)
         act_processing.setToolTip("Apri il pannello Processing in una finestra separata.")
         act_processing.triggered.connect(self._open_processing_window)
         tb.addAction(act_processing)
 
-        act_timeslice = QAction("🗺 Timeslice", self)
+        act_timeslice = QAction("ðŸ—º Timeslice", self)
         act_timeslice.setToolTip("Apri il pannello Timeslice in una finestra separata.")
         act_timeslice.triggered.connect(self._open_timeslice_window)
         tb.addAction(act_timeslice)
 
-        act_view3d = QAction("📦 3D Viewer", self)
+        act_view3d = QAction("ðŸ“¦ 3D Viewer", self)
         act_view3d.setToolTip("Apri il viewer 3D delle timeslice.")
         act_view3d.triggered.connect(self._open_3d_viewer)
         tb.addAction(act_view3d)
@@ -528,43 +533,113 @@ class GprProfileViewer(QDialog):
         self._lbl_status = QLabel("Importa un file .ogpr per iniziare.")
         root.addWidget(self._lbl_status)
 
-    def _create_aux_window(self, title: str, content: QWidget, width: int = 320, height: int = 760):
-        dlg = QDialog(self, Qt.Window)
-        dlg.setWindowTitle(title)
-        lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        lay.addWidget(content)
-        dlg.resize(int(width), int(height))
-        return dlg
+    def _dock_settings(self):
+        st = getattr(self.plugin, "settings", None)
+        if st is None:
+            st = QSettings()
+        return st
+
+    @staticmethod
+    def _dock_key(dock_id: str, suffix: str) -> str:
+        return f"GeoSurveyStudio/gpr_profile_viewer/docks/{dock_id}/{suffix}"
+
+    def _save_dock_state(self, dock: QDockWidget, dock_id: str):
+        if dock is None:
+            return
+        settings = self._dock_settings()
+        try:
+            area = int(self.dockWidgetArea(dock))
+        except Exception:
+            area = int(Qt.RightDockWidgetArea)
+        settings.setValue(self._dock_key(dock_id, "area"), area)
+        settings.setValue(self._dock_key(dock_id, "floating"), bool(dock.isFloating()))
+        settings.setValue(self._dock_key(dock_id, "visible"), bool(dock.isVisible()))
+        try:
+            settings.setValue(self._dock_key(dock_id, "geometry"), dock.saveGeometry())
+        except Exception:
+            pass
+
+    def _restore_dock_state(self, dock: QDockWidget, dock_id: str, default_area=Qt.RightDockWidgetArea):
+        if dock is None:
+            return
+        settings = self._dock_settings()
+        area_val = settings.value(self._dock_key(dock_id, "area"), int(default_area), type=int)
+        try:
+            area = Qt.DockWidgetArea(int(area_val))
+        except Exception:
+            area = default_area
+        try:
+            self.addDockWidget(area, dock)
+        except Exception:
+            self.addDockWidget(default_area, dock)
+        floating = bool(settings.value(self._dock_key(dock_id, "floating"), False, type=bool))
+        try:
+            dock.setFloating(floating)
+        except Exception:
+            pass
+        geom = settings.value(self._dock_key(dock_id, "geometry"), None)
+        if geom is not None:
+            try:
+                dock.restoreGeometry(geom)
+            except Exception:
+                pass
+        visible = bool(settings.value(self._dock_key(dock_id, "visible"), True, type=bool))
+        dock.setVisible(visible)
+
+    def _create_aux_dock(self, title: str, object_name: str, content: QWidget):
+        dock = QDockWidget(title, self)
+        dock.setObjectName(object_name)
+        dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea
+            | Qt.RightDockWidgetArea
+            | Qt.BottomDockWidgetArea
+            | Qt.TopDockWidgetArea
+        )
+        dock.setFeatures(
+            QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+            | QDockWidget.DockWidgetClosable
+        )
+        dock.setWidget(content)
+        return dock
 
     def _init_aux_windows(self):
-        if self._processing_dialog is None and self._processing_panel_widget is not None:
-            self._processing_dialog = self._create_aux_window(
-                "GPR Processing", self._processing_panel_widget, width=330, height=780
+        created_proc = False
+        created_slice = False
+        if self._processing_dock is None and self._processing_panel_widget is not None:
+            self._processing_dock = self._create_aux_dock(
+                "GPR - Processing", "GprProcessingDock", self._processing_panel_widget
             )
-        if self._timeslice_dialog is None and self._timeslice_panel_widget is not None:
-            self._timeslice_dialog = self._create_aux_window(
-                "GPR Timeslice", self._timeslice_panel_widget, width=360, height=800
+            self._restore_dock_state(self._processing_dock, "processing", Qt.RightDockWidgetArea)
+            created_proc = True
+        if self._timeslice_dock is None and self._timeslice_panel_widget is not None:
+            self._timeslice_dock = self._create_aux_dock(
+                "GPR - Timeslice", "GprTimesliceDock", self._timeslice_panel_widget
             )
+            self._restore_dock_state(self._timeslice_dock, "timeslice", Qt.RightDockWidgetArea)
+            created_slice = True
+
+        if (created_proc or created_slice) and self._processing_dock is not None and self._timeslice_dock is not None:
+            try:
+                self.tabifyDockWidget(self._processing_dock, self._timeslice_dock)
+            except Exception:
+                pass
 
     def _open_processing_window(self):
-        if self._processing_dialog is None:
+        if self._processing_dock is None:
             self._init_aux_windows()
-        if self._processing_dialog is None:
+        if self._processing_dock is None:
             return
-        self._processing_dialog.show()
-        self._processing_dialog.raise_()
-        self._processing_dialog.activateWindow()
+        self._processing_dock.show()
+        self._processing_dock.raise_()
 
     def _open_timeslice_window(self):
-        if self._timeslice_dialog is None:
+        if self._timeslice_dock is None:
             self._init_aux_windows()
-        if self._timeslice_dialog is None:
+        if self._timeslice_dock is None:
             return
-        self._timeslice_dialog.show()
-        self._timeslice_dialog.raise_()
-        self._timeslice_dialog.activateWindow()
+        self._timeslice_dock.show()
+        self._timeslice_dock.raise_()
 
     def _apply_wiggle_visibility_layout(self):
         if not HAS_MPL or not hasattr(self, "_ax") or not hasattr(self, "_ax_wiggle"):
@@ -636,7 +711,7 @@ class GprProfileViewer(QDialog):
         self._chk_bg = QCheckBox()
         self._chk_bg.setChecked(True)
         self._chk_bg.setToolTip(
-            "Background Removal (GPR-SLICE §Background Removal, pag. 166).\n"
+            "Background Removal (GPR-SLICE Â§Background Removal, pag. 166).\n"
             "Sottrae la traccia media per eliminare banding orizzontale.\n\n"
             "ATTENZIONE: rimuove anche riflessi reali paralleli al profilo."
         )
@@ -679,7 +754,7 @@ class GprProfileViewer(QDialog):
             "Imposta > 0 per ESCLUDERE i primi N campioni dalla sottrazione.\n"
             "Effetto: preserva il ground coupling / onda diretta nei primi\n"
             "campioni, permettendo all'AGC di amplificarli correttamente.\n"
-            "Esempio: per 600 MHz con dt=0.117 ns, 0.5 m ≈ 28 campioni."
+            "Esempio: per 600 MHz con dt=0.117 ns, 0.5 m â‰ˆ 28 campioni."
         )
 
         self._spin_bg_sample_end = QSpinBox()
@@ -906,6 +981,19 @@ class GprProfileViewer(QDialog):
         grp_slice = QGroupBox("Timeslice")
         fl_slice  = QFormLayout(grp_slice)
 
+        self._lbl_slice_profiles = QLabel("Nessun profilo caricato")
+        self._le_slice_outdir = QLineEdit()
+        self._le_slice_outdir.setPlaceholderText("Cartella output GeoTIFF timeslice")
+        self._btn_slice_outdir = QPushButton("...")
+        self._btn_slice_outdir.setToolTip("Seleziona cartella output per importazione slice.")
+        self._btn_slice_outdir.clicked.connect(self._choose_slice_outdir)
+        out_row = QWidget()
+        out_lay = QHBoxLayout(out_row)
+        out_lay.setContentsMargins(0, 0, 0, 0)
+        out_lay.setSpacing(4)
+        out_lay.addWidget(self._le_slice_outdir, 1)
+        out_lay.addWidget(self._btn_slice_outdir, 0)
+
         self._cb_slice_cmap = QComboBox()
         self._cb_slice_cmap.addItems(GPR_CMAPS)
         self._cb_slice_cmap.setCurrentText(DEFAULT_CMAP)
@@ -1108,6 +1196,8 @@ class GprProfileViewer(QDialog):
         self._spin_smooth_sigma.setValue(1.0); self._spin_smooth_sigma.setEnabled(False)
         self._chk_smooth.toggled.connect(self._spin_smooth_sigma.setEnabled)
 
+        fl_slice.addRow("Profili:",           self._lbl_slice_profiles)
+        fl_slice.addRow("Output folder:",     out_row)
         fl_slice.addRow("Preset:",            self._cb_slice_preset)
         fl_slice.addRow("  azione:",          self._btn_slice_preset_apply)
         fl_slice.addRow("Slice colormap:",    self._cb_slice_cmap)
@@ -1145,6 +1235,13 @@ class GprProfileViewer(QDialog):
         btn_slice = QPushButton("\U0001f5fa  Crea Timeslice\u2026")
         btn_slice.clicked.connect(self._open_slice_dialog)
         fl_slice.addRow(btn_slice)
+
+        btn_slice_import = QPushButton("Import to Canvas")
+        btn_slice_import.setToolTip(
+            "Importa i GeoTIFF timeslice dalla cartella output nel gruppo 'GPR Timeslices'."
+        )
+        btn_slice_import.clicked.connect(self._import_slices_to_canvas)
+        fl_slice.addRow(btn_slice_import)
 
         btn_view3d = QPushButton("Apri Viewer 3D...")
         btn_view3d.setToolTip(
@@ -1204,6 +1301,13 @@ class GprProfileViewer(QDialog):
         timeslice_scroll.setWidget(slice_content)
         timeslice_scroll.setMinimumWidth(270)
         timeslice_scroll.setMaximumWidth(460)
+        try:
+            default_out = self._default_slice_output_dir()
+            if default_out:
+                self._le_slice_outdir.setText(default_out)
+        except Exception:
+            pass
+        self._update_slice_profile_info()
         return processing_scroll, timeslice_scroll
 
     def _current_dt_ns(self) -> float:
@@ -1431,6 +1535,7 @@ class GprProfileViewer(QDialog):
                     else ""
                 ),
             )
+        self._update_slice_profile_info()
         if self._profiles:
             self._prof_idx = len(self._profiles) - 1
             self._load_current_profile()
@@ -1501,8 +1606,10 @@ class GprProfileViewer(QDialog):
 
     def _load_current_profile(self):
         if not self._profiles:
+            self._update_slice_profile_info()
             return
         prof = self._profiles[self._prof_idx]
+        self._update_slice_profile_info()
         self._lbl_profile.setText(
             f"{self._prof_idx + 1}/{len(self._profiles)}  "
             f"{os.path.basename(prof.path)}"
@@ -3551,6 +3658,95 @@ class GprProfileViewer(QDialog):
     # Timeslice
     # ------------------------------------------------------------------
 
+    def _default_slice_output_dir(self) -> str:
+        project_root = self._active_project_root()
+        if project_root and os.path.isdir(project_root):
+            return os.path.normpath(os.path.join(project_root, "timeslices_2d"))
+        return ""
+
+    def _choose_slice_outdir(self):
+        start = str(getattr(self, "_le_slice_outdir", None).text() if hasattr(self, "_le_slice_outdir") else "").strip()
+        if not start:
+            start = self._default_slice_output_dir() or os.path.expanduser("~")
+        folder = QFileDialog.getExistingDirectory(self, "Output folder Timeslice", start)
+        if folder:
+            try:
+                self._le_slice_outdir.setText(os.path.normpath(folder))
+            except Exception:
+                pass
+
+    def _update_slice_profile_info(self):
+        if not hasattr(self, "_lbl_slice_profiles") or self._lbl_slice_profiles is None:
+            return
+        n_prof = int(len(self._profiles or []))
+        if n_prof <= 0:
+            self._lbl_slice_profiles.setText("Nessun profilo caricato")
+            return
+        total_traces = 0
+        for prof in self._profiles:
+            try:
+                if int(getattr(prof, "n_channels", 0) or 0) <= 0:
+                    continue
+                total_traces += int(prof.channel(0).data.shape[1])
+            except Exception:
+                continue
+        self._lbl_slice_profiles.setText(f"{n_prof} profili  |  ~{total_traces} tracce")
+
+    def _import_slices_to_canvas(self):
+        outdir = str(getattr(self, "_le_slice_outdir", None).text() if hasattr(self, "_le_slice_outdir") else "").strip()
+        if not outdir:
+            QMessageBox.warning(self, "Import Timeslice", "Seleziona prima la cartella output.")
+            return
+        if not os.path.isdir(outdir):
+            QMessageBox.warning(self, "Import Timeslice", "Cartella output non valida.")
+            return
+
+        tifs = sorted(glob.glob(os.path.join(outdir, "*.tif"))) + sorted(glob.glob(os.path.join(outdir, "*.tiff")))
+        if not tifs:
+            QMessageBox.information(self, "Import Timeslice", "Nessun GeoTIFF trovato nella cartella output.")
+            return
+
+        root = QgsProject.instance().layerTreeRoot()
+        existing = root.findGroup("GPR Timeslices")
+        if existing is not None:
+            try:
+                root.removeChildNode(existing)
+            except Exception:
+                pass
+        group = root.addGroup("GPR Timeslices")
+
+        added = 0
+        for tif in tifs:
+            name = os.path.splitext(os.path.basename(tif))[0]
+            rl = QgsRasterLayer(tif, name)
+            if not rl.isValid():
+                continue
+            QgsProject.instance().addMapLayer(rl, False)
+            group.addLayer(rl)
+            added += 1
+
+        for i, child in enumerate(group.children()):
+            try:
+                child.setItemVisibilityChecked(i == 0)
+            except Exception:
+                pass
+
+        if self.iface is not None and self.iface.mapCanvas() is not None:
+            try:
+                self.iface.mapCanvas().refresh()
+            except Exception:
+                pass
+        self._lbl_status.setText(
+            f"Import completato: {added} layer nel gruppo 'GPR Timeslices'."
+        )
+        if added <= 0:
+            QMessageBox.warning(self, "Import Timeslice", "Nessun layer valido importato.")
+        else:
+            # aggiorna contesto visualizzazione slice verso il nuovo output
+            self._slice_view_xlim = None
+            self._slice_view_ylim = None
+            self._redraw_slice_view(force=True)
+
     @staticmethod
     def _set_combo_to_data(combo: QComboBox, value) -> None:
         if combo is None:
@@ -3759,6 +3955,9 @@ class GprProfileViewer(QDialog):
                                     "Importa almeno un file .ogpr prima.")
             return
         slice_params = self.get_slice_params()
+        outdir = str(getattr(self, "_le_slice_outdir", None).text() if hasattr(self, "_le_slice_outdir") else "").strip()
+        if outdir:
+            slice_params["output_dir"] = outdir
         if self.plugin and hasattr(self.plugin, "import_ogpr_as_slices"):
             self.plugin.import_ogpr_as_slices(self._profiles, slice_params=slice_params)
         else:
@@ -3980,6 +4179,34 @@ class GprProfileViewer(QDialog):
             except Exception:
                 pass
             self._gpr_3d_viewer = None
+        if self._processing_dock is not None:
+            try:
+                self._save_dock_state(self._processing_dock, "processing")
+            except Exception:
+                pass
+            try:
+                self.removeDockWidget(self._processing_dock)
+            except Exception:
+                pass
+            try:
+                self._processing_dock.deleteLater()
+            except Exception:
+                pass
+            self._processing_dock = None
+        if self._timeslice_dock is not None:
+            try:
+                self._save_dock_state(self._timeslice_dock, "timeslice")
+            except Exception:
+                pass
+            try:
+                self.removeDockWidget(self._timeslice_dock)
+            except Exception:
+                pass
+            try:
+                self._timeslice_dock.deleteLater()
+            except Exception:
+                pass
+            self._timeslice_dock = None
         for rb in (self._rb_point, self._rb_line, self._rb_crosshair_h, self._rb_crosshair_v):
             if rb is not None:
                 try:
@@ -3987,3 +4214,4 @@ class GprProfileViewer(QDialog):
                 except Exception:
                     pass
         super().closeEvent(event)
+
