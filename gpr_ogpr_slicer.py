@@ -1668,6 +1668,8 @@ def compute_preview_slice(
     topographic_correction: bool = False,
     topo_reference_mode: str = "median",
     topo_reference_elevation: float | None = None,
+    parallel_profiles: bool = False,
+    profile_workers: int = 0,
 ) -> dict | None:
     """Compute a single timeslice without writing to disk; used for preview dialog."""
     from .gpr_processing import DEFAULT_PIPELINE
@@ -1694,6 +1696,8 @@ def compute_preview_slice(
         int(stack_n or 1),
         str(stack_kernel or "boxcar"),
         str(flip_traces_mode or "none"),
+        bool(parallel_profiles),
+        int(profile_workers or 0),
         bool(use_anisotropic_idw),
         _normalize_idw_mode(idw_mode),
         float(idw_power),
@@ -1739,6 +1743,8 @@ def compute_preview_slice(
             stack_n=stack_n,
             stack_kernel=stack_kernel,
             flip_traces_mode=flip_traces_mode,
+            parallel_profiles=parallel_profiles,
+            profile_workers=profile_workers,
         )
         if not processed:
             _PREVIEW_CACHE["key"] = preview_key
