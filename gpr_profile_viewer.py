@@ -20,6 +20,7 @@ from qgis.PyQt.QtWidgets import (
     QAction, QLabel, QComboBox,
     QCheckBox, QDoubleSpinBox, QSpinBox,
     QSlider,
+    QSplitter,
     QWidget,
     QInputDialog,
     QFileDialog, QMessageBox, QSizePolicy,
@@ -281,6 +282,23 @@ class GprProfileViewer(QDialog):
         self._bp_canvas = None
         self._wiggle_trace_idx: Optional[int] = None
         self._wiggle_depth_line = None
+        self._fig_slice = None
+        self._ax_slice = None
+        self._canvas_slice = None
+        self._slice_im = None
+        self._slice_vline = None
+        self._slice_hline = None
+        self._slice_view_xlim: Optional[tuple[float, float]] = None
+        self._slice_view_ylim: Optional[tuple[float, float]] = None
+        self._slice_cache_path: Optional[str] = None
+        self._slice_cache_mtime: Optional[float] = None
+        self._slice_cache_arr: Optional[np.ndarray] = None
+        self._slice_cache_extent: Optional[tuple[float, float, float, float]] = None
+        self._slice_current_idx: Optional[int] = None
+        self._slice_current_path: Optional[str] = None
+        self._slice_current_extent: Optional[tuple[float, float, float, float]] = None
+        self._slice_current_shape: Optional[tuple[int, int]] = None
+        self._slice_current_cmap: str = ""
 
         self._rb_point: Optional[QgsRubberBand] = None
         self._rb_line:  Optional[QgsRubberBand] = None
@@ -396,7 +414,21 @@ class GprProfileViewer(QDialog):
         self._lbl_xpan = None
 
         if HAS_MPL:
-            self._fig = Figure(figsize=(9, 4), tight_layout=False)
+            # Upper panel: active timeslice 2D view.
+            self._fig_slice = Figure(figsize=(9, 3), tight_layout=True)
+            self._ax_slice = self._fig_slice.add_subplot(111)
+            self._canvas_slice = FigureCanvasQTAgg(self._fig_slice)
+            self._canvas_slice.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self._canvas_slice.mpl_connect("motion_notify_event", self._on_slice_mouse_move)
+            self._canvas_slice.mpl_connect("scroll_event", self._on_slice_scroll_zoom)
+            slice_host = QWidget()
+            slice_lay = QVBoxLayout(slice_host)
+            slice_lay.setContentsMargins(0, 0, 0, 0)
+            slice_lay.setSpacing(2)
+            slice_lay.addWidget(self._canvas_slice, stretch=1)
+
+            # Lower panel: radargram + wiggle + pan slider.
+            self._fig = Figure(figsize=(9, 3), tight_layout=False)
             gs = self._fig.add_gridspec(
                 1,
                 2,
@@ -444,7 +476,12 @@ class GprProfileViewer(QDialog):
             pan_row_l.addWidget(self._lbl_xpan, 0)
             left_lay.addWidget(pan_row, stretch=0)
 
-            center.addWidget(left_host, stretch=4)
+            splitter = QSplitter(Qt.Vertical)
+            splitter.addWidget(slice_host)
+            splitter.addWidget(left_host)
+            splitter.setStretchFactor(0, 2)
+            splitter.setStretchFactor(1, 1)
+            center.addWidget(splitter, stretch=4)
             self._im    = None
             self._vline = None
             self._hline = None
@@ -2025,6 +2062,8 @@ class GprProfileViewer(QDialog):
     def _reset_zoom(self):
         self._view_xlim = None
         self._view_ylim = None
+        self._slice_view_xlim = None
+        self._slice_view_ylim = None
         self._redraw()
 
     def _full_x_limits(self) -> tuple[float, float]:
@@ -2244,6 +2283,7 @@ class GprProfileViewer(QDialog):
         self._sync_xpan_slider()
         self._update_wiggle_plot(draw=False, force=True)
         self._canvas_mpl.draw_idle()
+        self._redraw_slice_view()
 
     def _depth_max_display(self, prof) -> float:
         if self._disp_data is not None:
@@ -2385,18 +2425,31 @@ class GprProfileViewer(QDialog):
         axw.clear()
         finite = np.isfinite(trace)
         if finite.any():
-            vmax = float(np.nanpercentile(np.abs(trace[finite]), 99.0))
+            vmax = float(np.nanpercentile(np.abs(trace[finite]), 98.0))
             if not np.isfinite(vmax) or vmax <= 1e-9:
                 vmax = float(np.nanmax(np.abs(trace[finite])))
             if not np.isfinite(vmax) or vmax <= 1e-9:
                 vmax = 1.0
-            trn = trace / vmax
+            trn = np.clip(trace / vmax, -1.25, 1.25)
         else:
             trn = np.zeros_like(trace)
+        # Leggero smoothing visivo del wiggle per ridurre seghettature ad alta frequenza.
+        if trn.size >= 5:
+            kernel = np.asarray([1.0, 2.0, 3.0, 2.0, 1.0], dtype=np.float64)
+            kernel /= float(np.sum(kernel))
+            tr_plot = np.convolve(trn, kernel, mode="same")
+        else:
+            tr_plot = trn
+        # Compressione dolce delle code: evita "spike" visivi dominanti.
+        tr_plot = np.tanh(tr_plot * 1.15)
 
-        axw.plot(trn, depth_axis, color="#222222", lw=0.9)
-        axw.fill_betweenx(depth_axis, 0.0, trn, where=trn >= 0.0, color="#d94f3d", alpha=0.45)
-        axw.fill_betweenx(depth_axis, 0.0, trn, where=trn < 0.0, color="#2d6ba3", alpha=0.45)
+        axw.plot(tr_plot, depth_axis, color="#1f1f1f", lw=0.9, antialiased=True)
+        axw.fill_betweenx(
+            depth_axis, 0.0, tr_plot, where=tr_plot >= 0.0, color="#d94f3d", alpha=0.22
+        )
+        axw.fill_betweenx(
+            depth_axis, 0.0, tr_plot, where=tr_plot < 0.0, color="#2d6ba3", alpha=0.22
+        )
         self._wiggle_depth_line = None
         if 0 <= idx_s < depth_axis.size:
             self._wiggle_depth_line = axw.axhline(
@@ -2407,11 +2460,12 @@ class GprProfileViewer(QDialog):
             )
         axw.axvline(0.0, color="#444444", lw=0.7)
         axw.set_ylim(float(depth_max), 0.0)
-        axw.set_xlim(-1.25, 1.25)
+        axw.set_xlim(-1.05, 1.05)
         axw.set_title(f"Wiggle T{idx_t}")
         axw.set_xlabel("Norm amp")
         axw.set_ylabel("m")
-        axw.grid(True, ls=":", lw=0.4, alpha=0.6)
+        axw.grid(False)
+        axw.set_facecolor("#fafafa")
         self._wiggle_trace_idx = int(idx_t)
         if draw:
             self._canvas_mpl.draw_idle()
@@ -2582,6 +2636,7 @@ class GprProfileViewer(QDialog):
         self._update_timeslice_visibility_in_canvas()
         self._update_timeslice_crosshair()
         self._emit_cursor_moved()
+        self._redraw_slice_view()
 
     def _to_canvas_point(self, prof, east: float, north: float) -> QgsPointXY:
         pt = QgsPointXY(float(east), float(north))
@@ -2814,6 +2869,360 @@ class GprProfileViewer(QDialog):
         if not np.isfinite(target):
             return None
         return int(np.nanargmin(np.abs(depth_arr - target)))
+
+    def _active_project_root(self) -> str:
+        if self.plugin is None:
+            return ""
+        settings = getattr(self.plugin, "settings", None)
+        settings_key = getattr(self.plugin, "settings_key_active_project", None)
+        if settings is None or not settings_key:
+            return ""
+        try:
+            return (settings.value(settings_key, "", type=str) or "").strip()
+        except Exception:
+            return ""
+
+    def _resolve_timeslice_raster_path(self, ts: dict) -> str:
+        if not isinstance(ts, dict):
+            return ""
+        project_root = self._active_project_root()
+        candidates = []
+        for key in ("raster_path", "project_path", "path", "file_path", "source_path"):
+            raw = str(ts.get(key) or "").strip()
+            if raw:
+                candidates.append(raw)
+        for raw in candidates:
+            p = raw
+            if not os.path.isabs(p) and project_root:
+                p = os.path.normpath(os.path.join(project_root, p))
+            p = os.path.normpath(p)
+            if os.path.exists(p):
+                return p
+        if candidates:
+            fallback = candidates[0]
+            if not os.path.isabs(fallback) and project_root:
+                fallback = os.path.normpath(os.path.join(project_root, fallback))
+            return os.path.normpath(fallback)
+        return ""
+
+    def _load_slice_raster_cached(self, raster_path: str):
+        p = str(raster_path or "").strip()
+        if not p:
+            return None, None
+        try:
+            mtime = float(os.path.getmtime(p))
+        except Exception:
+            mtime = None
+
+        cache_hit = (
+            self._slice_cache_path == p
+            and self._slice_cache_arr is not None
+            and self._slice_cache_extent is not None
+            and self._slice_cache_mtime == mtime
+        )
+        if cache_hit:
+            return self._slice_cache_arr, self._slice_cache_extent
+
+        from osgeo import gdal
+
+        ds = gdal.Open(p)
+        if ds is None:
+            return None, None
+        band = ds.GetRasterBand(1)
+        if band is None:
+            ds = None
+            return None, None
+        arr = band.ReadAsArray()
+        if arr is None:
+            ds = None
+            return None, None
+        arr = np.asarray(arr, dtype=np.float32)
+        nodata = band.GetNoDataValue()
+        if nodata is not None and np.isfinite(float(nodata)):
+            arr[arr == float(nodata)] = np.nan
+        arr[~np.isfinite(arr)] = np.nan
+
+        gt = ds.GetGeoTransform(can_return_null=True)
+        if gt:
+            xmin = float(gt[0])
+            xmax = float(gt[0] + gt[1] * ds.RasterXSize)
+            ymax = float(gt[3])
+            ymin = float(gt[3] + gt[5] * ds.RasterYSize)
+        else:
+            xmin, xmax = 0.0, float(arr.shape[1])
+            ymin, ymax = 0.0, float(arr.shape[0])
+        ds = None
+
+        extent = (xmin, xmax, ymin, ymax)
+        self._slice_cache_path = p
+        self._slice_cache_mtime = mtime
+        self._slice_cache_arr = arr
+        self._slice_cache_extent = extent
+        return arr, extent
+
+    def _slice_world_to_pixel(self, east: float, north: float) -> tuple[float, float] | tuple[None, None]:
+        if self._slice_current_extent is None or self._slice_current_shape is None:
+            return None, None
+        xmin, xmax, ymin, ymax = [float(v) for v in self._slice_current_extent]
+        n_rows, n_cols = self._slice_current_shape
+        if n_rows <= 1 or n_cols <= 1:
+            return None, None
+        dx = float(xmax - xmin)
+        dy = float(ymax - ymin)
+        if abs(dx) < 1e-12 or abs(dy) < 1e-12:
+            return None, None
+        col = ((float(east) - xmin) / dx) * float(n_cols - 1)
+        row = ((ymax - float(north)) / dy) * float(n_rows - 1)
+        if not (np.isfinite(col) and np.isfinite(row)):
+            return None, None
+        return float(col), float(row)
+
+    def _update_slice_crosshair_overlay(self, draw: bool = True) -> bool:
+        if self._ax_slice is None or self._slice_im is None:
+            return False
+        m = self._cursor_metrics()
+        if not m:
+            return False
+        east = m.get("east")
+        north = m.get("north")
+        try:
+            east_f = float(east) if east is not None else np.nan
+            north_f = float(north) if north is not None else np.nan
+        except Exception:
+            return False
+        if not (np.isfinite(east_f) and np.isfinite(north_f)):
+            return False
+        col, row = self._slice_world_to_pixel(east_f, north_f)
+        if col is None or row is None:
+            return False
+        if self._slice_vline is None:
+            self._slice_vline = self._ax_slice.axvline(col, color="yellow", lw=1.0, alpha=0.85)
+        else:
+            self._slice_vline.set_xdata([col, col])
+        if self._slice_hline is None:
+            self._slice_hline = self._ax_slice.axhline(row, color="cyan", lw=1.0, ls="--", alpha=0.8)
+        else:
+            self._slice_hline.set_ydata([row, row])
+        if draw and self._canvas_slice is not None:
+            self._canvas_slice.draw_idle()
+        return True
+
+    def _redraw_slice_view(self, force: bool = False):
+        if not HAS_MPL or self._ax_slice is None or self._canvas_slice is None:
+            return
+
+        grp, slices = self._active_group_timeslices_context()
+        if not slices:
+            self._ax_slice.clear()
+            self._slice_im = None
+            self._slice_vline = None
+            self._slice_hline = None
+            self._slice_current_idx = None
+            self._slice_current_path = None
+            self._slice_current_extent = None
+            self._slice_current_shape = None
+            self._ax_slice.set_title("Nessuna timeslice attiva")
+            self._ax_slice.set_xticks([])
+            self._ax_slice.set_yticks([])
+            self._canvas_slice.draw_idle()
+            return
+
+        if self._cursor_z is None:
+            idx = 0
+        else:
+            idx = self._nearest_timeslice_index(slices, float(self._cursor_z))
+            if idx is None:
+                idx = 0
+        idx = int(np.clip(idx, 0, len(slices) - 1))
+        ts = slices[idx]
+        raster_path = self._resolve_timeslice_raster_path(ts)
+        cmap = self._cb_cmap.currentText() if hasattr(self, "_cb_cmap") else DEFAULT_CMAP
+
+        if not raster_path:
+            self._ax_slice.clear()
+            self._slice_im = None
+            self._ax_slice.set_title(f"Slice {idx} - percorso raster non disponibile")
+            self._ax_slice.set_xticks([])
+            self._ax_slice.set_yticks([])
+            self._canvas_slice.draw_idle()
+            return
+        if not os.path.exists(raster_path):
+            self._ax_slice.clear()
+            self._slice_im = None
+            self._ax_slice.set_title(f"Slice {idx} - file non trovato")
+            self._ax_slice.set_xticks([])
+            self._ax_slice.set_yticks([])
+            self._canvas_slice.draw_idle()
+            return
+
+        needs_full_redraw = bool(
+            force
+            or self._slice_im is None
+            or self._slice_current_idx != idx
+            or str(self._slice_current_path or "") != str(raster_path)
+        )
+
+        if needs_full_redraw:
+            try:
+                arr, extent = self._load_slice_raster_cached(raster_path)
+            except Exception as exc:
+                self._ax_slice.clear()
+                self._slice_im = None
+                self._ax_slice.set_title(f"Errore lettura raster: {exc}")
+                self._ax_slice.set_xticks([])
+                self._ax_slice.set_yticks([])
+                self._canvas_slice.draw_idle()
+                return
+            if arr is None or extent is None:
+                self._ax_slice.clear()
+                self._slice_im = None
+                self._ax_slice.set_title("Errore lettura raster")
+                self._ax_slice.set_xticks([])
+                self._ax_slice.set_yticks([])
+                self._canvas_slice.draw_idle()
+                return
+
+            finite = arr[np.isfinite(arr)]
+            if finite.size > 0:
+                vmin = float(np.nanpercentile(finite, 2))
+                vmax = float(np.nanpercentile(finite, 98))
+                if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax <= vmin):
+                    vmin = float(np.nanmin(finite))
+                    vmax = float(np.nanmax(finite))
+            else:
+                vmin, vmax = 0.0, 1.0
+            if not np.isfinite(vmin):
+                vmin = 0.0
+            if not np.isfinite(vmax) or vmax <= vmin:
+                vmax = vmin + 1e-6
+
+            self._ax_slice.clear()
+            self._slice_vline = None
+            self._slice_hline = None
+            arr_masked = np.ma.masked_invalid(arr)
+            slice_cmap = cmap
+            try:
+                from matplotlib import colormaps
+
+                cm_obj = colormaps.get_cmap(str(cmap)).copy()
+                cm_obj.set_bad(color="#e6e6e6", alpha=1.0)
+                slice_cmap = cm_obj
+            except Exception:
+                slice_cmap = cmap
+            self._slice_im = self._ax_slice.imshow(
+                arr_masked,
+                cmap=slice_cmap,
+                vmin=vmin,
+                vmax=vmax,
+                origin="upper",
+                aspect="auto",
+                interpolation="nearest",
+            )
+
+            n_rows, n_cols = int(arr.shape[0]), int(arr.shape[1])
+            x_full = (-0.5, float(max(0, n_cols - 1)) + 0.5)
+            y_full = (float(max(0, n_rows - 1)) + 0.5, -0.5)
+            if self._slice_view_xlim is None:
+                self._slice_view_xlim = x_full
+            if self._slice_view_ylim is None:
+                self._slice_view_ylim = y_full
+            self._slice_view_xlim = self._clamp_axis_limits(
+                self._slice_view_xlim[0], self._slice_view_xlim[1], x_full[0], x_full[1]
+            )
+            self._slice_view_ylim = self._clamp_axis_limits(
+                self._slice_view_ylim[0], self._slice_view_ylim[1], -0.5, float(max(0, n_rows - 1)) + 0.5
+            )
+            self._ax_slice.set_xlim(*self._slice_view_xlim)
+            self._ax_slice.set_ylim(*self._slice_view_ylim)
+
+            self._ax_slice.grid(False)
+            self._ax_slice.set_xticks([])
+            self._ax_slice.set_yticks([])
+            self._ax_slice.set_xlabel("")
+            self._ax_slice.set_ylabel("")
+            self._ax_slice.set_facecolor("#e6e6e6")
+            for spine in self._ax_slice.spines.values():
+                spine.set_visible(False)
+
+            try:
+                d0 = float(ts.get("depth_from", 0.0) or 0.0)
+                d1 = float(ts.get("depth_to", d0) or d0)
+            except Exception:
+                d0 = 0.0
+                d1 = 0.0
+            group_name = str((grp or {}).get("name") or "").strip()
+            base = os.path.basename(raster_path)
+            title_left = f"{group_name} | " if group_name else ""
+            self._ax_slice.set_title(f"{title_left}Timeslice {d0:.2f}-{d1:.2f} m  |  {base}")
+
+            self._slice_current_idx = idx
+            self._slice_current_path = raster_path
+            self._slice_current_extent = tuple(float(v) for v in extent)
+            self._slice_current_shape = (n_rows, n_cols)
+            self._slice_current_cmap = str(cmap)
+        else:
+            if self._slice_im is not None and str(self._slice_current_cmap) != str(cmap):
+                cm_to_set = cmap
+                try:
+                    from matplotlib import colormaps
+
+                    cm_obj = colormaps.get_cmap(str(cmap)).copy()
+                    cm_obj.set_bad(color="#e6e6e6", alpha=1.0)
+                    cm_to_set = cm_obj
+                except Exception:
+                    cm_to_set = cmap
+                self._slice_im.set_cmap(cm_to_set)
+                self._slice_current_cmap = str(cmap)
+
+        changed = self._update_slice_crosshair_overlay(draw=False)
+        if changed or needs_full_redraw:
+            self._canvas_slice.draw_idle()
+
+    def _on_slice_mouse_move(self, event):
+        if event is None or event.inaxes != self._ax_slice:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        try:
+            self._lbl_status.setText(
+                f"Slice cursor: x {float(event.xdata):.1f}  y {float(event.ydata):.1f}"
+            )
+        except Exception:
+            pass
+
+    def _on_slice_scroll_zoom(self, event):
+        if event is None or event.inaxes != self._ax_slice or self._slice_im is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        step = float(getattr(event, "step", 0.0) or 0.0)
+        btn = str(getattr(event, "button", "") or "").lower()
+        if step > 0 or btn == "up":
+            scale = 1.0 / 1.2
+        elif step < 0 or btn == "down":
+            scale = 1.2
+        else:
+            return
+
+        x0, x1 = self._ax_slice.get_xlim()
+        y0, y1 = self._ax_slice.get_ylim()
+        x = float(event.xdata)
+        y = float(event.ydata)
+
+        nx0 = x - (x - x0) * scale
+        nx1 = x + (x1 - x) * scale
+        ny0 = y - (y - y0) * scale
+        ny1 = y + (y1 - y) * scale
+
+        ex0, ex1, ey0, ey1 = self._slice_im.get_extent()
+        x_min, x_max = float(min(ex0, ex1)), float(max(ex0, ex1))
+        y_min, y_max = float(min(ey0, ey1)), float(max(ey0, ey1))
+
+        self._slice_view_xlim = self._clamp_axis_limits(nx0, nx1, x_min, x_max)
+        self._slice_view_ylim = self._clamp_axis_limits(ny0, ny1, y_min, y_max)
+        self._ax_slice.set_xlim(*self._slice_view_xlim)
+        self._ax_slice.set_ylim(*self._slice_view_ylim)
+        self._canvas_slice.draw_idle()
 
     def _update_dial(self):
         if self._cursor_z is None or self.plugin is None:

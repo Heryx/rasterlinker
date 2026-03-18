@@ -483,7 +483,9 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
     parse_warnings: list[str] = []
 
     with open(p, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as raw_mm:
-        raw = memoryview(raw_mm)
+        # Usa mmap direttamente (senza memoryview) per evitare BufferError in chiusura:
+        # "cannot close exported pointers exist" quando restano riferimenti da np.frombuffer.
+        raw = raw_mm
         try:
             # Magic
             if raw[:6] == b"ogpr\r\n":
@@ -734,10 +736,15 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
                     distances   = dist,
                 ))
 
-            # Rilascia esplicitamente i buffer mappati prima di uscire dal contesto mmap.
+            # Rilascia esplicitamente i riferimenti voluminosi prima di uscire dal contesto mmap.
             del radar_3d, radar_flat, radar_raw, geo_raw, geo_ch
         finally:
-            raw.release()
+            try:
+                rel = getattr(raw, "release", None)
+                if callable(rel):
+                    rel()
+            except Exception:
+                pass
 
     for msg in parse_warnings:
         warnings.warn(f"[OGPR] {p.name}: {msg}", RuntimeWarning)
