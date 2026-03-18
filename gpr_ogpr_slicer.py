@@ -615,11 +615,34 @@ def _normalize_idw_mode(mode: str | None) -> str:
     return "fast"
 
 
+def _idw_grid_guard(n_x: int, n_y: int, label: str, max_cells: int = 10_000_000) -> tuple[bool, int]:
+    """Return (ok, n_cells) for safe IDW grid allocation."""
+    try:
+        nx = int(n_x)
+        ny = int(n_y)
+    except Exception:
+        return False, 0
+    if nx <= 0 or ny <= 0:
+        return False, 0
+    n_cells = int(nx) * int(ny)
+    if n_cells > int(max_cells):
+        print(
+            f"[OGPR slicer][ERROR] {label} abortito: griglia {ny}x{nx}={n_cells:,} celle "
+            f"supera il limite di sicurezza ({int(max_cells):,}). "
+            "Aumenta la risoluzione o riduci il raggio IDW."
+        )
+        return False, n_cells
+    return True, n_cells
+
+
 def _bin_with_idw_ball(
     x_pts, y_pts, i_pts, x_min, y_min, n_x, n_y, resolution, radius, power=2.0, min_points=1
 ):
     from scipy.spatial import cKDTree
 
+    ok_grid, _ = _idw_grid_guard(n_x, n_y, "IDW quality")
+    if not ok_grid:
+        return np.full((n_y, n_x), np.nan, dtype=np.float32)
     gx = x_min + np.arange(n_x) * resolution
     gy = y_min + np.arange(n_y) * resolution
     gxx, gyy = np.meshgrid(gx, gy)
@@ -655,6 +678,9 @@ def _bin_with_idw_anisotropic_ball(
 ):
     from scipy.spatial import cKDTree
 
+    ok_grid, _ = _idw_grid_guard(n_x, n_y, "IDW quality anisotropo")
+    if not ok_grid:
+        return np.full((n_y, n_x), np.nan, dtype=np.float32)
     if anisotropy_ratio <= 0:
         anisotropy_ratio = 1.0
     ar = np.radians(anisotropy_angle)
@@ -707,21 +733,15 @@ def _bin_with_idw(
     x_pts, y_pts, i_pts, x_min, y_min, n_x, n_y, resolution, radius, power=2.0, min_points=1
 ):
     from scipy.spatial import cKDTree
+    ok_grid, n_cells = _idw_grid_guard(n_x, n_y, "IDW")
+    if not ok_grid:
+        return np.full((n_y, n_x), np.nan, dtype=np.float32)
     gx = x_min + np.arange(n_x) * resolution
     gy = y_min + np.arange(n_y) * resolution
     gxx, gyy = np.meshgrid(gx, gy)
     gpts = np.column_stack([gxx.ravel(), gyy.ravel()])
-    n_cells = int(gpts.shape[0])
     n_pts = int(np.asarray(x_pts).size)
     if n_cells <= 0 or n_pts <= 0:
-        return np.full((n_y, n_x), np.nan, dtype=np.float32)
-    MAX_CELLS = 10_000_000
-    if n_cells > MAX_CELLS:
-        print(
-            f"[OGPR slicer][ERROR] IDW abortito: griglia {n_y}x{n_x}={n_cells:,} celle "
-            f"supera il limite di sicurezza ({MAX_CELLS:,}). "
-            "Aumenta la risoluzione o riduci il raggio IDW."
-        )
         return np.full((n_y, n_x), np.nan, dtype=np.float32)
 
     r = float(radius)
@@ -775,6 +795,9 @@ def _bin_with_idw_anisotropic(
     anisotropy_ratio=1.0, anisotropy_angle=0.0, max_points_per_cell=4096,
 ):
     from scipy.spatial import cKDTree
+    ok_grid, n_cells = _idw_grid_guard(n_x, n_y, "IDW anisotropo")
+    if not ok_grid:
+        return np.full((n_y, n_x), np.nan, dtype=np.float32)
     if anisotropy_ratio <= 0:
         anisotropy_ratio = 1.0
     ar = np.radians(anisotropy_angle)
@@ -788,17 +811,8 @@ def _bin_with_idw_anisotropic(
     gy = y_min + np.arange(n_y) * resolution
     gxx, gyy = np.meshgrid(gx, gy)
     gpts = np.column_stack([gxx.ravel(), gyy.ravel()])
-    n_cells = int(gpts.shape[0])
     n_pts = int(np.asarray(x_pts).size)
     if n_cells <= 0 or n_pts <= 0:
-        return np.full((n_y, n_x), np.nan, dtype=np.float32)
-    MAX_CELLS = 10_000_000
-    if n_cells > MAX_CELLS:
-        print(
-            f"[OGPR slicer][ERROR] IDW anisotropo abortito: griglia {n_y}x{n_x}={n_cells:,} celle "
-            f"supera il limite di sicurezza ({MAX_CELLS:,}). "
-            "Aumenta la risoluzione o riduci il raggio IDW."
-        )
         return np.full((n_y, n_x), np.nan, dtype=np.float32)
 
     r = float(radius)
@@ -1325,6 +1339,20 @@ def _build_grid_params(
     # Auto-radius must never override an explicit manual radius.
     if auto_radius and (not radius_user_provided) and _aniso_info is not None:
         radius = _aniso_info["radius"]
+    # Keep auto-estimated radius within a sane fraction of survey extent.
+    try:
+        r_val = float(radius)
+    except Exception:
+        r_val = float(resolution) * (2.0 ** 0.5)
+    if not np.isfinite(r_val) or r_val <= 0.0:
+        r_val = float(resolution) * (2.0 ** 0.5)
+    span_x = float(max(0.0, x_max_data - x_min_data))
+    span_y = float(max(0.0, y_max_data - y_min_data))
+    span_max = max(span_x, span_y)
+    if np.isfinite(span_max) and span_max > 0.0:
+        r_cap = max(float(resolution) * 2.0, span_max * 0.25)
+        r_val = min(r_val, float(r_cap))
+    radius = float(r_val)
     eff_ratio = anisotropy_ratio
     eff_angle = anisotropy_angle
     if use_anisotropic_idw:
