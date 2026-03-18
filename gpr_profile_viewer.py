@@ -41,7 +41,7 @@ try:
 except ImportError:
     HAS_MPL = False
 
-from .gpr_ogpr_reader import read_ogpr, OgprProfile, OgprChannel
+from .gpr_ogpr_reader import read_ogpr_cached, OgprProfile, OgprChannel
 from .gpr_processing  import apply_pipeline, DEFAULT_PIPELINE, normalize_display
 
 
@@ -279,6 +279,8 @@ class GprProfileViewer(QDialog):
         self._bp_figure = None
         self._bp_ax = None
         self._bp_canvas = None
+        self._wiggle_trace_idx: Optional[int] = None
+        self._wiggle_depth_line = None
 
         self._rb_point: Optional[QgsRubberBand] = None
         self._rb_line:  Optional[QgsRubberBand] = None
@@ -1197,13 +1199,13 @@ class GprProfileViewer(QDialog):
         for p in paths:
             md5_failed = False
             try:
-                prof = read_ogpr(p, verify_md5=True)
+                prof = read_ogpr_cached(p, verify_md5=True)
                 self._profiles.append(prof)
             except Exception as e:
                 msg = str(e)
                 if "MD5" in msg:
                     try:
-                        prof = read_ogpr(p, verify_md5=False)
+                        prof = read_ogpr_cached(p, verify_md5=False)
                         self._profiles.append(prof)
                         md5_failed = True
                         imported_warnings.append(
@@ -2209,7 +2211,7 @@ class GprProfileViewer(QDialog):
         self._vline = self._ax.axvline(x=0, color="yellow", lw=1, visible=False)
         self._hline = self._ax.axhline(y=0, color="cyan",   lw=1, linestyle="--", visible=False)
         self._sync_xpan_slider()
-        self._update_wiggle_plot(draw=False)
+        self._update_wiggle_plot(draw=False, force=True)
         self._canvas_mpl.draw_idle()
 
     def _depth_max_display(self, prof) -> float:
@@ -2291,15 +2293,17 @@ class GprProfileViewer(QDialog):
             "depth_max_m": depth_max,
         }
 
-    def _update_wiggle_plot(self, draw: bool = True):
+    def _update_wiggle_plot(self, draw: bool = True, force: bool = False):
         if not HAS_MPL or not hasattr(self, "_ax_wiggle"):
             return
         axw = self._ax_wiggle
-        axw.clear()
         if self._disp_data is None or not self._profiles:
+            axw.clear()
             axw.set_title("Wiggle")
             axw.set_xticks([])
             axw.set_yticks([])
+            self._wiggle_trace_idx = None
+            self._wiggle_depth_line = None
             if draw:
                 self._canvas_mpl.draw_idle()
             return
@@ -2316,13 +2320,38 @@ class GprProfileViewer(QDialog):
 
         trace = np.asarray(self._disp_data[:, idx_t], dtype=np.float64)
         if trace.size <= 0:
+            axw.clear()
             axw.set_title("Wiggle")
             axw.set_xticks([])
             axw.set_yticks([])
+            self._wiggle_trace_idx = None
+            self._wiggle_depth_line = None
             if draw:
                 self._canvas_mpl.draw_idle()
             return
+
         depth_axis = np.linspace(0.0, float(depth_max), trace.size, dtype=np.float64)
+        can_incremental = (
+            (not bool(force))
+            and self._wiggle_trace_idx is not None
+            and int(self._wiggle_trace_idx) == int(idx_t)
+            and self._wiggle_depth_line is not None
+        )
+
+        if can_incremental:
+            if 0 <= idx_s < depth_axis.size:
+                y = float(depth_axis[idx_s])
+                try:
+                    self._wiggle_depth_line.set_ydata([y, y])
+                except Exception:
+                    can_incremental = False
+            if can_incremental and draw:
+                self._canvas_mpl.draw_idle()
+            if can_incremental:
+                return
+
+        # Full redraw only when trace index or data changes.
+        axw.clear()
         finite = np.isfinite(trace)
         if finite.any():
             vmax = float(np.nanpercentile(np.abs(trace[finite]), 99.0))
@@ -2337,8 +2366,14 @@ class GprProfileViewer(QDialog):
         axw.plot(trn, depth_axis, color="#222222", lw=0.9)
         axw.fill_betweenx(depth_axis, 0.0, trn, where=trn >= 0.0, color="#d94f3d", alpha=0.45)
         axw.fill_betweenx(depth_axis, 0.0, trn, where=trn < 0.0, color="#2d6ba3", alpha=0.45)
+        self._wiggle_depth_line = None
         if 0 <= idx_s < depth_axis.size:
-            axw.axhline(depth_axis[idx_s], color="goldenrod", lw=0.8, ls="--")
+            self._wiggle_depth_line = axw.axhline(
+                float(depth_axis[idx_s]),
+                color="goldenrod",
+                lw=0.8,
+                ls="--",
+            )
         axw.axvline(0.0, color="#444444", lw=0.7)
         axw.set_ylim(float(depth_max), 0.0)
         axw.set_xlim(-1.25, 1.25)
@@ -2346,6 +2381,7 @@ class GprProfileViewer(QDialog):
         axw.set_xlabel("Norm amp")
         axw.set_ylabel("m")
         axw.grid(True, ls=":", lw=0.4, alpha=0.6)
+        self._wiggle_trace_idx = int(idx_t)
         if draw:
             self._canvas_mpl.draw_idle()
 

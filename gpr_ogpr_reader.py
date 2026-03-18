@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mmap
+import functools
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -769,3 +770,21 @@ def read_ogpr(path: str, verify_md5: bool = False) -> OgprProfile:
         md5_scope        = md5_scope,
         parse_warnings   = parse_warnings,
     )
+
+
+@functools.lru_cache(maxsize=32)
+def _read_ogpr_cached_impl(path: str, mtime_ns: int, size: int, verify_md5: bool) -> OgprProfile:
+    _ = (mtime_ns, size)  # parte della chiave cache per invalidazione su file modificato
+    return read_ogpr(path, verify_md5=verify_md5)
+
+
+def read_ogpr_cached(path: str, verify_md5: bool = False) -> OgprProfile:
+    p = Path(path).expanduser().resolve()
+    st = p.stat()
+    mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+    size = int(st.st_size)
+    return _read_ogpr_cached_impl(str(p), mtime_ns, size, bool(verify_md5))
+
+
+def clear_ogpr_cache() -> None:
+    _read_ogpr_cached_impl.cache_clear()
