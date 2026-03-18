@@ -24,6 +24,7 @@ from qgis.PyQt.QtWidgets import (
     QSlider,
     QSplitter,
     QToolButton,
+    QTabWidget,
     QWidget,
     QInputDialog,
     QFileDialog, QMessageBox, QSizePolicy,
@@ -354,6 +355,7 @@ class GprProfileViewer(QMainWindow):
         self._timeslice_dock = None
         self._processing_panel_widget = None
         self._timeslice_panel_widget = None
+        self._right_tabs: Optional[QTabWidget] = None
         self._cached_catalog = None
         self._cached_catalog_pr: Optional[str] = None
         self._cached_catalog_mtime: Optional[float] = None
@@ -531,6 +533,16 @@ class GprProfileViewer(QMainWindow):
                 self._slider_slice_depth.setEnabled(False)
             except Exception:
                 pass
+        if self._is_qt_alive(getattr(self, "_btn_slice_up", None)):
+            try:
+                self._btn_slice_up.setEnabled(False)
+            except Exception:
+                pass
+        if self._is_qt_alive(getattr(self, "_btn_slice_down", None)):
+            try:
+                self._btn_slice_down.setEnabled(False)
+            except Exception:
+                pass
 
         try:
             if self._ax is not None:
@@ -671,12 +683,12 @@ class GprProfileViewer(QMainWindow):
 
         tb.addSeparator()
         act_processing = QAction("Processing", self)
-        act_processing.setToolTip("Apri il pannello Processing in una finestra separata.")
+        act_processing.setToolTip("Apri il pannello laterale e mostra il tab Elaborazione.")
         act_processing.triggered.connect(self._open_processing_window)
         tb.addAction(act_processing)
 
         act_timeslice = QAction("Timeslice", self)
-        act_timeslice.setToolTip("Apri il pannello Timeslice in una finestra separata.")
+        act_timeslice.setToolTip("Apri il pannello laterale e mostra il tab Slicing.")
         act_timeslice.triggered.connect(self._open_timeslice_window)
         tb.addAction(act_timeslice)
 
@@ -891,8 +903,13 @@ class GprProfileViewer(QMainWindow):
         created_proc = False
         created_slice = False
         if self._processing_dock is None and self._processing_panel_widget is not None:
+            proc_title = (
+                "GPR - Process/Slicing"
+                if self._timeslice_panel_widget is None and self._is_qt_alive(self._right_tabs)
+                else "GPR - Processing"
+            )
             self._processing_dock = self._create_aux_dock(
-                "GPR - Processing", "GprProcessingDock", self._processing_panel_widget
+                proc_title, "GprProcessingDock", self._processing_panel_widget
             )
             self._restore_dock_state(self._processing_dock, "processing", Qt.RightDockWidgetArea)
             created_proc = True
@@ -916,10 +933,25 @@ class GprProfileViewer(QMainWindow):
             return
         self._processing_dock.show()
         self._processing_dock.raise_()
+        if self._is_qt_alive(self._right_tabs):
+            try:
+                self._right_tabs.setCurrentIndex(0)
+            except Exception:
+                pass
 
     def _open_timeslice_window(self):
-        if self._timeslice_dock is None:
+        # Preferred path: unified Process/Slicing tabs in the same dock.
+        if self._processing_dock is None:
             self._init_aux_windows()
+        if self._processing_dock is not None and self._is_qt_alive(self._right_tabs):
+            try:
+                self._processing_dock.show()
+                self._processing_dock.raise_()
+                self._right_tabs.setCurrentIndex(1)
+                return
+            except Exception:
+                pass
+        # Backward-compatible fallback (old separate Timeslice dock).
         if self._timeslice_dock is None:
             return
         self._timeslice_dock.show()
@@ -1024,6 +1056,10 @@ class GprProfileViewer(QMainWindow):
             act_slice.toggled.connect(self._timeslice_dock.setVisible)
             self._timeslice_dock.visibilityChanged.connect(act_slice.setChecked)
             m_view.addAction(act_slice)
+        elif self._is_qt_alive(self._right_tabs):
+            act_slice_tab = QAction("Vai a Slicing", self)
+            act_slice_tab.triggered.connect(self._open_timeslice_window)
+            m_view.addAction(act_slice_tab)
 
         act_wiggle = QAction("Wiggle", self)
         act_wiggle.setCheckable(True)
@@ -1982,6 +2018,13 @@ class GprProfileViewer(QMainWindow):
         timeslice_scroll.setWidget(slice_content)
         timeslice_scroll.setMinimumWidth(270)
         timeslice_scroll.setMaximumWidth(460)
+
+        # Unified right panel: Process + Slicing tabs in a single dock.
+        tabs = QTabWidget()
+        tabs.addTab(processing_scroll, "Elaborazione")
+        tabs.addTab(timeslice_scroll, "Slicing")
+        tabs.setCurrentIndex(0)
+        self._right_tabs = tabs
         try:
             default_out = self._default_slice_output_dir()
             if default_out:
@@ -2000,7 +2043,8 @@ class GprProfileViewer(QMainWindow):
             redraw=False,
         )
         self._sync_filter_chain_from_controls()
-        return processing_scroll, timeslice_scroll
+        # Return single widget for one dock; keep second None for backward compatibility.
+        return tabs, None
 
     def _current_dt_ns(self) -> float:
         if not self._profiles:
