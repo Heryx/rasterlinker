@@ -33,14 +33,42 @@ def _bandpass_fft(
     low_mhz: float,
     high_mhz: float,
 ) -> np.ndarray:
-    N     = data.shape[0]
-    dt_s  = dt_ns * 1e-9
+    N = int(data.shape[0])
+    dt_s = float(dt_ns) * 1e-9
+    if N <= 1 or (not np.isfinite(dt_s)) or dt_s <= 0.0:
+        return np.asarray(data, dtype=np.float32, copy=True)
+
     freqs = np.fft.rfftfreq(N, d=dt_s)
-    mask  = ((freqs >= low_mhz  * 1e6) &
-              (freqs <= high_mhz * 1e6)).astype(np.float32)
-    out   = np.empty_like(data)
+    f_lo = max(0.0, float(low_mhz) * 1e6)
+    f_hi = max(f_lo, float(high_mhz) * 1e6)
+    if f_hi <= f_lo:
+        return np.asarray(data, dtype=np.float32, copy=True)
+
+    # Cosine-tapered passband to reduce Gibbs ringing vs. rectangular mask.
+    bw = max(1e-9, f_hi - f_lo)
+    margin = max(1e-9, bw * 0.05)
+    lo1 = f_lo
+    lo2 = f_lo + margin
+    hi1 = f_hi - margin
+    hi2 = f_hi
+
+    mask = np.zeros(freqs.shape, dtype=np.float64)
+    core = (freqs >= lo2) & (freqs <= hi1)
+    mask[core] = 1.0
+
+    rise = (freqs > lo1) & (freqs < lo2)
+    if np.any(rise):
+        x = (freqs[rise] - lo1) / margin
+        mask[rise] = 0.5 * (1.0 - np.cos(np.pi * x))
+
+    fall = (freqs > hi1) & (freqs < hi2)
+    if np.any(fall):
+        x = (hi2 - freqs[fall]) / margin
+        mask[fall] = 0.5 * (1.0 - np.cos(np.pi * x))
+
+    out = np.empty_like(data)
     for i in range(data.shape[1]):
-        Xf        = np.fft.rfft(data[:, i].astype(np.float64))
+        Xf = np.fft.rfft(data[:, i].astype(np.float64))
         out[:, i] = np.fft.irfft(Xf * mask, n=N).astype(np.float32)
     return out
 
@@ -413,11 +441,11 @@ FILTER_REGISTRY = {
 
 DEFAULT_CHAIN_ORDER = [
     "dewow",
+    "bandpass",
     "timezero",
     "bg_removal",
     "pre_agc_gain",
     "agc",
-    "bandpass",
     "envelope",
 ]
 
@@ -504,7 +532,7 @@ def apply_pre_bg_pipeline(
     dt_ns: float = 0.117,
 ) -> np.ndarray:
     """
-    Applica solo le fasi che precedono il BG removal (dewow + time-zero).
+    Applica solo le fasi che precedono il BG removal (dewow + bandpass + time-zero).
 
     Usata per il calcolo della traccia di riferimento nel modo grid_by_grid
     a due passate:
@@ -519,6 +547,13 @@ def apply_pre_bg_pipeline(
     out = data.copy()
     if p["dewow"]:
         out = dewow(out, window=int(p["dewow_win"]))
+    if p["bandpass"]:
+        out = bandpass_filter(
+            out,
+            dt_ns,
+            float(p["bp_low_mhz"]),
+            float(p["bp_high_mhz"]),
+        )
     if p["timezero"]:
         out = time_zero_correction(
             out,
