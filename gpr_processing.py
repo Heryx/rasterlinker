@@ -44,28 +44,26 @@ def _bandpass_fft(
     if f_hi <= f_lo:
         return np.array(data, dtype=np.float32, copy=True)
 
-    # Cosine-tapered passband to reduce Gibbs ringing vs. rectangular mask.
-    # Use a wider transition (10% per edge) to further suppress ringing.
+    # Tukey-like cosine rolloff (8% per edge) to reduce Gibbs ringing.
     bw = max(1e-9, f_hi - f_lo)
-    margin = max(1e-9, bw * 0.10)
-    lo1 = f_lo
-    lo2 = f_lo + margin
-    hi1 = f_hi - margin
-    hi2 = f_hi
-
+    edge = max(1e-9, 0.08 * bw)
     mask = np.zeros(freqs.shape, dtype=np.float64)
-    core = (freqs >= lo2) & (freqs <= hi1)
-    mask[core] = 1.0
-
-    rise = (freqs > lo1) & (freqs < lo2)
-    if np.any(rise):
-        x = (freqs[rise] - lo1) / margin
-        mask[rise] = 0.5 * (1.0 - np.cos(np.pi * x))
-
-    fall = (freqs > hi1) & (freqs < hi2)
-    if np.any(fall):
-        x = (hi2 - freqs[fall]) / margin
-        mask[fall] = 0.5 * (1.0 - np.cos(np.pi * x))
+    inside = (freqs >= f_lo) & (freqs <= f_hi)
+    if np.any(inside):
+        mask[inside] = 1.0
+        dist_edge = np.minimum(freqs[inside] - f_lo, f_hi - freqs[inside])
+        taper = dist_edge < edge
+        if np.any(taper):
+            x = np.clip(dist_edge[taper] / edge, 0.0, 1.0)
+            mask_inside = mask[inside]
+            mask_inside[taper] = 0.5 * (1.0 - np.cos(np.pi * x))
+            mask[inside] = mask_inside
+    if float(np.sum(mask)) < 1.0:
+        print(
+            f"[GPR] bandpass: banda [{low_mhz:.3f},{high_mhz:.3f}] MHz vuota "
+            f"(dt_ns={dt_ns:.6g})."
+        )
+        return np.array(data, dtype=np.float32, copy=True)
 
     out = np.empty_like(data)
     for i in range(data.shape[1]):
@@ -321,7 +319,11 @@ def agc_gain(
     O(n_s * n_t) senza loop Python.
     """
     n_s, n_t = data.shape
-    half = max(window, 8) // 2
+    if n_s <= 1 or n_t <= 0:
+        return np.array(data, dtype=np.float32, copy=True)
+    win = max(8, int(window))
+    win = min(win, max(8, n_s // 2))
+    half = max(4, win // 2)
     d64 = data.astype(np.float64, copy=False)
     sq = d64 ** 2
     # Exclusive cumsum: cs[k] = sum(sq[:k]); avoids off-by-one at window start.
@@ -331,7 +333,16 @@ def agc_gain(
     hi = np.minimum(n_s - 1, s_idx + half)
     win_len = (hi - lo + 1).reshape(-1, 1).astype(np.float64)
     sum_win = cs[hi + 1, :] - cs[lo, :]
-    rms = np.sqrt(np.maximum(sum_win / win_len, 0.0)) + 1e-10
+    rms = np.sqrt(np.maximum(sum_win / win_len, 0.0))
+    try:
+        valid_rms = rms[rms > 1e-10]
+        if valid_rms.size > 0:
+            rms_global = float(np.percentile(valid_rms, 95.0))
+            if np.isfinite(rms_global) and rms_global > 1e-12:
+                rms = np.minimum(rms, rms_global * 10.0)
+    except Exception:
+        pass
+    rms = rms + 1e-10
     out = (d64 / rms).astype(np.float32)
     if out.size > 0:
         clip = float(np.percentile(np.abs(out), clip_percentile))
@@ -444,8 +455,8 @@ DEFAULT_CHAIN_ORDER = [
     "timezero",
     "dewow",
     "bg_removal",
-    "bandpass",
     "pre_agc_gain",
+    "bandpass",
     "agc",
     "envelope",
 ]
