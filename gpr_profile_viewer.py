@@ -3181,15 +3181,18 @@ class GprProfileViewer(QMainWindow):
             return None
 
         clip_pct = float(self._spin_clip.value()) if hasattr(self, "_spin_clip") else 95.0
-        # Normalize first, then apply manual gains so gain controls remain visible.
-        base = normalize_display(proc, clip_pct=clip_pct).astype(np.float32, copy=False)
+        proc_disp = proc.astype(np.float32, copy=True)
         pre_agc_applied = bool(getattr(self, "_last_pipeline_params", {}).get("pre_agc_gain", False))
-        if pre_agc_applied:
-            depth_gain = np.ones((int(base.shape[0]), 1), dtype=np.float32)
-        else:
-            depth_gain = self._build_depth_range_gain(int(base.shape[0]))
+        if not pre_agc_applied:
+            # Apply depth gain on processed amplitudes BEFORE normalize_display.
+            depth_gain = self._build_depth_range_gain(int(proc_disp.shape[0]))
+            if depth_gain is not None:
+                proc_disp = (proc_disp * depth_gain).astype(np.float32, copy=False)
+
+        # Normalize once, then apply only scalar display gain.
+        base = normalize_display(proc_disp, clip_pct=clip_pct).astype(np.float32, copy=False)
         gain = float(self._spin_gain.value()) if hasattr(self, "_spin_gain") else 1.0
-        disp = (base * depth_gain * gain).astype(np.float32, copy=False)
+        disp = (base * gain).astype(np.float32, copy=False)
         return np.clip(disp, -1.0, 1.0).astype(np.float32, copy=False)
 
     def _apply_gain_only(self):
@@ -3728,7 +3731,10 @@ class GprProfileViewer(QMainWindow):
         axw.clear()
         finite_raw = np.isfinite(trace_r_plot)
         if finite_raw.any():
-            scale = float(np.nanmax(np.abs(trace_r_plot[finite_raw])))
+            try:
+                scale = float(np.nanpercentile(np.abs(trace_r_plot[finite_raw]), 99.0))
+            except Exception:
+                scale = float(np.nanmax(np.abs(trace_r_plot[finite_raw])))
         else:
             scale = 1.0
         if (not np.isfinite(scale)) or scale <= 1e-9:
