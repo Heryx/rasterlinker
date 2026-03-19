@@ -440,11 +440,10 @@ FILTER_REGISTRY = {
 }
 
 DEFAULT_CHAIN_ORDER = [
-    "dewow",
-    "bandpass",
     "timezero",
+    "dewow",
     "bg_removal",
-    "pre_agc_gain",
+    "bandpass",
     "agc",
     "envelope",
 ]

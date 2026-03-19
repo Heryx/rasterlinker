@@ -72,9 +72,11 @@ class FilterBlockWidget(QWidget):
         c = QVBoxLayout(self._content)
         c.setContentsMargins(12, 3, 6, 5)
         c.setSpacing(2)
+        self._content_layout = c
         self._lbl_help = QLabel(self._help_text or "No extra parameters")
         self._lbl_help.setWordWrap(True)
         c.addWidget(self._lbl_help)
+        self._params_widget = None
 
         outer.addWidget(header)
         outer.addWidget(self._content)
@@ -92,6 +94,19 @@ class FilterBlockWidget(QWidget):
     def set_move_enabled(self, can_move_up: bool, can_move_down: bool):
         self._btn_up.setEnabled(bool(can_move_up))
         self._btn_down.setEnabled(bool(can_move_down))
+
+    def set_content_widget(self, widget: QWidget | None):
+        """Attach custom parameter controls shown when the block is expanded."""
+        if self._params_widget is not None:
+            try:
+                self._content_layout.removeWidget(self._params_widget)
+                self._params_widget.setParent(None)
+            except Exception:
+                pass
+            self._params_widget = None
+        if widget is not None:
+            self._params_widget = widget
+            self._content_layout.addWidget(widget)
 
 
 class FilterChainWidget(QWidget):

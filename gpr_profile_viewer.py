@@ -1140,6 +1140,63 @@ class GprProfileViewer(QMainWindow):
         }
         return txt.get(str(step_id), "")
 
+    def _build_pipeline_step_controls(self, step_id: str):
+        sid = str(step_id or "").strip().lower()
+        host = QWidget()
+        fl = QFormLayout(host)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(4)
+
+        if sid == "timezero":
+            fl.addRow("Metodo:", self._cb_tz_method)
+            fl.addRow("Mode:", self._cb_tz_mode)
+            fl.addRow("Soglia:", self._spin_tz_threshold)
+            fl.addRow("Backup N:", self._spin_tz_backup)
+            return host
+
+        if sid == "dewow":
+            fl.addRow("Finestra:", self._spin_dewow)
+            return host
+
+        if sid == "bg_removal":
+            fl.addRow("Modo:", self._cb_bg_mode)
+            fl.addRow("Auto:", self._chk_bg_auto)
+            fl.addRow("Finestra:", self._spin_bg_window)
+            fl.addRow("Da campione:", self._spin_bg_sample_start)
+            fl.addRow("A campione:", self._spin_bg_sample_end)
+            return host
+
+        if sid == "bandpass":
+            fl.addRow("Low (MHz):", self._spin_bp_lo)
+            fl.addRow("High (MHz):", self._spin_bp_hi)
+            if HAS_MPL and self._is_qt_alive(getattr(self, "_bp_canvas", None)):
+                fl.addRow("Spettro:", self._bp_canvas)
+            return host
+
+        if sid == "agc":
+            fl.addRow("Finestra:", self._spin_agc)
+            return host
+
+        if sid == "envelope":
+            lbl = QLabel("Nessun comando aggiuntivo.")
+            lbl.setWordWrap(True)
+            fl.addRow(lbl)
+            return host
+
+        if sid == "pre_agc_gain":
+            fl.addRow("Abilita:", self._chk_range_gain_pre_agc)
+            fl.addRow("Gain superficie:", self._spin_gain_surface)
+            fl.addRow("Gain profondo:", self._spin_gain_deep)
+            fl.addRow("Curva:", self._cb_range_gain_curve)
+            fl.addRow("Power:", self._spin_range_gain_power)
+            fl.addRow("Breakpoints:", self._btn_range_gain_curve)
+            return host
+
+        lbl = QLabel("Nessun comando disponibile.")
+        lbl.setWordWrap(True)
+        fl.addRow(lbl)
+        return host
+
     def _build_filter_chain_controls(self):
         if FilterChainWidget is None or FilterBlockWidget is None:
             return None
@@ -1155,6 +1212,11 @@ class GprProfileViewer(QMainWindow):
                     help_text=self._pipeline_chain_help_text(sid),
                     parent=chain,
                 )
+                if hasattr(block, "set_content_widget"):
+                    try:
+                        block.set_content_widget(self._build_pipeline_step_controls(sid))
+                    except Exception:
+                        pass
                 chain.add_block(block)
                 blocks[sid] = block
             chain.chain_changed.connect(self._on_filter_chain_widget_changed)
@@ -1525,27 +1587,7 @@ class GprProfileViewer(QMainWindow):
         self._btn_load_gain_preset = QPushButton("Load Gain/Hyper Preset")
         self._btn_save_gain_preset.clicked.connect(self._save_gain_hyper_preset)
         self._btn_load_gain_preset.clicked.connect(self._load_gain_hyper_preset)
-        self._filter_chain_widget = self._build_filter_chain_controls()
 
-        fl.addRow("Dewow:",              self._chk_dewow)
-        fl.addRow("  finestra:",         self._spin_dewow)
-        fl.addRow("Time-zero:",          self._chk_timezero)
-        fl.addRow("  metodo:",           self._cb_tz_method)
-        fl.addRow("  mode:",             self._cb_tz_mode)
-        fl.addRow("  soglia:",           self._spin_tz_threshold)
-        fl.addRow("  backup N:",         self._spin_tz_backup)
-        fl.addRow("BG removal:",         self._chk_bg)
-        fl.addRow("  modo:",             self._cb_bg_mode)
-        fl.addRow("  auto:",             self._chk_bg_auto)
-        fl.addRow("  finestra:",         self._spin_bg_window)
-        fl.addRow("  da campione:",      self._spin_bg_sample_start)
-        fl.addRow("  a campione:",       self._spin_bg_sample_end)
-        fl.addRow("AGC gain:",           self._chk_agc)
-        fl.addRow("  finestra:",         self._spin_agc)
-        fl.addRow("Bandpass:",           self._chk_bp)
-        fl.addRow("  low (MHz):",        self._spin_bp_lo)
-        fl.addRow("  high (MHz):",       self._spin_bp_hi)
-        fl.addRow("Envelope:",           self._chk_envelope)
         if HAS_MPL:
             self._bp_figure = Figure(figsize=(3.2, 1.8), tight_layout=True)
             self._bp_ax = self._bp_figure.add_subplot(111)
@@ -1561,11 +1603,16 @@ class GprProfileViewer(QMainWindow):
                 self._bp_canvas.mpl_connect("button_press_event", self._on_bp_hist_click)
             except Exception:
                 pass
-            fl.addRow("  spettro:", self._bp_canvas)
         else:
             self._bp_figure = None
             self._bp_ax = None
             self._bp_canvas = None
+
+        self._filter_chain_widget = self._build_filter_chain_controls()
+
+        if self._is_qt_alive(self._filter_chain_widget):
+            fl.addRow("Pipeline chain:", self._filter_chain_widget)
+
         fl.addRow("Trim start traces:",  self._spin_trim_start)
         fl.addRow("Trim end traces:",    self._spin_trim_end)
         fl.addRow("  apply trim:",       self._btn_apply_trim)
@@ -1585,8 +1632,6 @@ class GprProfileViewer(QMainWindow):
         fl.addRow("  apex:",             self._btn_set_hyper_apex)
         fl.addRow("  auto-fit:",         self._btn_hyper_auto_fit)
         fl.addRow("  clear apex:",       self._btn_clear_hyper)
-        if self._is_qt_alive(self._filter_chain_widget):
-            fl.addRow("Pipeline chain:", self._filter_chain_widget)
         fl.addRow(self._btn_save_gain_preset)
         fl.addRow(self._btn_load_gain_preset)
 
