@@ -2343,6 +2343,8 @@ class GprProfileViewer(QMainWindow):
         if idx >= 0:
             self._ch_idx = idx
             self._reload_data()
+            # Auto reset zoom on channel change (same behavior as Reset Zoom button).
+            self._reset_zoom()
 
     def _update_trim_controls_for_channel(self, n_traces: int):
         n_t = max(0, int(n_traces))
@@ -2439,6 +2441,8 @@ class GprProfileViewer(QMainWindow):
         except Exception:
             pass
         self._reload_data()
+        # Auto reset zoom on profile change (same behavior as Reset Zoom button).
+        self._reset_zoom()
         if self._ch_idx != 0:
             self._safe_set_text(
                 self._lbl_status,
