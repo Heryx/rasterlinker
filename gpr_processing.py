@@ -38,15 +38,24 @@ def _bandpass_fft(
     if N <= 1 or (not np.isfinite(dt_s)) or dt_s <= 0.0:
         return np.array(data, dtype=np.float32, copy=True)
 
-    freqs = np.fft.rfftfreq(N, d=dt_s)
+    # Reflect padding mitigates circular-convolution edge artifacts that
+    # often appear as horizontal striping after FFT filtering.
+    pad = int(np.clip(N // 4, 32, 256))
+    Np = int(N + 2 * pad)
+    freqs = np.fft.rfftfreq(Np, d=dt_s)
     f_lo = max(0.0, float(low_mhz) * 1e6)
     f_hi = max(f_lo, float(high_mhz) * 1e6)
     if f_hi <= f_lo:
         return np.array(data, dtype=np.float32, copy=True)
+    nyq = 0.5 / dt_s
+    if np.isfinite(nyq) and nyq > 0.0:
+        f_hi = min(f_hi, nyq * 0.995)
+    if f_hi <= f_lo:
+        return np.array(data, dtype=np.float32, copy=True)
 
-    # Tukey-like cosine rolloff (8% per edge) to reduce Gibbs ringing.
+    # Tukey-like cosine rolloff (12% per edge) to reduce Gibbs ringing.
     bw = max(1e-9, f_hi - f_lo)
-    edge = max(1e-9, 0.08 * bw)
+    edge = max(1e-9, 0.12 * bw)
     mask = np.zeros(freqs.shape, dtype=np.float64)
     inside = (freqs >= f_lo) & (freqs <= f_hi)
     if np.any(inside):
@@ -65,10 +74,14 @@ def _bandpass_fft(
         )
         return np.array(data, dtype=np.float32, copy=True)
 
-    out = np.empty_like(data)
+    out = np.empty_like(data, dtype=np.float32)
     for i in range(data.shape[1]):
-        Xf = np.fft.rfft(data[:, i].astype(np.float64))
-        out[:, i] = np.fft.irfft(Xf * mask, n=N).astype(np.float32)
+        tr = data[:, i].astype(np.float64, copy=False)
+        tr = tr - float(np.mean(tr))
+        tr_pad = np.pad(tr, (pad, pad), mode="reflect")
+        Xf = np.fft.rfft(tr_pad)
+        y_pad = np.fft.irfft(Xf * mask, n=tr_pad.size)
+        out[:, i] = y_pad[pad:pad + N].astype(np.float32)
     return out
 
 
@@ -276,6 +289,9 @@ def background_removal(
 
     # Sub-matrice su cui operare
     sub = d64[s_lo:s_hi, :]   # (n_win, n_t)
+    # Keep perfectly flat rows untouched (e.g., pure zero rows after truncation).
+    row_std_sub = np.std(sub, axis=1)
+    valid_rows = row_std_sub > 1e-12
 
     # ---------------------------------------------------------------
     # grid_by_grid
@@ -295,7 +311,10 @@ def background_removal(
             print("[GPR] bg_removal: grid_by_grid senza reference_trace; fallback a line_by_line auto.")
             ref_sub = sub.mean(axis=1)
         out = d64.copy()
-        out[s_lo:s_hi, :] = sub - ref_sub.reshape(-1, 1)
+        corr = sub - ref_sub.reshape(-1, 1)
+        block = out[s_lo:s_hi, :]
+        block[valid_rows, :] = corr[valid_rows, :]
+        out[s_lo:s_hi, :] = block
         return out.astype(np.float32)
 
     # ---------------------------------------------------------------
@@ -305,7 +324,10 @@ def background_removal(
         mean_trace = sub.mean(axis=1, keepdims=True)
         print(f"[GPR] bg_removal: global mean subtracted  n_t={n_t}  s=[{s_lo}:{s_hi}]")
         out = d64.copy()
-        out[s_lo:s_hi, :] = sub - mean_trace
+        corr = sub - mean_trace
+        block = out[s_lo:s_hi, :]
+        block[valid_rows, :] = corr[valid_rows, :]
+        out[s_lo:s_hi, :] = block
         return out.astype(np.float32)
 
     # ---------------------------------------------------------------
@@ -328,14 +350,17 @@ def background_removal(
         f"eff_win=[{(hi_t-lo_t+1).min()},{(hi_t-lo_t+1).max()}]"
     )
     out = d64.copy()
-    out[s_lo:s_hi, :] = sub - local_mean
+    corr = sub - local_mean
+    block = out[s_lo:s_hi, :]
+    block[valid_rows, :] = corr[valid_rows, :]
+    out[s_lo:s_hi, :] = block
     return out.astype(np.float32)
 
 
 def agc_gain(
     data: np.ndarray,
     window: int = 128,
-    clip_percentile: float = 99.0,
+    clip_percentile: float | None = None,
 ) -> np.ndarray:
     """
     Automatic Gain Control vettorizzato con cumsum.
@@ -345,18 +370,18 @@ def agc_gain(
     if n_s <= 1 or n_t <= 0:
         return np.array(data, dtype=np.float32, copy=True)
     win = max(8, int(window))
-    win = min(win, max(8, n_s // 2))
+    win = min(win, max(8, n_s))
+    if win % 2 != 0:
+        win += 1
     half = max(4, win // 2)
     d64 = data.astype(np.float64, copy=False)
     sq = d64 ** 2
-    # Exclusive cumsum: cs[k] = sum(sq[:k]); avoids off-by-one at window start.
-    cs = np.vstack([np.zeros((1, n_t), dtype=np.float64), np.cumsum(sq, axis=0)])
+    # Full window at edges via reflect padding.
+    sq_pad = np.pad(sq, ((half, half), (0, 0)), mode="reflect")
+    cs = np.vstack([np.zeros((1, n_t), dtype=np.float64), np.cumsum(sq_pad, axis=0)])
     s_idx = np.arange(n_s, dtype=np.int64)
-    lo = np.maximum(0, s_idx - half)
-    hi = np.minimum(n_s - 1, s_idx + half)
-    win_len = (hi - lo + 1).reshape(-1, 1).astype(np.float64)
-    sum_win = cs[hi + 1, :] - cs[lo, :]
-    rms = np.sqrt(np.maximum(sum_win / win_len, 0.0))
+    sum_win = cs[s_idx + win, :] - cs[s_idx, :]
+    rms = np.sqrt(np.maximum(sum_win / float(win), 0.0))
     try:
         valid_rms = rms[rms > 1e-10]
         if valid_rms.size > 0:
@@ -367,7 +392,7 @@ def agc_gain(
         pass
     rms = rms + 1e-10
     out = (d64 / rms).astype(np.float32)
-    if out.size > 0:
+    if clip_percentile is not None and out.size > 0:
         clip = float(np.percentile(np.abs(out), clip_percentile))
         if clip > 1e-12:
             return np.clip(out, -clip, clip)
@@ -484,9 +509,9 @@ DEFAULT_CHAIN_ORDER = [
     "dewow",
     "timezero",
     "bg_removal",
+    "bandpass",
     "pre_agc_gain",
     "agc",
-    "bandpass",
     "envelope",
 ]
 
@@ -677,7 +702,7 @@ def apply_pipeline(
 
         if step == "agc":
             if p["agc"]:
-                out = agc_gain(out, window=int(p["agc_win"]))
+                out = agc_gain(out, window=int(p["agc_win"]), clip_percentile=None)
                 _log(f"agc(win={p['agc_win']})", out)
             continue
 

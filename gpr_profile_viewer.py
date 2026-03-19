@@ -3659,17 +3659,17 @@ class GprProfileViewer(QMainWindow):
                 self._safe_draw_idle(self._canvas_mpl)
             return
 
-        # Resample raw to filtered length so both traces share identical depth axis.
+        # Align raw to filtered length without distorting waveform:
+        # if processing shortens the trace (e.g. time-zero), drop the leading
+        # raw samples instead of interpolating the whole raw trace.
         n = int(trace_f.size)
-        if int(trace_r.size) != n and n > 1:
-            try:
-                x_old = np.linspace(0.0, 1.0, int(trace_r.size), dtype=np.float64)
-                x_new = np.linspace(0.0, 1.0, n, dtype=np.float64)
-                trace_r_plot = np.interp(x_new, x_old, trace_r)
-            except Exception:
-                trace_r_plot = trace_r[:n]
+        n_raw = int(trace_r.size)
+        if n_raw >= n:
+            off = max(0, n_raw - n)
+            trace_r_plot = trace_r[off:off + n]
         else:
-            trace_r_plot = trace_r[:n]
+            trace_r_plot = np.full((n,), np.nan, dtype=np.float64)
+            trace_r_plot[:n_raw] = trace_r
         trace_f_plot = trace_f[:n]
         depth_axis = np.linspace(0.0, float(depth_max), n, dtype=np.float64)
         can_incremental = (
@@ -3695,26 +3695,27 @@ class GprProfileViewer(QMainWindow):
         axw.clear()
         finite_fil = np.isfinite(trace_f_plot)
         finite_raw = np.isfinite(trace_r_plot)
-        scale_fil = 0.0
+        scale_fil = 1.0
         if finite_fil.any():
             try:
                 scale_fil = float(np.nanpercentile(np.abs(trace_f_plot[finite_fil]), 99.0))
             except Exception:
                 scale_fil = float(np.nanmax(np.abs(trace_f_plot[finite_fil])))
-        scale_raw = 0.0
+        if (not np.isfinite(scale_fil)) or scale_fil <= 1e-9:
+            scale_fil = 1.0
+
+        scale_raw = 1.0
         if finite_raw.any():
             try:
                 scale_raw = float(np.nanpercentile(np.abs(trace_r_plot[finite_raw]), 99.0))
             except Exception:
                 scale_raw = float(np.nanmax(np.abs(trace_r_plot[finite_raw])))
-        # Use processed trace range as primary A-scan scale; fallback to raw if needed.
-        scale = scale_fil if (np.isfinite(scale_fil) and scale_fil > 1e-9) else scale_raw
-        if (not np.isfinite(scale)) or scale <= 1e-9:
-            scale = 1.0
+        if (not np.isfinite(scale_raw)) or scale_raw <= 1e-9:
+            scale_raw = 1.0
 
-        fil_norm = np.nan_to_num(trace_f_plot / scale, nan=0.0, posinf=0.0, neginf=0.0)
-        raw_norm = np.nan_to_num(trace_r_plot / scale, nan=0.0, posinf=0.0, neginf=0.0)
-        raw_norm = np.clip(raw_norm, -20.0, 20.0)
+        # Separate normalization keeps RAW visible/stable across filter toggles.
+        fil_norm = np.nan_to_num(trace_f_plot / scale_fil, nan=0.0, posinf=0.0, neginf=0.0)
+        raw_norm = np.nan_to_num(trace_r_plot / scale_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
         axw.plot(raw_norm, depth_axis, color="#dc5050", lw=0.9, alpha=0.45, antialiased=True)
         axw.plot(fil_norm, depth_axis, color="#50dc78", lw=0.9, alpha=0.95, antialiased=True)
