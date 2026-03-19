@@ -90,12 +90,13 @@ DEFAULT_CMAP = "RdBu_r"
 class _RangeGainCurveDialog(QDialog):
     """Interactive breakpoint editor for range gain curve."""
 
-    def __init__(self, points, max_points=16, on_curve_changed=None, parent=None):
+    def __init__(self, points, max_points=16, gain_max=100.0, on_curve_changed=None, parent=None):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("Range Gain Curve")
         self.resize(620, 420)
         self._max_points = int(max(2, min(32, max_points)))
         self._on_curve_changed = on_curve_changed
+        self._gain_max = float(np.clip(float(gain_max), 1.0, 100.0))
         self._drag_idx = None
         self._selected_idx = None
         self._did_drag = False
@@ -120,10 +121,23 @@ class _RangeGainCurveDialog(QDialog):
             root.addWidget(lbl, 1)
 
         help_lbl = QLabel(
-            "X=Gain, Y=Depth (0 in alto) | Left click: seleziona/drag | Double-click: aggiungi | Right-click: elimina punto interno"
+            "X=Gain, Y=Depth (0 in alto) | Left click: seleziona/drag | "
+            "Double-click: aggiungi | Right-click: elimina punto interno"
         )
         help_lbl.setWordWrap(True)
         root.addWidget(help_lbl)
+
+        gain_row = QHBoxLayout()
+        gain_row.addWidget(QLabel("Gain max:"))
+        self._spin_gain_max = QDoubleSpinBox()
+        self._spin_gain_max.setRange(1.0, 100.0)
+        self._spin_gain_max.setSingleStep(1.0)
+        self._spin_gain_max.setDecimals(1)
+        self._spin_gain_max.setValue(self._gain_max)
+        self._spin_gain_max.valueChanged.connect(self._on_gain_max_changed)
+        gain_row.addWidget(self._spin_gain_max)
+        gain_row.addStretch(1)
+        root.addLayout(gain_row)
 
         step_row = QHBoxLayout()
         step_row.addWidget(QLabel("Step:"))
@@ -161,7 +175,12 @@ class _RangeGainCurveDialog(QDialog):
         clean = []
         for x, y in arr:
             if np.isfinite(x) and np.isfinite(y):
-                clean.append((float(np.clip(x, 0.0, 1.0)), float(np.clip(y, 0.1, 80.0))))
+                clean.append(
+                    (
+                        float(np.clip(x, 0.0, 1.0)),
+                        float(np.clip(y, 0.0, self._gain_max)),
+                    )
+                )
         if not clean:
             clean = [(0.0, 1.0), (1.0, 6.0)]
         clean.sort(key=lambda p: p[0])
@@ -191,10 +210,13 @@ class _RangeGainCurveDialog(QDialog):
     def points(self):
         return self._points.astype(np.float64, copy=True)
 
+    def gain_max(self) -> float:
+        return float(self._gain_max)
+
     def _emit_changed(self):
         if callable(self._on_curve_changed):
             try:
-                self._on_curve_changed(self.points())
+                self._on_curve_changed(self.points(), float(self._gain_max))
             except Exception:
                 pass
 
@@ -206,8 +228,7 @@ class _RangeGainCurveDialog(QDialog):
         # X=gain, Y=depth fraction (0 top, 1 bottom).
         self._ax.plot(p[:, 1], p[:, 0], color="#2d6ba3", lw=1.4)
         self._ax.scatter(p[:, 1], p[:, 0], s=40, color="#c0392b", zorder=3)
-        x_max = float(max(10.0, np.nanmax(p[:, 1]) * 1.15))
-        self._ax.set_xlim(0.0, x_max)
+        self._ax.set_xlim(0.0, float(self._gain_max))
         self._ax.set_ylim(1.0, 0.0)
         self._ax.grid(True, ls=":", lw=0.5, alpha=0.7)
         self._ax.set_xlabel("Gain")
@@ -246,7 +267,7 @@ class _RangeGainCurveDialog(QDialog):
     def _on_press(self, event):
         if event is None or event.inaxes != self._ax or event.xdata is None or event.ydata is None:
             return
-        gain = float(np.clip(event.xdata, 0.1, 80.0))
+        gain = float(np.clip(event.xdata, 0.0, self._gain_max))
         depth = float(np.clip(event.ydata, 0.0, 1.0))
         idx, dist = self._nearest_idx(gain, depth)
 
@@ -284,7 +305,7 @@ class _RangeGainCurveDialog(QDialog):
         if event is None or event.inaxes != self._ax or event.xdata is None or event.ydata is None:
             return
         i = int(self._drag_idx)
-        gain = float(np.clip(event.xdata, 0.1, 80.0))
+        gain = float(np.clip(event.xdata, 0.0, self._gain_max))
         depth = float(np.clip(event.ydata, 0.0, 1.0))
         p = self._points.copy()
         if i == 0:
@@ -316,8 +337,14 @@ class _RangeGainCurveDialog(QDialog):
         p = self._points.copy()
         if i < 0 or i >= len(p):
             return
-        p[i, 1] = float(np.clip(p[i, 1] + float(delta), 0.1, 80.0))
+        p[i, 1] = float(np.clip(p[i, 1] + float(delta), 0.0, self._gain_max))
         self._points = self._sanitize(p)
+        self._emit_changed()
+        self._redraw()
+
+    def _on_gain_max_changed(self, value: float):
+        self._gain_max = float(np.clip(float(value), 1.0, 100.0))
+        self._points = self._sanitize(self._points)
         self._emit_changed()
         self._redraw()
 
@@ -1184,11 +1211,8 @@ class GprProfileViewer(QMainWindow):
             return host
 
         if sid == "pre_agc_gain":
-            fl.addRow("Abilita:", self._chk_range_gain_pre_agc)
-            fl.addRow("Gain superficie:", self._spin_gain_surface)
-            fl.addRow("Gain profondo:", self._spin_gain_deep)
-            fl.addRow("Curva:", self._cb_range_gain_curve)
-            fl.addRow("Power:", self._spin_range_gain_power)
+            fl.addRow("Gain min:", self._spin_gain_surface)
+            fl.addRow("Gain max:", self._spin_gain_deep)
             fl.addRow("Breakpoints:", self._btn_range_gain_curve)
             return host
 
@@ -1230,15 +1254,11 @@ class GprProfileViewer(QMainWindow):
 
     def _pipeline_enabled_map_from_controls(self) -> dict:
         chk_rg = bool(getattr(self, "_chk_range_gain", None) and self._chk_range_gain.isChecked())
-        chk_rg_pre = bool(
-            getattr(self, "_chk_range_gain_pre_agc", None)
-            and self._chk_range_gain_pre_agc.isChecked()
-        )
         return {
             "dewow": bool(getattr(self, "_chk_dewow", None) and self._chk_dewow.isChecked()),
             "timezero": bool(getattr(self, "_chk_timezero", None) and self._chk_timezero.isChecked()),
             "bg_removal": bool(getattr(self, "_chk_bg", None) and self._chk_bg.isChecked()),
-            "pre_agc_gain": bool(chk_rg and chk_rg_pre),
+            "pre_agc_gain": bool(chk_rg),
             "agc": bool(getattr(self, "_chk_agc", None) and self._chk_agc.isChecked()),
             "bandpass": bool(getattr(self, "_chk_bp", None) and self._chk_bp.isChecked()),
             "envelope": bool(getattr(self, "_chk_envelope", None) and self._chk_envelope.isChecked()),
@@ -1295,19 +1315,9 @@ class GprProfileViewer(QMainWindow):
             if self._is_qt_alive(getattr(self, "_chk_envelope", None)):
                 self._chk_envelope.setChecked(bool(enabled.get("envelope", self._chk_envelope.isChecked())))
 
-            pre_agc_enabled = bool(
-                enabled.get(
-                    "pre_agc_gain",
-                    bool(
-                        self._is_qt_alive(getattr(self, "_chk_range_gain_pre_agc", None))
-                        and self._chk_range_gain_pre_agc.isChecked()
-                    ),
-                )
-            )
-            if pre_agc_enabled and self._is_qt_alive(getattr(self, "_chk_range_gain", None)):
-                self._chk_range_gain.setChecked(True)
-            if self._is_qt_alive(getattr(self, "_chk_range_gain_pre_agc", None)):
-                self._chk_range_gain_pre_agc.setChecked(pre_agc_enabled)
+            pre_agc_enabled = bool(enabled.get("pre_agc_gain", False))
+            if self._is_qt_alive(getattr(self, "_chk_range_gain", None)):
+                self._chk_range_gain.setChecked(pre_agc_enabled)
         finally:
             self._syncing_filter_chain = False
 
@@ -1451,11 +1461,6 @@ class GprProfileViewer(QMainWindow):
         )
 
         # Display
-        self._spin_clip = QDoubleSpinBox()
-        self._spin_clip.setRange(50.0, 99.9); self._spin_clip.setSingleStep(1.0)
-        self._spin_clip.setValue(99.0)
-        self._spin_clip.setToolTip("Percentile di clip in normalize_display.")
-
         self._spin_gain = QDoubleSpinBox()
         self._spin_gain.setRange(0.1, 20.0); self._spin_gain.setSingleStep(0.5)
         self._spin_gain.setValue(1.0)
@@ -1487,56 +1492,35 @@ class GprProfileViewer(QMainWindow):
         self._chk_range_gain.setToolTip(
             "Gain in funzione della profondita' per recuperare riflessioni profonde."
         )
-        self._chk_range_gain_pre_agc = QCheckBox()
-        self._chk_range_gain_pre_agc.setChecked(True)
-        self._chk_range_gain_pre_agc.setEnabled(False)
-        self._chk_range_gain_pre_agc.setToolTip(
-            "Applica la curva di range gain prima dell'AGC.\n"
-            "Utile per attenuare l'onda diretta superficiale prima della normalizzazione AGC."
-        )
         self._spin_gain_surface = QDoubleSpinBox()
-        self._spin_gain_surface.setRange(0.1, 20.0)
+        self._spin_gain_surface.setRange(0.0, 100.0)
         self._spin_gain_surface.setSingleStep(0.1)
         self._spin_gain_surface.setValue(0.3)
         self._spin_gain_surface.setEnabled(False)
+        self._spin_gain_surface.setToolTip(
+            "Gain minimo della curva TVG (profondita' superficiale)."
+        )
         self._spin_gain_deep = QDoubleSpinBox()
-        self._spin_gain_deep.setRange(0.1, 60.0)
+        self._spin_gain_deep.setRange(0.0, 100.0)
         self._spin_gain_deep.setSingleStep(0.5)
         self._spin_gain_deep.setValue(6.0)
         self._spin_gain_deep.setEnabled(False)
-        self._cb_range_gain_curve = QComboBox()
-        self._cb_range_gain_curve.addItem("Linear", "linear")
-        self._cb_range_gain_curve.addItem("Power", "power")
-        self._cb_range_gain_curve.addItem("Exponential", "exp")
-        self._cb_range_gain_curve.addItem("Breakpoints", "breakpoints")
-        self._cb_range_gain_curve.setCurrentIndex(1)
-        self._cb_range_gain_curve.setEnabled(False)
-        self._spin_range_gain_power = QDoubleSpinBox()
-        self._spin_range_gain_power.setRange(0.2, 6.0)
-        self._spin_range_gain_power.setSingleStep(0.1)
-        self._spin_range_gain_power.setValue(1.8)
-        self._spin_range_gain_power.setEnabled(False)
+        self._spin_gain_deep.setToolTip(
+            "Gain massimo della curva TVG (profondita' profonda)."
+        )
         self._btn_range_gain_curve = QPushButton("Edit curve...")
         self._btn_range_gain_curve.setEnabled(False)
         self._btn_range_gain_curve.clicked.connect(self._open_range_gain_curve_editor)
 
         def _toggle_range_gain(checked):
-            mode = str(self._cb_range_gain_curve.currentData() or "power")
-            use_breakpoints = checked and mode == "breakpoints"
             self._spin_gain_surface.setEnabled(checked)
             self._spin_gain_deep.setEnabled(checked)
-            self._chk_range_gain_pre_agc.setEnabled(checked)
-            self._cb_range_gain_curve.setEnabled(checked)
-            self._spin_range_gain_power.setEnabled(checked and mode in {"power", "exp"})
-            self._btn_range_gain_curve.setEnabled(use_breakpoints)
+            self._btn_range_gain_curve.setEnabled(checked)
             self._apply_range_gain_change()
 
         self._chk_range_gain.toggled.connect(_toggle_range_gain)
-        self._chk_range_gain_pre_agc.toggled.connect(lambda _v: self._apply_range_gain_change())
         self._spin_gain_surface.valueChanged.connect(self._on_range_gain_surface_changed)
         self._spin_gain_deep.valueChanged.connect(self._on_range_gain_deep_changed)
-        self._spin_range_gain_power.valueChanged.connect(lambda _v: self._apply_range_gain_change())
-        self._cb_range_gain_curve.currentIndexChanged.connect(self._on_range_gain_mode_changed)
         for _chk in (
             self._chk_dewow,
             self._chk_timezero,
@@ -1545,7 +1529,6 @@ class GprProfileViewer(QMainWindow):
             self._chk_bp,
             self._chk_envelope,
             self._chk_range_gain,
-            self._chk_range_gain_pre_agc,
         ):
             try:
                 _chk.toggled.connect(self._on_filter_chain_source_toggled)
@@ -1610,6 +1593,19 @@ class GprProfileViewer(QMainWindow):
 
         self._filter_chain_widget = self._build_filter_chain_controls()
 
+        btn_apply = QPushButton("Applica")
+        btn_apply.clicked.connect(self._apply_processing)
+        btn_gain = QPushButton("Aggiorna gain")
+        btn_gain.setToolTip("Applica solo Gain display senza rieseguire i filtri.")
+        btn_gain.clicked.connect(self._apply_gain_only)
+        btn_bar = QWidget()
+        btn_bar_lay = QHBoxLayout(btn_bar)
+        btn_bar_lay.setContentsMargins(0, 0, 0, 0)
+        btn_bar_lay.setSpacing(6)
+        btn_bar_lay.addWidget(btn_apply)
+        btn_bar_lay.addWidget(btn_gain)
+        fl.addRow(btn_bar)
+
         if self._is_qt_alive(self._filter_chain_widget):
             fl.addRow("Pipeline chain:", self._filter_chain_widget)
 
@@ -1617,15 +1613,11 @@ class GprProfileViewer(QMainWindow):
         fl.addRow("Trim end traces:",    self._spin_trim_end)
         fl.addRow("  apply trim:",       self._btn_apply_trim)
         fl.addRow("Flip profile X:",     self._chk_flip_profile)
-        fl.addRow("Clip %:",             self._spin_clip)
         fl.addRow("Gain display:",       self._spin_gain)
-        fl.addRow("Range gain:",         self._chk_range_gain)
-        fl.addRow("  pre-AGC:",          self._chk_range_gain_pre_agc)
-        fl.addRow("  gain superficie:",  self._spin_gain_surface)
-        fl.addRow("  gain profondo:",    self._spin_gain_deep)
-        fl.addRow("  curva:",            self._cb_range_gain_curve)
-        fl.addRow("  power:",            self._spin_range_gain_power)
-        fl.addRow("  breakpoints:",      self._btn_range_gain_curve)
+        fl.addRow("Range gain (TVG):",   self._chk_range_gain)
+        fl.addRow("  gain min:",         self._spin_gain_surface)
+        fl.addRow("  gain max:",         self._spin_gain_deep)
+        fl.addRow("  Edit curve...:",    self._btn_range_gain_curve)
         fl.addRow("Hyperbola fit:",      self._chk_hyperbola)
         fl.addRow("  RDP:",              self._spin_hyperbola_rdp)
         fl.addRow("  velocity:",         self._lbl_hyperbola_vel)
@@ -1634,15 +1626,6 @@ class GprProfileViewer(QMainWindow):
         fl.addRow("  clear apex:",       self._btn_clear_hyper)
         fl.addRow(self._btn_save_gain_preset)
         fl.addRow(self._btn_load_gain_preset)
-
-        btn_apply = QPushButton("Applica")
-        btn_apply.clicked.connect(self._apply_processing)
-        fl.addRow(btn_apply)
-
-        btn_gain = QPushButton("Aggiorna gain")
-        btn_gain.setToolTip("Applica solo Clip% e Gain senza rieseguire i filtri.")
-        btn_gain.clicked.connect(self._apply_gain_only)
-        fl.addRow(btn_gain)
 
         # Timeslice
         grp_slice = QGroupBox("Timeslice")
@@ -2525,22 +2508,15 @@ class GprProfileViewer(QMainWindow):
             "bg_sample_end": int(self._spin_bg_sample_end.value()),
             "agc": bool(self._chk_agc.isChecked()),
             "agc_win": int(self._spin_agc.value()),
-            "pre_agc_gain": bool(
-                self._chk_range_gain.isChecked()
-                and hasattr(self, "_chk_range_gain_pre_agc")
-                and self._chk_range_gain_pre_agc.isChecked()
-            ),
+            "pre_agc_gain": bool(self._chk_range_gain.isChecked()),
             "pre_agc_surface_gain": float(self._spin_gain_surface.value()),
             "pre_agc_deep_gain": float(self._spin_gain_deep.value()),
-            "pre_agc_curve": str(self._cb_range_gain_curve.currentData() or "power"),
-            "pre_agc_power": float(self._spin_range_gain_power.value()),
             "pre_agc_breakpoints": [[float(x), float(y)] for x, y in rg_points.tolist()],
             "bandpass": bool(self._chk_bp.isChecked()),
             "envelope": bool(getattr(self, "_chk_envelope", None) and self._chk_envelope.isChecked()),
             "bp_low_mhz": float(bp_lo),
             "bp_high_mhz": float(bp_hi),
             "chain_order": self._current_chain_order(),
-            "clip_pct": float(self._spin_clip.value()),
         }
 
     def _apply_processing(self):
@@ -2617,10 +2593,16 @@ class GprProfileViewer(QMainWindow):
 
     def _sanitize_range_gain_breakpoints(self, points):
         arr = np.asarray(points if points is not None else [], dtype=np.float64).reshape(-1, 2)
+        gain_max = float(
+            getattr(self, "_spin_gain_deep", None).value()
+            if hasattr(self, "_spin_gain_deep")
+            else 100.0
+        )
+        gain_max = float(np.clip(gain_max, 1.0, 100.0))
         rows = []
         for x, y in arr:
             if np.isfinite(x) and np.isfinite(y):
-                rows.append((float(np.clip(x, 0.0, 1.0)), float(np.clip(y, 0.1, 80.0))))
+                rows.append((float(np.clip(x, 0.0, 1.0)), float(np.clip(y, 0.0, gain_max))))
         if not rows:
             rows = [(0.0, float(self._spin_gain_surface.value())), (1.0, float(self._spin_gain_deep.value()))]
         rows.sort(key=lambda p: p[0])
@@ -2667,16 +2649,8 @@ class GprProfileViewer(QMainWindow):
             self._range_gain_breakpoints[-1, 1] = float(self._spin_gain_deep.value())
             self._range_gain_breakpoints = self._sanitize_range_gain_breakpoints(self._range_gain_breakpoints)
 
-    def _range_gain_pre_agc_enabled(self) -> bool:
-        return bool(
-            getattr(self, "_chk_range_gain", None)
-            and self._chk_range_gain.isChecked()
-            and getattr(self, "_chk_range_gain_pre_agc", None)
-            and self._chk_range_gain_pre_agc.isChecked()
-        )
-
     def _apply_range_gain_change(self):
-        if self._range_gain_pre_agc_enabled():
+        if bool(getattr(self, "_chk_range_gain", None) and self._chk_range_gain.isChecked()):
             self._apply_processing()
         else:
             self._apply_gain_only()
@@ -2684,23 +2658,34 @@ class GprProfileViewer(QMainWindow):
     def _on_range_gain_surface_changed(self, _value: float):
         if self._updating_range_gain_controls:
             return
+        if self._spin_gain_surface.value() > self._spin_gain_deep.value():
+            self._updating_range_gain_controls = True
+            try:
+                self._spin_gain_deep.setValue(self._spin_gain_surface.value())
+            finally:
+                self._updating_range_gain_controls = False
         self._sync_range_gain_breakpoints_from_spins()
         self._apply_range_gain_change()
 
     def _on_range_gain_deep_changed(self, _value: float):
         if self._updating_range_gain_controls:
             return
+        if self._spin_gain_deep.value() < self._spin_gain_surface.value():
+            self._updating_range_gain_controls = True
+            try:
+                self._spin_gain_surface.setValue(self._spin_gain_deep.value())
+            finally:
+                self._updating_range_gain_controls = False
         self._sync_range_gain_breakpoints_from_spins()
         self._apply_range_gain_change()
 
-    def _on_range_gain_mode_changed(self, _idx: int):
-        checked = bool(self._chk_range_gain.isChecked())
-        mode = str(self._cb_range_gain_curve.currentData() or "power")
-        self._spin_range_gain_power.setEnabled(checked and mode in {"power", "exp"})
-        self._btn_range_gain_curve.setEnabled(checked and mode == "breakpoints")
-        self._apply_range_gain_change()
-
-    def _on_range_gain_curve_live_changed(self, points):
+    def _on_range_gain_curve_live_changed(self, points, gain_max=None):
+        if gain_max is not None and hasattr(self, "_spin_gain_deep"):
+            self._updating_range_gain_controls = True
+            try:
+                self._spin_gain_deep.setValue(float(np.clip(float(gain_max), 1.0, 100.0)))
+            finally:
+                self._updating_range_gain_controls = False
         self._range_gain_breakpoints = self._sanitize_range_gain_breakpoints(points)
         self._sync_range_gain_spins_from_breakpoints()
         if self._chk_range_gain.isChecked():
@@ -2714,6 +2699,7 @@ class GprProfileViewer(QMainWindow):
         dlg = _RangeGainCurveDialog(
             points=original,
             max_points=16,
+            gain_max=float(np.clip(self._spin_gain_deep.value(), 1.0, 100.0)),
             on_curve_changed=self._on_range_gain_curve_live_changed,
             parent=self,
         )
@@ -2952,21 +2938,14 @@ class GprProfileViewer(QMainWindow):
             "format": "gpr_gain_hyper_preset",
             "version": 2,
             "display_gain": float(self._spin_gain.value()),
-            "clip_pct": float(self._spin_clip.value()),
             "pipeline_chain": {
                 "order": [str(x) for x in chain_order],
                 "enabled": {str(k): bool(v) for k, v in chain_enabled.items()},
             },
             "range_gain": {
                 "enabled": bool(self._chk_range_gain.isChecked()),
-                "pre_agc": bool(
-                    hasattr(self, "_chk_range_gain_pre_agc")
-                    and self._chk_range_gain_pre_agc.isChecked()
-                ),
-                "surface_gain": float(self._spin_gain_surface.value()),
-                "deep_gain": float(self._spin_gain_deep.value()),
-                "curve_mode": str(self._cb_range_gain_curve.currentData() or "power"),
-                "power": float(self._spin_range_gain_power.value()),
+                "gain_min": float(self._spin_gain_surface.value()),
+                "gain_max": float(self._spin_gain_deep.value()),
                 "breakpoints": [[float(x), float(y)] for x, y in points.tolist()],
             },
             "hyperbola": {
@@ -2990,13 +2969,25 @@ class GprProfileViewer(QMainWindow):
 
         # Basic controls first.
         self._spin_gain.setValue(float(payload.get("display_gain", self._spin_gain.value())))
-        self._spin_clip.setValue(float(payload.get("clip_pct", self._spin_clip.value())))
 
         self._updating_range_gain_controls = True
         try:
-            self._spin_gain_surface.setValue(float(rg.get("surface_gain", self._spin_gain_surface.value())))
-            self._spin_gain_deep.setValue(float(rg.get("deep_gain", self._spin_gain_deep.value())))
-            self._spin_range_gain_power.setValue(float(rg.get("power", self._spin_range_gain_power.value())))
+            self._spin_gain_surface.setValue(
+                float(
+                    rg.get(
+                        "gain_min",
+                        rg.get("surface_gain", self._spin_gain_surface.value()),
+                    )
+                )
+            )
+            self._spin_gain_deep.setValue(
+                float(
+                    rg.get(
+                        "gain_max",
+                        rg.get("deep_gain", self._spin_gain_deep.value()),
+                    )
+                )
+            )
         finally:
             self._updating_range_gain_controls = False
 
@@ -3008,17 +2999,8 @@ class GprProfileViewer(QMainWindow):
         else:
             self._sync_range_gain_breakpoints_from_spins()
 
-        mode = str(rg.get("curve_mode", self._cb_range_gain_curve.currentData() or "power")).strip().lower()
-        mode_idx = 0
-        for i in range(self._cb_range_gain_curve.count()):
-            if str(self._cb_range_gain_curve.itemData(i) or "").strip().lower() == mode:
-                mode_idx = i
-                break
-        self._cb_range_gain_curve.setCurrentIndex(mode_idx)
-        if hasattr(self, "_chk_range_gain_pre_agc"):
-            self._chk_range_gain_pre_agc.setChecked(bool(rg.get("pre_agc", self._chk_range_gain_pre_agc.isChecked())))
         self._chk_range_gain.setChecked(bool(rg.get("enabled", self._chk_range_gain.isChecked())))
-        self._on_range_gain_mode_changed(self._cb_range_gain_curve.currentIndex())
+        self._btn_range_gain_curve.setEnabled(bool(self._chk_range_gain.isChecked()))
 
         # Hyperbola.
         self._spin_hyperbola_rdp.setValue(float(hy.get("rdp", self._spin_hyperbola_rdp.value())))
@@ -3145,31 +3127,11 @@ class GprProfileViewer(QMainWindow):
         n = max(1, int(n_samples))
         if not bool(getattr(self, "_chk_range_gain", None) and self._chk_range_gain.isChecked()):
             return np.ones((n, 1), dtype=np.float32)
-        g0 = float(getattr(self, "_spin_gain_surface", None).value() if hasattr(self, "_spin_gain_surface") else 1.0)
-        g1 = float(getattr(self, "_spin_gain_deep", None).value() if hasattr(self, "_spin_gain_deep") else 1.0)
-        g0 = max(g0, 1e-6)
-        g1 = max(g1, 1e-6)
         t = np.linspace(0.0, 1.0, n, dtype=np.float64)
-        mode = str(
-            getattr(self, "_cb_range_gain_curve", None).currentData()
-            if hasattr(self, "_cb_range_gain_curve")
-            else "power"
-        )
-        if mode == "breakpoints":
-            pts = self._sanitize_range_gain_breakpoints(self._range_gain_breakpoints)
-            x = np.asarray(pts[:, 0], dtype=np.float64)
-            y = np.asarray(pts[:, 1], dtype=np.float64)
-            g = np.interp(t, x, y)
-        else:
-            p = float(getattr(self, "_spin_range_gain_power", None).value() if hasattr(self, "_spin_range_gain_power") else 1.8)
-            p = float(np.clip(p, 0.2, 8.0))
-            if mode == "linear":
-                g = g0 + (g1 - g0) * t
-            elif mode == "exp":
-                # Exponential interpolation in log domain keeps monotonic behavior.
-                g = np.exp(np.log(g0) + (np.log(g1) - np.log(g0)) * t)
-            else:
-                g = g0 + (g1 - g0) * (t ** p)
+        pts = self._sanitize_range_gain_breakpoints(self._range_gain_breakpoints)
+        x = np.asarray(pts[:, 0], dtype=np.float64)
+        y = np.asarray(pts[:, 1], dtype=np.float64)
+        g = np.interp(t, x, y)
         g = np.clip(g, 1e-6, 1e6).astype(np.float32)
         return g.reshape(-1, 1)
 
@@ -3180,7 +3142,6 @@ class GprProfileViewer(QMainWindow):
         if proc.ndim != 2 or proc.size <= 0:
             return None
 
-        clip_pct = float(self._spin_clip.value()) if hasattr(self, "_spin_clip") else 95.0
         proc_disp = proc.astype(np.float32, copy=True)
         pre_agc_applied = bool(getattr(self, "_last_pipeline_params", {}).get("pre_agc_gain", False))
         if not pre_agc_applied:
@@ -3190,7 +3151,7 @@ class GprProfileViewer(QMainWindow):
                 proc_disp = (proc_disp * depth_gain).astype(np.float32, copy=False)
 
         # Normalize once, then apply only scalar display gain.
-        base = normalize_display(proc_disp, clip_pct=clip_pct).astype(np.float32, copy=False)
+        base = normalize_display(proc_disp).astype(np.float32, copy=False)
         gain = float(self._spin_gain.value()) if hasattr(self, "_spin_gain") else 1.0
         disp = (base * gain).astype(np.float32, copy=False)
         return np.clip(disp, -1.0, 1.0).astype(np.float32, copy=False)
@@ -3217,8 +3178,7 @@ class GprProfileViewer(QMainWindow):
             f"max={self._proc_data.max():.3f}  "
             f"disp: min={disp_min:.3f} max={disp_max:.3f}  "
             f"gain={gain:.1f}x  "
-            f"range_gain={'on' if self._chk_range_gain.isChecked() else 'off'}  "
-            f"pre_agc={'on' if self._range_gain_pre_agc_enabled() else 'off'}"
+            f"range_gain={'on' if self._chk_range_gain.isChecked() else 'off'}"
         )
         self._redraw()
 

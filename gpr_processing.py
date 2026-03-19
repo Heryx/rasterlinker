@@ -370,18 +370,27 @@ def hilbert_envelope(data: np.ndarray) -> np.ndarray:
     return out
 
 
-def normalize_display(data: np.ndarray, clip_pct: float = 98.0) -> np.ndarray:
-    vmax = float(np.percentile(np.abs(data), clip_pct))
+def normalize_display(data: np.ndarray) -> np.ndarray:
+    arr = np.asarray(data, dtype=np.float32)
+    finite = np.isfinite(arr)
+    if finite.any():
+        vmax = float(np.max(np.abs(arr[finite])))
+    else:
+        vmax = 0.0
     if vmax < 1e-12:
-        vmax = float(np.max(np.abs(data)))
-    if vmax < 1e-12:
+        if finite.any():
+            mn = float(np.nanmin(arr[finite]))
+            mx = float(np.nanmax(arr[finite]))
+        else:
+            mn = 0.0
+            mx = 0.0
         print(
             "[GPR] ATTENZIONE: dati nulli dopo processing. "
-            f"Shape={data.shape}  dtype={data.dtype}  "
-            f"min={float(data.min()):.4g}  max={float(data.max()):.4g}"
+            f"Shape={arr.shape}  dtype={arr.dtype}  "
+            f"min={mn:.4g}  max={mx:.4g}"
         )
-        return np.zeros_like(data)
-    return np.clip(data / vmax, -1.0, 1.0).astype(np.float32)
+        return np.zeros_like(arr)
+    return np.clip(arr / vmax, -1.0, 1.0).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -408,15 +417,12 @@ DEFAULT_PIPELINE = {
     "pre_agc_gain":     False,
     "pre_agc_surface_gain": 1.0,
     "pre_agc_deep_gain":    1.0,
-    "pre_agc_curve":        "power",  # linear|power|exp|breakpoints
-    "pre_agc_power":        1.8,
     "pre_agc_breakpoints":  None,     # [[x(0..1), gain], ...]
     "bandpass":         False,
     "bp_low_mhz":       100.0,
     "bp_high_mhz":      1200.0,
     "envelope":         False,
     "chain_order":      None,
-    "clip_pct":         98.0,
 }
 
 
@@ -438,7 +444,7 @@ FILTER_REGISTRY = {
         "param_key": "bg_removal",
     },
     "pre_agc_gain": {
-        "label": "Range gain (pre-AGC)",
+        "label": "Range gain (TVG)",
         "param_key": "pre_agc_gain",
     },
     "agc": {
@@ -456,8 +462,8 @@ DEFAULT_CHAIN_ORDER = [
     "timezero",
     "bg_removal",
     "pre_agc_gain",
-    "bandpass",
     "agc",
+    "bandpass",
     "envelope",
 ]
 
@@ -498,7 +504,12 @@ def _sanitize_gain_breakpoints(points) -> np.ndarray:
             continue
         if not (np.isfinite(x) and np.isfinite(y)):
             continue
-        rows.append((float(np.clip(x, 0.0, 1.0)), max(float(y), 1e-6)))
+        rows.append(
+            (
+                float(np.clip(x, 0.0, 1.0)),
+                float(np.clip(y, 0.0, 100.0)),
+            )
+        )
     if len(rows) < 2:
         rows = [(0.0, 1.0), (1.0, 1.0)]
     arr = np.asarray(rows, dtype=np.float64)
@@ -519,22 +530,15 @@ def _sanitize_gain_breakpoints(points) -> np.ndarray:
 
 def _build_pre_agc_gain(n_samples: int, p: dict) -> np.ndarray:
     n = max(1, int(n_samples))
-    g0 = max(float(p.get("pre_agc_surface_gain", 1.0) or 1.0), 1e-6)
-    g1 = max(float(p.get("pre_agc_deep_gain", 1.0) or 1.0), 1e-6)
-    mode = str(p.get("pre_agc_curve", "power") or "power").strip().lower()
+    g0 = max(float(p.get("pre_agc_surface_gain", 1.0) or 1.0), 0.0)
+    g1 = max(float(p.get("pre_agc_deep_gain", 1.0) or 1.0), 0.0)
     t = np.linspace(0.0, 1.0, n, dtype=np.float64)
-    if mode == "breakpoints":
-        pts = _sanitize_gain_breakpoints(p.get("pre_agc_breakpoints"))
+    pts = _sanitize_gain_breakpoints(p.get("pre_agc_breakpoints"))
+    if pts.shape[0] >= 2:
         g = np.interp(t, pts[:, 0], pts[:, 1])
     else:
-        power = float(np.clip(float(p.get("pre_agc_power", 1.8) or 1.8), 0.2, 8.0))
-        if mode == "linear":
-            g = g0 + (g1 - g0) * t
-        elif mode == "exp":
-            g = np.exp(np.log(g0) + (np.log(g1) - np.log(g0)) * t)
-        else:
-            g = g0 + (g1 - g0) * (t ** power)
-    g = np.clip(g, 1e-6, 1e6).astype(np.float32, copy=False)
+        g = g0 + (g1 - g0) * t
+    g = np.clip(g, 0.0, 1e6).astype(np.float32, copy=False)
     return g.reshape(-1, 1)
 
 
@@ -544,7 +548,7 @@ def apply_pre_bg_pipeline(
     dt_ns: float = 0.117,
 ) -> np.ndarray:
     """
-    Applica solo le fasi che precedono il BG removal (dewow + time-zero + bandpass).
+    Applica solo le fasi che precedono il BG removal (dewow + time-zero).
 
     Usata per il calcolo della traccia di riferimento nel modo grid_by_grid
     a due passate:
@@ -566,13 +570,6 @@ def apply_pre_bg_pipeline(
             mode         = str(p.get("tz_mode",        "line_by_line")),
             threshold    = float(p.get("tz_threshold",  0.2)),
             backup_nsamp = int(p.get("tz_backup_nsamp", 4)),
-        )
-    if p["bandpass"]:
-        out = bandpass_filter(
-            out,
-            dt_ns,
-            float(p["bp_low_mhz"]),
-            float(p["bp_high_mhz"]),
         )
     return out
 
@@ -679,7 +676,7 @@ def apply_pipeline(
             continue
 
     if normalize_output:
-        out = normalize_display(out, clip_pct=float(p["clip_pct"]))
+        out = normalize_display(out)
         _log("normalize (finale)", out)
     else:
         out = out.astype(np.float32, copy=False)

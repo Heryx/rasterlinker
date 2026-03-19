@@ -890,8 +890,7 @@ class Gpr3dViewerDialog(QDialog):
                 out = raw.copy()
         if normalize_display is not None:
             try:
-                clip_pct = float(params.get("clip_pct", 98.0) if params else 98.0)
-                out = normalize_display(out, clip_pct=clip_pct)
+                out = normalize_display(out)
             except Exception:
                 pass
 
