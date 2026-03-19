@@ -1323,7 +1323,7 @@ class GprProfileViewer(QMainWindow):
         fl  = QFormLayout(grp)
 
         # Dewow
-        self._chk_dewow  = QCheckBox(); self._chk_dewow.setChecked(True)
+        self._chk_dewow  = QCheckBox(); self._chk_dewow.setChecked(False)
         self._spin_dewow = QSpinBox();  self._spin_dewow.setRange(4, 256); self._spin_dewow.setValue(16)
 
         # Time-zero
@@ -1358,7 +1358,7 @@ class GprProfileViewer(QMainWindow):
         # BG removal
         # ------------------------------------------------------------------
         self._chk_bg = QCheckBox()
-        self._chk_bg.setChecked(True)
+        self._chk_bg.setChecked(False)
         self._chk_bg.setToolTip(
             "Background Removal (GPR-SLICE section Background Removal, pag. 166).\n"
             "Sottrae la traccia media per eliminare banding orizzontale.\n\n"
@@ -1432,7 +1432,7 @@ class GprProfileViewer(QMainWindow):
         self._chk_bg_auto.toggled.connect(_toggle_bg_auto)
 
         # AGC
-        self._chk_agc  = QCheckBox(); self._chk_agc.setChecked(True)
+        self._chk_agc  = QCheckBox(); self._chk_agc.setChecked(False)
         self._spin_agc = QSpinBox();  self._spin_agc.setRange(8, 512); self._spin_agc.setValue(128)
 
         # Bandpass
@@ -1453,12 +1453,12 @@ class GprProfileViewer(QMainWindow):
         # Display
         self._spin_clip = QDoubleSpinBox()
         self._spin_clip.setRange(50.0, 99.9); self._spin_clip.setSingleStep(1.0)
-        self._spin_clip.setValue(95.0)
+        self._spin_clip.setValue(99.0)
         self._spin_clip.setToolTip("Percentile di clip in normalize_display.")
 
         self._spin_gain = QDoubleSpinBox()
         self._spin_gain.setRange(0.1, 20.0); self._spin_gain.setSingleStep(0.5)
-        self._spin_gain.setValue(2.0)
+        self._spin_gain.setValue(1.0)
         self._spin_gain.setToolTip("Moltiplicatore display post-normalize.")
 
         self._chk_flip_profile = QCheckBox()
@@ -2561,6 +2561,28 @@ class GprProfileViewer(QMainWindow):
                 return
         params = self._current_processing_params()
         self._last_pipeline_params = dict(params)
+        has_active_filters = any(
+            bool(params.get(k, False))
+            for k in (
+                "timezero",
+                "dewow",
+                "bg_removal",
+                "bandpass",
+                "agc",
+                "envelope",
+                "pre_agc_gain",
+            )
+        )
+        if not has_active_filters:
+            self._proc_data = np.asarray(self._raw_data, dtype=np.float32, copy=True)
+            self._refresh_bp_histogram()
+            self._apply_gain_only()
+            self._safe_set_text(
+                self._lbl_status,
+                "Modalita' RAW: nessun filtro pipeline attivo.",
+            )
+            self._request_preview_update(immediate=False)
+            return
         prof = self._profiles[self._prof_idx]
         try:
             self._proc_data = apply_pipeline(
