@@ -45,8 +45,9 @@ def _bandpass_fft(
         return np.array(data, dtype=np.float32, copy=True)
 
     # Cosine-tapered passband to reduce Gibbs ringing vs. rectangular mask.
+    # Use a wider transition (10% per edge) to further suppress ringing.
     bw = max(1e-9, f_hi - f_lo)
-    margin = max(1e-9, bw * 0.05)
+    margin = max(1e-9, bw * 0.10)
     lo1 = f_lo
     lo2 = f_lo + margin
     hi1 = f_hi - margin
@@ -444,6 +445,7 @@ DEFAULT_CHAIN_ORDER = [
     "dewow",
     "bg_removal",
     "bandpass",
+    "pre_agc_gain",
     "agc",
     "envelope",
 ]
