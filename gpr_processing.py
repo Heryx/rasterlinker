@@ -452,8 +452,8 @@ FILTER_REGISTRY = {
 }
 
 DEFAULT_CHAIN_ORDER = [
-    "timezero",
     "dewow",
+    "timezero",
     "bg_removal",
     "pre_agc_gain",
     "bandpass",
@@ -544,7 +544,7 @@ def apply_pre_bg_pipeline(
     dt_ns: float = 0.117,
 ) -> np.ndarray:
     """
-    Applica solo le fasi che precedono il BG removal (dewow + bandpass + time-zero).
+    Applica solo le fasi che precedono il BG removal (dewow + time-zero + bandpass).
 
     Usata per il calcolo della traccia di riferimento nel modo grid_by_grid
     a due passate:
@@ -559,13 +559,6 @@ def apply_pre_bg_pipeline(
     out = data.copy()
     if p["dewow"]:
         out = dewow(out, window=int(p["dewow_win"]))
-    if p["bandpass"]:
-        out = bandpass_filter(
-            out,
-            dt_ns,
-            float(p["bp_low_mhz"]),
-            float(p["bp_high_mhz"]),
-        )
     if p["timezero"]:
         out = time_zero_correction(
             out,
@@ -573,6 +566,13 @@ def apply_pre_bg_pipeline(
             mode         = str(p.get("tz_mode",        "line_by_line")),
             threshold    = float(p.get("tz_threshold",  0.2)),
             backup_nsamp = int(p.get("tz_backup_nsamp", 4)),
+        )
+    if p["bandpass"]:
+        out = bandpass_filter(
+            out,
+            dt_ns,
+            float(p["bp_low_mhz"]),
+            float(p["bp_high_mhz"]),
         )
     return out
 
