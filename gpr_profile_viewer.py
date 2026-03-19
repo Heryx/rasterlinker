@@ -2574,7 +2574,7 @@ class GprProfileViewer(QMainWindow):
             )
         )
         if not has_active_filters:
-            self._proc_data = np.asarray(self._raw_data, dtype=np.float32, copy=True)
+            self._proc_data = np.array(self._raw_data, dtype=np.float32, copy=True)
             self._refresh_bp_histogram()
             self._apply_gain_only()
             self._safe_set_text(

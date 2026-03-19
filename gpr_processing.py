@@ -36,13 +36,13 @@ def _bandpass_fft(
     N = int(data.shape[0])
     dt_s = float(dt_ns) * 1e-9
     if N <= 1 or (not np.isfinite(dt_s)) or dt_s <= 0.0:
-        return np.asarray(data, dtype=np.float32, copy=True)
+        return np.array(data, dtype=np.float32, copy=True)
 
     freqs = np.fft.rfftfreq(N, d=dt_s)
     f_lo = max(0.0, float(low_mhz) * 1e6)
     f_hi = max(f_lo, float(high_mhz) * 1e6)
     if f_hi <= f_lo:
-        return np.asarray(data, dtype=np.float32, copy=True)
+        return np.array(data, dtype=np.float32, copy=True)
 
     # Cosine-tapered passband to reduce Gibbs ringing vs. rectangular mask.
     bw = max(1e-9, f_hi - f_lo)
