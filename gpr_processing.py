@@ -234,18 +234,41 @@ def background_removal(
     """
     d64      = data.astype(np.float64)
     n_s, n_t = d64.shape
+    try:
+        win_req = int(window)
+    except Exception:
+        win_req = 0
+    win_eff = int(win_req)
+    if win_eff > n_t and n_t > 0:
+        # Prevent oversized windows from silently behaving inconsistently.
+        win_eff = int(n_t)
+        print(
+            f"[GPR] bg_removal: win clampato a n_traces={n_t} "
+            f"(richiesto={win_req})."
+        )
 
     # Diagnostico
     row_std = d64.std(axis=1)
     n_zero  = int(np.count_nonzero(row_std == 0.0))
     s_lo    = max(0, int(sample_start))
     s_hi    = min(n_s, int(sample_end)) if sample_end > 0 else n_s
+    if sample_end > 0 and s_hi <= s_lo:
+        print(
+            f"[GPR] bg_removal: range campioni non valido "
+            f"[{s_lo}:{s_hi}], imposto A=0 (fino alla fine)."
+        )
+        s_hi = n_s
     print(
-        f"[GPR] bg_diag: mode={mode} win={window if window > 0 else 'auto'}  "
+        f"[GPR] bg_diag: mode={mode} win={win_eff if win_eff > 0 else 'auto'}  "
         f"samples=[{s_lo}:{s_hi}/{n_s}]  "
         f"mean_inter-trace_std={row_std.mean():.6g}  "
         f"rows_zero_std={n_zero}/{n_s}"
     )
+    if (s_hi - s_lo) < 64:
+        print(
+            f"[GPR] bg_removal: ATTENZIONE finestra campioni corta "
+            f"({s_hi - s_lo} campioni). Potresti vedere bande residue."
+        )
 
     if s_lo >= s_hi:
         print("[GPR] bg_removal: finestra campioni vuota, nessuna modifica.")
@@ -278,7 +301,7 @@ def background_removal(
     # ---------------------------------------------------------------
     # line_by_line — auto: media globale del sub-range
     # ---------------------------------------------------------------
-    if window <= 0 or window >= n_t:
+    if win_eff <= 0 or win_eff >= n_t:
         mean_trace = sub.mean(axis=1, keepdims=True)
         print(f"[GPR] bg_removal: global mean subtracted  n_t={n_t}  s=[{s_lo}:{s_hi}]")
         out = d64.copy()
@@ -288,7 +311,7 @@ def background_removal(
     # ---------------------------------------------------------------
     # line_by_line — finestra scorrevole lungo asse tracce
     # ---------------------------------------------------------------
-    half   = window // 2
+    half   = win_eff // 2
     n_sub  = sub.shape[1]
     idx    = np.arange(n_sub)
     hi_t   = np.minimum(n_sub - 1, idx + half)
@@ -301,7 +324,7 @@ def background_removal(
     win_len    = (hi_t - lo_t + 1).reshape(1, -1)
     local_mean = (sum_hi - sum_lo) / win_len
     print(
-        f"[GPR] bg_removal: sliding win={window}  s=[{s_lo}:{s_hi}]  "
+        f"[GPR] bg_removal: sliding win={win_eff}  s=[{s_lo}:{s_hi}]  "
         f"eff_win=[{(hi_t-lo_t+1).min()},{(hi_t-lo_t+1).max()}]"
     )
     out = d64.copy()

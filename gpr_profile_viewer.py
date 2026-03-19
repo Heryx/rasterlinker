@@ -1190,7 +1190,7 @@ class GprProfileViewer(QMainWindow):
             fl.addRow("Auto:", self._chk_bg_auto)
             fl.addRow("Finestra:", self._spin_bg_window)
             fl.addRow("Da campione:", self._spin_bg_sample_start)
-            fl.addRow("A campione:", self._spin_bg_sample_end)
+            fl.addRow("A campione (0=fine):", self._spin_bg_sample_end)
             return host
 
         if sid == "bandpass":
@@ -1614,10 +1614,9 @@ class GprProfileViewer(QMainWindow):
         fl.addRow("  apply trim:",       self._btn_apply_trim)
         fl.addRow("Flip profile X:",     self._chk_flip_profile)
         fl.addRow("Gain display:",       self._spin_gain)
-        fl.addRow("Range gain (TVG):",   self._chk_range_gain)
-        fl.addRow("  gain min:",         self._spin_gain_surface)
-        fl.addRow("  gain max:",         self._spin_gain_deep)
-        fl.addRow("  Edit curve...:",    self._btn_range_gain_curve)
+        # TVG controls are exposed directly inside the pipeline step "Range gain (TVG)".
+        # Do not duplicate those widgets here, otherwise Qt reparents them and the
+        # controls disappear from the pipeline block.
         fl.addRow("Hyperbola fit:",      self._chk_hyperbola)
         fl.addRow("  RDP:",              self._spin_hyperbola_rdp)
         fl.addRow("  velocity:",         self._lbl_hyperbola_vel)
@@ -2491,6 +2490,11 @@ class GprProfileViewer(QMainWindow):
         """Return current processing controls as pipeline params."""
         bg_auto = bool(self._chk_bg_auto.isChecked())
         bg_window = 0 if bg_auto else int(self._spin_bg_window.value())
+        bg_sample_start = int(self._spin_bg_sample_start.value())
+        bg_sample_end = int(self._spin_bg_sample_end.value())
+        # Defensive UX: if end <= start, interpret as "to end" instead of empty range.
+        if bg_sample_end > 0 and bg_sample_end <= bg_sample_start:
+            bg_sample_end = 0
         bp_lo, bp_hi = self._bandpass_limits()
         rg_points = self._sanitize_range_gain_breakpoints(self._range_gain_breakpoints)
         return {
@@ -2504,8 +2508,8 @@ class GprProfileViewer(QMainWindow):
             "bg_removal": bool(self._chk_bg.isChecked()),
             "bg_mode": str(self._cb_bg_mode.currentData() or "line_by_line"),
             "bg_window": int(bg_window),
-            "bg_sample_start": int(self._spin_bg_sample_start.value()),
-            "bg_sample_end": int(self._spin_bg_sample_end.value()),
+            "bg_sample_start": int(bg_sample_start),
+            "bg_sample_end": int(bg_sample_end),
             "agc": bool(self._chk_agc.isChecked()),
             "agc_win": int(self._spin_agc.value()),
             "pre_agc_gain": bool(self._chk_range_gain.isChecked()),
@@ -3689,19 +3693,28 @@ class GprProfileViewer(QMainWindow):
 
         # Full redraw only when trace index or data changes.
         axw.clear()
+        finite_fil = np.isfinite(trace_f_plot)
         finite_raw = np.isfinite(trace_r_plot)
+        scale_fil = 0.0
+        if finite_fil.any():
+            try:
+                scale_fil = float(np.nanpercentile(np.abs(trace_f_plot[finite_fil]), 99.0))
+            except Exception:
+                scale_fil = float(np.nanmax(np.abs(trace_f_plot[finite_fil])))
+        scale_raw = 0.0
         if finite_raw.any():
             try:
-                scale = float(np.nanpercentile(np.abs(trace_r_plot[finite_raw]), 99.0))
+                scale_raw = float(np.nanpercentile(np.abs(trace_r_plot[finite_raw]), 99.0))
             except Exception:
-                scale = float(np.nanmax(np.abs(trace_r_plot[finite_raw])))
-        else:
-            scale = 1.0
+                scale_raw = float(np.nanmax(np.abs(trace_r_plot[finite_raw])))
+        # Use processed trace range as primary A-scan scale; fallback to raw if needed.
+        scale = scale_fil if (np.isfinite(scale_fil) and scale_fil > 1e-9) else scale_raw
         if (not np.isfinite(scale)) or scale <= 1e-9:
             scale = 1.0
 
-        raw_norm = np.nan_to_num(trace_r_plot / scale, nan=0.0, posinf=0.0, neginf=0.0)
         fil_norm = np.nan_to_num(trace_f_plot / scale, nan=0.0, posinf=0.0, neginf=0.0)
+        raw_norm = np.nan_to_num(trace_r_plot / scale, nan=0.0, posinf=0.0, neginf=0.0)
+        raw_norm = np.clip(raw_norm, -20.0, 20.0)
 
         axw.plot(raw_norm, depth_axis, color="#dc5050", lw=0.9, alpha=0.45, antialiased=True)
         axw.plot(fil_norm, depth_axis, color="#50dc78", lw=0.9, alpha=0.95, antialiased=True)
