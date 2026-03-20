@@ -11,6 +11,8 @@ import json
 import os
 import glob
 import re
+import shutil
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
@@ -456,6 +458,11 @@ class GprProfileViewer(QMainWindow):
         self._updating_xpan = False
 
         self._build_ui()
+        # Auto-import profili da GPR_Processing/project.json se presente.
+        try:
+            QTimer.singleShot(0, self._try_import_saved_gpr_processing_project)
+        except Exception:
+            pass
 
     def _is_qt_alive(self, obj) -> bool:
         if obj is None:
@@ -1003,8 +1010,15 @@ class GprProfileViewer(QMainWindow):
             ok = bool(QgsProject.instance().write())
         except Exception:
             ok = False
-        if ok:
-            self._safe_set_text(self._lbl_status, "Progetto QGIS salvato.")
+        meta_ok = False
+        try:
+            meta_ok = bool(self._save_gpr_processing_project_meta())
+        except Exception:
+            meta_ok = False
+        if ok and meta_ok:
+            self._safe_set_text(self._lbl_status, "Progetto QGIS + stato GPR salvati.")
+        elif ok and (not meta_ok):
+            self._safe_set_text(self._lbl_status, "Progetto QGIS salvato, stato GPR non salvato.")
         else:
             QMessageBox.warning(
                 self,
@@ -1042,6 +1056,10 @@ class GprProfileViewer(QMainWindow):
         act_import.setShortcut("Ctrl+O")
         act_import.triggered.connect(self.import_files)
         m_file.addAction(act_import)
+
+        act_import_saved = QAction("Importa progetto GPR salvato", self)
+        act_import_saved.triggered.connect(lambda: self._try_import_saved_gpr_processing_project(force=True))
+        m_file.addAction(act_import_saved)
 
         act_open_pm = QAction("Apri Project Manager...", self)
         act_open_pm.setShortcut("Ctrl+Shift+O")
@@ -1449,6 +1467,9 @@ class GprProfileViewer(QMainWindow):
         self._chk_bp     = QCheckBox(); self._chk_bp.setChecked(False)
         self._spin_bp_lo = QDoubleSpinBox(); self._spin_bp_lo.setRange(1, 3000); self._spin_bp_lo.setValue(200)
         self._spin_bp_hi = QDoubleSpinBox(); self._spin_bp_hi.setRange(1, 3000); self._spin_bp_hi.setValue(1200)
+        # Avoid transient low/high resets while typing (e.g. "1200" passes through 1->12->120).
+        self._spin_bp_lo.setKeyboardTracking(False)
+        self._spin_bp_hi.setKeyboardTracking(False)
         self._chk_bp.toggled.connect(self._on_bp_controls_changed)
         self._spin_bp_lo.valueChanged.connect(self._on_bp_spin_changed)
         self._spin_bp_hi.valueChanged.connect(self._on_bp_spin_changed)
@@ -1819,6 +1840,34 @@ class GprProfileViewer(QMainWindow):
             "Fast: molto piu' veloce su griglie grandi (kNN vettorizzato).\n"
             "Quality: ricerca entro raggio per cella (piu' lenta ma piu' fedele localmente)."
         )
+        self._spin_slice_search_radius = QDoubleSpinBox()
+        self._spin_slice_search_radius.setRange(0.0, 100.0)
+        self._spin_slice_search_radius.setDecimals(3)
+        self._spin_slice_search_radius.setSingleStep(0.05)
+        self._spin_slice_search_radius.setValue(0.0)
+        self._spin_slice_search_radius.setSuffix(" m")
+        self._spin_slice_search_radius.setToolTip(
+            "Search radius IDW in metri.\n"
+            "0 = automatico (stimato dai dati)."
+        )
+        self._cb_slice_pipeline_source = QComboBox()
+        self._cb_slice_pipeline_source.addItem("Auto (Hilbert -> ultimo attivo)", "auto")
+        self._cb_slice_pipeline_source.addItem("Hilbert (Envelope)", "envelope")
+        self._cb_slice_pipeline_source.addItem("AGC", "agc")
+        self._cb_slice_pipeline_source.addItem("Bandpass", "bandpass")
+        self._cb_slice_pipeline_source.addItem("BG removal", "bg_removal")
+        self._cb_slice_pipeline_source.addItem("Time-zero", "timezero")
+        self._cb_slice_pipeline_source.addItem("Dewow", "dewow")
+        self._cb_slice_pipeline_source.addItem("RAW (nessun filtro)", "raw")
+        self._cb_slice_pipeline_source.addItem("Manuale (usa opzioni avanzate)", "manual")
+        self._cb_slice_pipeline_source.setCurrentIndex(0)
+        self._cb_slice_pipeline_source.setToolTip(
+            "Sorgente dati per timeslice basata sulla pipeline di Elaborazione.\n"
+            "Auto: usa Hilbert se attivo, altrimenti l'ultimo step attivo."
+        )
+        self._cb_slice_pipeline_source.currentIndexChanged.connect(
+            lambda _v: self._sync_slice_source_mode()
+        )
         self._chk_slice_use_hilbert = QCheckBox()
         self._chk_slice_use_hilbert.setChecked(True)
         self._chk_slice_use_hilbert.setToolTip(
@@ -1894,47 +1943,69 @@ class GprProfileViewer(QMainWindow):
         self._spin_smooth_sigma.setValue(0.8); self._spin_smooth_sigma.setEnabled(True)
         self._chk_smooth.toggled.connect(self._spin_smooth_sigma.setEnabled)
 
-        fl_slice.addRow("Profili:",           self._lbl_slice_profiles)
-        fl_slice.addRow("Output folder:",     out_row)
-        fl_slice.addRow("Spessore slice:",    self._spin_slice_thickness)
-        fl_slice.addRow("  lock:",            self._chk_slice_thickness_locked)
-        fl_slice.addRow("Preset:",            self._cb_slice_preset)
-        fl_slice.addRow("  azione:",          self._btn_slice_preset_apply)
-        fl_slice.addRow("Slice colormap:",    self._cb_slice_cmap)
-        fl_slice.addRow("Slice clip min %:",  self._spin_slice_vmin_pct)
-        fl_slice.addRow("Slice clip max %:",  self._spin_slice_vmax_pct)
-        fl_slice.addRow("Estrazione:",         self._cb_slice_extraction)
-        fl_slice.addRow("Usa Hilbert:",        self._chk_slice_use_hilbert)
-        fl_slice.addRow("Processing pre-slice:", self._chk_slice_use_processing)
-        fl_slice.addRow("BG pre-slice:",       self._chk_slice_bg)
-        fl_slice.addRow("  modo BG:",          self._cb_slice_bg_mode)
-        fl_slice.addRow("  auto BG:",          self._chk_slice_bg_auto)
-        fl_slice.addRow("  finestra BG:",      self._spin_slice_bg_window)
-        fl_slice.addRow("  BG da campione:",   self._spin_slice_bg_sample_start)
-        fl_slice.addRow("  BG a campione:",    self._spin_slice_bg_sample_end)
-        fl_slice.addRow("Trace stacking:",     self._spin_slice_stack_n)
-        fl_slice.addRow("  kernel:",           self._cb_slice_stack_kernel)
-        fl_slice.addRow("Flip pre-slice:",     self._cb_slice_flip_mode)
-        fl_slice.addRow("Topographic corr.:",  self._chk_slice_topographic)
-        fl_slice.addRow("  topo reference:",   self._cb_slice_topo_ref_mode)
-        fl_slice.addRow("  custom elev:",      self._spin_slice_topo_ref_custom)
-        fl_slice.addRow("Normalizza canali:",  self._chk_normalize_ch)
-        fl_slice.addRow("Filtro ampiezza:",    self._chk_amplitude_filter)
-        fl_slice.addRow("  sigma:",            self._spin_amplitude_sigma)
-        fl_slice.addRow("IDW mode:",           self._cb_slice_idw_mode)
-        fl_slice.addRow("Potenza IDW (p):",    self._spin_slice_idw_power)
-        fl_slice.addRow("Overlap slice:",      self._spin_slice_overlap_pct)
-        fl_slice.addRow("Blanking (m):",       self._spin_slice_blanking_m)
-        fl_slice.addRow("IDW anisotropo:",     self._chk_anisotropic_idw)
-        fl_slice.addRow("  raggio auto:",      self._chk_auto_radius)
-        fl_slice.addRow("Bilancia profili:",   self._chk_slice_balance_profiles)
-        fl_slice.addRow("Raggio vs profondita':", self._spin_slice_depth_radius_factor)
-        fl_slice.addRow("  min points:",       self._spin_slice_min_points)
-        fl_slice.addRow("Profili paralleli:",  self._chk_slice_parallel_profiles)
-        fl_slice.addRow("  workers (0=auto):", self._spin_slice_profile_workers)
-        fl_slice.addRow("Fill NoData:",        self._chk_fill_nodata)
-        fl_slice.addRow("Smooth gaussiano:",   self._chk_smooth)
-        fl_slice.addRow("  sigma:",            self._spin_smooth_sigma)
+        fl_slice.addRow("Profili:",            self._lbl_slice_profiles)
+        fl_slice.addRow("Output folder:",      out_row)
+        fl_slice.addRow("Spessore slice:",     self._spin_slice_thickness)
+        fl_slice.addRow("  lock:",             self._chk_slice_thickness_locked)
+        fl_slice.addRow("Interpolazione:",     self._cb_slice_idw_mode)
+        fl_slice.addRow("Search radius (m):",  self._spin_slice_search_radius)
+        fl_slice.addRow("Sorgente pipeline:",  self._cb_slice_pipeline_source)
+
+        self._btn_slice_advanced = QToolButton()
+        self._btn_slice_advanced.setCheckable(True)
+        self._btn_slice_advanced.setChecked(False)
+        self._btn_slice_advanced.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self._btn_slice_advanced.setText("▶ Avanzato")
+
+        self._slice_advanced_host = QWidget()
+        fl_slice_adv = QFormLayout(self._slice_advanced_host)
+        fl_slice_adv.setContentsMargins(0, 0, 0, 0)
+        fl_slice_adv.setSpacing(4)
+        fl_slice_adv.addRow("Preset:",             self._cb_slice_preset)
+        fl_slice_adv.addRow("  azione:",           self._btn_slice_preset_apply)
+        fl_slice_adv.addRow("Slice colormap:",     self._cb_slice_cmap)
+        fl_slice_adv.addRow("Slice clip min %:",   self._spin_slice_vmin_pct)
+        fl_slice_adv.addRow("Slice clip max %:",   self._spin_slice_vmax_pct)
+        fl_slice_adv.addRow("Estrazione:",         self._cb_slice_extraction)
+        fl_slice_adv.addRow("Usa Hilbert:",        self._chk_slice_use_hilbert)
+        fl_slice_adv.addRow("Processing pre-slice:", self._chk_slice_use_processing)
+        fl_slice_adv.addRow("BG pre-slice:",       self._chk_slice_bg)
+        fl_slice_adv.addRow("  modo BG:",          self._cb_slice_bg_mode)
+        fl_slice_adv.addRow("  auto BG:",          self._chk_slice_bg_auto)
+        fl_slice_adv.addRow("  finestra BG:",      self._spin_slice_bg_window)
+        fl_slice_adv.addRow("  BG da campione:",   self._spin_slice_bg_sample_start)
+        fl_slice_adv.addRow("  BG a campione:",    self._spin_slice_bg_sample_end)
+        fl_slice_adv.addRow("Trace stacking:",     self._spin_slice_stack_n)
+        fl_slice_adv.addRow("  kernel:",           self._cb_slice_stack_kernel)
+        fl_slice_adv.addRow("Flip pre-slice:",     self._cb_slice_flip_mode)
+        fl_slice_adv.addRow("Topographic corr.:",  self._chk_slice_topographic)
+        fl_slice_adv.addRow("  topo reference:",   self._cb_slice_topo_ref_mode)
+        fl_slice_adv.addRow("  custom elev:",      self._spin_slice_topo_ref_custom)
+        fl_slice_adv.addRow("Normalizza canali:",  self._chk_normalize_ch)
+        fl_slice_adv.addRow("Filtro ampiezza:",    self._chk_amplitude_filter)
+        fl_slice_adv.addRow("  sigma:",            self._spin_amplitude_sigma)
+        fl_slice_adv.addRow("Potenza IDW (p):",    self._spin_slice_idw_power)
+        fl_slice_adv.addRow("Overlap slice:",      self._spin_slice_overlap_pct)
+        fl_slice_adv.addRow("Blanking (m):",       self._spin_slice_blanking_m)
+        fl_slice_adv.addRow("IDW anisotropo:",     self._chk_anisotropic_idw)
+        fl_slice_adv.addRow("  raggio auto:",      self._chk_auto_radius)
+        fl_slice_adv.addRow("Bilancia profili:",   self._chk_slice_balance_profiles)
+        fl_slice_adv.addRow("Raggio vs profondita':", self._spin_slice_depth_radius_factor)
+        fl_slice_adv.addRow("  min points:",       self._spin_slice_min_points)
+        fl_slice_adv.addRow("Profili paralleli:",  self._chk_slice_parallel_profiles)
+        fl_slice_adv.addRow("  workers (0=auto):", self._spin_slice_profile_workers)
+        fl_slice_adv.addRow("Fill NoData:",        self._chk_fill_nodata)
+        fl_slice_adv.addRow("Smooth gaussiano:",   self._chk_smooth)
+        fl_slice_adv.addRow("  sigma:",            self._spin_smooth_sigma)
+        self._slice_advanced_host.setVisible(False)
+
+        def _toggle_slice_advanced(checked: bool):
+            self._slice_advanced_host.setVisible(bool(checked))
+            self._btn_slice_advanced.setText(("▼ Avanzato" if checked else "▶ Avanzato"))
+
+        self._btn_slice_advanced.toggled.connect(_toggle_slice_advanced)
+        fl_slice.addRow(self._btn_slice_advanced)
+        fl_slice.addRow(self._slice_advanced_host)
 
         self._cb_preview_quality = QComboBox()
         self._cb_preview_quality.addItem("Bassa", "low")
@@ -2077,6 +2148,7 @@ class GprProfileViewer(QMainWindow):
             reset_index=True,
             redraw=False,
         )
+        self._sync_slice_source_mode()
         self._sync_filter_chain_from_controls()
         # Return single widget for one dock; keep second None for backward compatibility.
         return tabs, None
@@ -2205,12 +2277,13 @@ class GprProfileViewer(QMainWindow):
                 finally:
                     self._spin_bp_hi.blockSignals(False)
             else:
-                lo = hi - 1.0
-                self._spin_bp_lo.blockSignals(True)
+                # Keep LOW stable when user edits HIGH; clamp HIGH above LOW.
+                hi = lo + 1.0
+                self._spin_bp_hi.blockSignals(True)
                 try:
-                    self._spin_bp_lo.setValue(max(float(self._spin_bp_lo.minimum()), lo))
+                    self._spin_bp_hi.setValue(min(float(self._spin_bp_hi.maximum()), hi))
                 finally:
-                    self._spin_bp_lo.blockSignals(False)
+                    self._spin_bp_hi.blockSignals(False)
         self._refresh_bp_histogram()
         if self._raw_data is not None and bool(self._chk_bp.isChecked()):
             self._apply_processing()
@@ -2264,11 +2337,12 @@ class GprProfileViewer(QMainWindow):
         )
         if not paths:
             return
+        staged_paths = [self._stage_profile_in_project_raw(p) for p in paths]
         # Nuova sessione import: reset completo stato+UI per evitare riferimenti stale a widget Qt.
         self._reset_session_state()
         errors = []
         imported_warnings = []
-        for p in paths:
+        for p in staged_paths:
             md5_failed = False
             try:
                 prof = read_ogpr_cached(p, verify_md5=True)
@@ -2312,6 +2386,7 @@ class GprProfileViewer(QMainWindow):
         if self._profiles:
             self._prof_idx = len(self._profiles) - 1
             self._load_current_profile()
+            self._save_gpr_processing_project_meta()
 
     # ------------------------------------------------------------------
     # Navigazione
@@ -4163,16 +4238,294 @@ class GprProfileViewer(QMainWindow):
         return int(np.nanargmin(np.abs(depth_arr - target)))
 
     def _active_project_root(self) -> str:
-        if self.plugin is None:
-            return ""
-        settings = getattr(self.plugin, "settings", None)
-        settings_key = getattr(self.plugin, "settings_key_active_project", None)
-        if settings is None or not settings_key:
-            return ""
+        root = ""
+        if self.plugin is not None:
+            settings = getattr(self.plugin, "settings", None)
+            settings_key = getattr(self.plugin, "settings_key_active_project", None)
+            if settings is not None and settings_key:
+                try:
+                    root = (settings.value(settings_key, "", type=str) or "").strip()
+                except Exception:
+                    root = ""
+        if root:
+            return root
+        # Fallback: directory of current QGIS project file.
         try:
-            return (settings.value(settings_key, "", type=str) or "").strip()
+            qgs_file = str(QgsProject.instance().fileName() or "").strip()
         except Exception:
+            qgs_file = ""
+        if qgs_file:
+            try:
+                return os.path.dirname(os.path.normpath(qgs_file))
+            except Exception:
+                return ""
+        return ""
+
+    def _gpr_processing_paths(self) -> dict:
+        root = self._active_project_root()
+        if not root:
+            return {}
+        base = os.path.normpath(os.path.join(root, "GPR_Processing"))
+        return {
+            "base": base,
+            "raw": os.path.join(base, "raw"),
+            "processed": os.path.join(base, "processed"),
+            "timeslices": os.path.join(base, "timeslices"),
+            "project_json": os.path.join(base, "project.json"),
+        }
+
+    def _ensure_gpr_processing_layout(self) -> dict:
+        paths = self._gpr_processing_paths()
+        if not paths:
+            return {}
+        try:
+            os.makedirs(paths["raw"], exist_ok=True)
+            os.makedirs(paths["processed"], exist_ok=True)
+            os.makedirs(paths["timeslices"], exist_ok=True)
+            os.makedirs(paths["base"], exist_ok=True)
+        except Exception:
+            return {}
+        return paths
+
+    def _path_to_gpr_processing_store(self, path: str) -> str:
+        p = os.path.normpath(str(path or "").strip())
+        if not p:
             return ""
+        paths = self._gpr_processing_paths()
+        base = paths.get("base", "")
+        if not base:
+            return p
+        try:
+            cp = os.path.commonpath([os.path.abspath(p), os.path.abspath(base)])
+            if cp == os.path.abspath(base):
+                rel = os.path.relpath(os.path.abspath(p), os.path.abspath(base))
+                return rel.replace("\\", "/")
+        except Exception:
+            pass
+        return p
+
+    def _path_from_gpr_processing_store(self, stored_path: str) -> str:
+        raw = str(stored_path or "").strip()
+        if not raw:
+            return ""
+        paths = self._gpr_processing_paths()
+        base = paths.get("base", "")
+        if os.path.isabs(raw) or not base:
+            return os.path.normpath(raw)
+        return os.path.normpath(os.path.join(base, raw))
+
+    def _load_gpr_processing_project_meta(self) -> dict:
+        paths = self._gpr_processing_paths()
+        pj = paths.get("project_json", "")
+        if not pj or (not os.path.exists(pj)):
+            return {}
+        try:
+            with open(pj, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_gpr_processing_project_meta(
+        self,
+        last_processing: Optional[str] = None,
+        last_timeslice: Optional[str] = None,
+    ) -> bool:
+        paths = self._ensure_gpr_processing_layout()
+        if not paths:
+            return False
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        meta = self._load_gpr_processing_project_meta()
+        created = str(meta.get("created") or now_iso)
+        profiles_payload = []
+        for prof in list(getattr(self, "_profiles", []) or []):
+            try:
+                p_abs = os.path.normpath(str(getattr(prof, "path", "") or ""))
+                if not p_abs:
+                    continue
+                profiles_payload.append({
+                    "filename": os.path.basename(p_abs),
+                    "path": self._path_to_gpr_processing_store(p_abs),
+                    "channels": list(range(int(getattr(prof, "n_channels", 0) or 0))),
+                    "loaded": True,
+                })
+            except Exception:
+                continue
+        ui_state = {
+            "colormap": (
+                str(self._cb_cmap.currentText())
+                if self._is_qt_alive(getattr(self, "_cb_cmap", None))
+                else ""
+            ),
+            "ve": (
+                float(self._spin_vertical_exag.value())
+                if self._is_qt_alive(getattr(self, "_spin_vertical_exag", None))
+                else 1.0
+            ),
+            "render": (
+                str(self._cb_interp.currentText())
+                if self._is_qt_alive(getattr(self, "_cb_interp", None))
+                else "Smooth"
+            ),
+            "show_wiggle": bool(
+                self._chk_show_wiggle.isChecked()
+                if self._is_qt_alive(getattr(self, "_chk_show_wiggle", None))
+                else self._show_wiggle
+            ),
+        }
+        if last_timeslice is None:
+            try:
+                outdir = str(self._le_slice_outdir.text() or "").strip()
+            except Exception:
+                outdir = ""
+            if outdir:
+                last_timeslice = self._path_to_gpr_processing_store(os.path.normpath(outdir))
+        payload = {
+            "version": "1.0",
+            "created": created,
+            "updated": now_iso,
+            "profiles": profiles_payload,
+            "last_processing": (
+                last_processing
+                if last_processing is not None
+                else meta.get("last_processing")
+            ),
+            "last_timeslice": (
+                last_timeslice
+                if last_timeslice is not None
+                else meta.get("last_timeslice")
+            ),
+            "ui_state": ui_state,
+        }
+        try:
+            with open(paths["project_json"], "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+            return True
+        except Exception:
+            return False
+
+    def _stage_profile_in_project_raw(self, src_path: str) -> str:
+        p_src = os.path.normpath(str(src_path or "").strip())
+        if (not p_src) or (not os.path.exists(p_src)):
+            return p_src
+        paths = self._ensure_gpr_processing_layout()
+        raw_dir = paths.get("raw", "")
+        if not raw_dir:
+            return p_src
+        try:
+            cp = os.path.commonpath([os.path.abspath(p_src), os.path.abspath(raw_dir)])
+            if cp == os.path.abspath(raw_dir):
+                return p_src
+        except Exception:
+            pass
+
+        name = os.path.basename(p_src)
+        base, ext = os.path.splitext(name)
+        candidate = os.path.join(raw_dir, name)
+        i = 1
+        while os.path.exists(candidate):
+            try:
+                if os.path.getsize(candidate) == os.path.getsize(p_src):
+                    return candidate
+            except Exception:
+                pass
+            candidate = os.path.join(raw_dir, f"{base}_{i}{ext}")
+            i += 1
+            if i > 999:
+                break
+
+        # Prefer lightweight link, fallback to real copy.
+        try:
+            rel_src = os.path.relpath(p_src, raw_dir)
+            os.symlink(rel_src, candidate)
+            return candidate
+        except Exception:
+            pass
+        try:
+            shutil.copy2(p_src, candidate)
+            return candidate
+        except Exception:
+            return p_src
+
+    def _apply_gpr_processing_ui_state(self, ui_state: dict) -> None:
+        if not isinstance(ui_state, dict):
+            return
+        try:
+            cmap = str(ui_state.get("colormap") or "").strip()
+            if cmap and self._is_qt_alive(getattr(self, "_cb_cmap", None)):
+                self._cb_cmap.setCurrentText(cmap)
+        except Exception:
+            pass
+        try:
+            if self._is_qt_alive(getattr(self, "_spin_vertical_exag", None)):
+                self._spin_vertical_exag.setValue(float(ui_state.get("ve", self._spin_vertical_exag.value())))
+        except Exception:
+            pass
+        try:
+            render = str(ui_state.get("render") or "").strip()
+            if render and self._is_qt_alive(getattr(self, "_cb_interp", None)):
+                self._cb_interp.setCurrentText(render)
+        except Exception:
+            pass
+        try:
+            if self._is_qt_alive(getattr(self, "_chk_show_wiggle", None)):
+                self._chk_show_wiggle.setChecked(bool(ui_state.get("show_wiggle", self._chk_show_wiggle.isChecked())))
+        except Exception:
+            pass
+
+    def _try_import_saved_gpr_processing_project(self, force: bool = False) -> bool:
+        if self._profiles and (not bool(force)):
+            return False
+        if self._profiles and bool(force):
+            ans = QMessageBox.question(
+                self,
+                "Import progetto GPR",
+                "Sostituire i profili correnti con quelli del progetto GPR salvato?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ans != QMessageBox.Yes:
+                return False
+        meta = self._load_gpr_processing_project_meta()
+        entries = list(meta.get("profiles") or [])
+        if not entries:
+            return False
+        paths = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            p = self._path_from_gpr_processing_store(str(e.get("path") or ""))
+            if p and os.path.exists(p):
+                paths.append(p)
+        if not paths:
+            return False
+
+        self._reset_session_state()
+        errors = []
+        for p in paths:
+            try:
+                self._profiles.append(read_ogpr_cached(p, verify_md5=True))
+            except Exception:
+                try:
+                    self._profiles.append(read_ogpr_cached(p, verify_md5=False))
+                except Exception as exc:
+                    errors.append(f"{os.path.basename(p)}: {exc}")
+        if not self._profiles:
+            if errors:
+                self._safe_set_text(self._lbl_status, f"Import progetto: {errors[0]}")
+            return False
+        self._prof_idx = 0
+        self._load_current_profile()
+        self._apply_gpr_processing_ui_state(meta.get("ui_state") or {})
+        self._update_slice_profile_info()
+        try:
+            ts_saved = self._path_from_gpr_processing_store(str(meta.get("last_timeslice") or ""))
+            if ts_saved and self._is_qt_alive(getattr(self, "_le_slice_outdir", None)):
+                self._le_slice_outdir.setText(ts_saved)
+        except Exception:
+            pass
+        self._safe_set_text(self._lbl_status, f"Progetto GPR importato: {len(self._profiles)} profili.")
+        return True
 
     def _resolve_timeslice_raster_path(self, ts: dict) -> str:
         if not isinstance(ts, dict):
@@ -4418,8 +4771,10 @@ class GprProfileViewer(QMainWindow):
             bool(slice_params.get("use_hilbert", True)),
             bool(slice_params.get("use_anisotropic_idw", False)),
             str(slice_params.get("idw_mode", "quality") or "quality"),
+            (None if slice_params.get("search_radius") is None else round(float(slice_params.get("search_radius")), 4)),
             float(slice_params.get("idw_power", 2) or 2.0),
             int(slice_params.get("min_points", 1) or 1),
+            str(slice_params.get("slice_source", "auto") or "auto"),
         )
         if sig == self._preview_signature:
             return
@@ -4436,6 +4791,7 @@ class GprProfileViewer(QMainWindow):
             "use_anisotropic_idw": bool(slice_params.get("use_anisotropic_idw", False)),
             "auto_radius": bool(slice_params.get("auto_radius", True)),
             "idw_mode": str(slice_params.get("idw_mode", "quality") or "quality"),
+            "radius": slice_params.get("search_radius"),
             "idw_power": float(slice_params.get("idw_power", 2) or 2),
             "min_points": int(slice_params.get("min_points", 1) or 1),
             "fill_nodata": bool(slice_params.get("fill_nodata", True)),
@@ -5263,8 +5619,14 @@ class GprProfileViewer(QMainWindow):
         if hasattr(self, "_chk_slice_thickness_locked") and self._chk_slice_thickness_locked is not None:
             self._chk_slice_thickness_locked.setChecked(True)
         self._refresh_slice_catalog(outdir, dz=dz_f, reset_index=True, redraw=True)
+        self._save_gpr_processing_project_meta(
+            last_timeslice=self._path_to_gpr_processing_store(outdir),
+        )
 
     def _default_slice_output_dir(self) -> str:
+        paths = self._ensure_gpr_processing_layout()
+        if paths:
+            return os.path.normpath(paths.get("timeslices", ""))
         project_root = self._active_project_root()
         if project_root and os.path.isdir(project_root):
             return os.path.normpath(os.path.join(project_root, "timeslices_2d"))
@@ -5284,6 +5646,9 @@ class GprProfileViewer(QMainWindow):
                 except Exception:
                     dz = 0.10
                 self._refresh_slice_catalog(norm, dz=dz, reset_index=True, redraw=True)
+                self._save_gpr_processing_project_meta(
+                    last_timeslice=self._path_to_gpr_processing_store(norm),
+                )
             except Exception:
                 pass
 
@@ -5360,6 +5725,9 @@ class GprProfileViewer(QMainWindow):
             except Exception:
                 dz = 0.10
             self._refresh_slice_catalog(outdir, dz=dz, reset_index=False, redraw=True)
+            self._save_gpr_processing_project_meta(
+                last_timeslice=self._path_to_gpr_processing_store(outdir),
+            )
 
     @staticmethod
     def _set_combo_to_data(combo: QComboBox, value) -> None:
@@ -5368,6 +5736,91 @@ class GprProfileViewer(QMainWindow):
         idx = combo.findData(value)
         if idx >= 0:
             combo.setCurrentIndex(idx)
+
+    def _slice_pipeline_enabled_map(self) -> dict:
+        enabled = dict(self._pipeline_enabled_map_from_controls() or {})
+        if self._is_qt_alive(self._filter_chain_widget):
+            try:
+                from_widget = dict(self._filter_chain_widget.get_enabled_map() or {})
+                for sid, on in from_widget.items():
+                    enabled[str(sid)] = bool(on)
+            except Exception:
+                pass
+        return enabled
+
+    def _sync_slice_source_mode(self) -> None:
+        if not self._is_qt_alive(getattr(self, "_cb_slice_pipeline_source", None)):
+            return
+        mode = str(self._cb_slice_pipeline_source.currentData() or "auto").strip().lower()
+        manual = (mode == "manual")
+        for w in (
+            getattr(self, "_cb_slice_extraction", None),
+            getattr(self, "_chk_slice_use_hilbert", None),
+            getattr(self, "_chk_slice_use_processing", None),
+        ):
+            if self._is_qt_alive(w):
+                try:
+                    w.setEnabled(manual)
+                except Exception:
+                    pass
+
+    def _resolve_slice_source(
+        self,
+        proc_params: dict,
+        extraction_mode_manual: str,
+        use_hilbert_manual: bool,
+        use_processing_manual: bool,
+    ) -> tuple[dict, bool, str, bool, str]:
+        params = dict(proc_params or {})
+        chain_order = [str(s) for s in list(params.get("chain_order") or self._current_chain_order() or DEFAULT_CHAIN_ORDER)]
+        enabled_map = self._slice_pipeline_enabled_map()
+
+        def _is_enabled(step_id: str) -> bool:
+            if step_id in enabled_map:
+                return bool(enabled_map.get(step_id))
+            return bool(params.get(step_id, False))
+
+        mode = "auto"
+        if self._is_qt_alive(getattr(self, "_cb_slice_pipeline_source", None)):
+            mode = str(self._cb_slice_pipeline_source.currentData() or "auto").strip().lower()
+        if mode == "manual":
+            return params, bool(use_processing_manual), str(extraction_mode_manual), bool(use_hilbert_manual), "manual"
+
+        # Auto mode: prefer Hilbert/envelope when active, otherwise use last active step.
+        if mode == "auto":
+            if ("envelope" in chain_order) and _is_enabled("envelope"):
+                target = "envelope"
+            else:
+                target = next((sid for sid in reversed(chain_order) if _is_enabled(sid)), "raw")
+        elif mode == "raw":
+            target = "raw"
+        else:
+            target = str(mode)
+            if (target not in chain_order) or (not _is_enabled(target)):
+                target = next((sid for sid in reversed(chain_order) if _is_enabled(sid)), "raw")
+
+        if target == "raw":
+            return params, False, "las_like", False, "raw"
+
+        if target in chain_order:
+            truncated = chain_order[: chain_order.index(target) + 1]
+        else:
+            truncated = [sid for sid in chain_order if _is_enabled(sid)]
+        if not truncated:
+            return params, False, "las_like", False, "raw"
+
+        resolved = dict(params)
+        for sid in DEFAULT_CHAIN_ORDER:
+            resolved[sid] = bool(_is_enabled(sid) and (sid in truncated))
+        resolved["chain_order"] = list(truncated)
+
+        if target == "envelope":
+            extraction_mode = "envelope"
+            use_hilbert = True
+        else:
+            extraction_mode = "las_like"
+            use_hilbert = False
+        return resolved, True, extraction_mode, use_hilbert, target
 
     def _apply_selected_timeslice_preset(self):
         key = str(self._cb_slice_preset.currentData() or "base").strip().lower()
@@ -5399,6 +5852,8 @@ class GprProfileViewer(QMainWindow):
                 "amplitude_filter": True,
                 "amplitude_sigma": 3.0,
                 "idw_mode": "quality",
+                "slice_source": "auto",
+                "search_radius": 0.0,
                 "idw_power": 2,
                 "overlap_fraction": 0.5,
                 "blanking_distance": 0.30,
@@ -5435,6 +5890,8 @@ class GprProfileViewer(QMainWindow):
                 "amplitude_filter": True,
                 "amplitude_sigma": 2.5,
                 "idw_mode": "quality",
+                "slice_source": "auto",
+                "search_radius": 0.0,
                 "idw_power": 3,
                 "overlap_fraction": 0.5,
                 "blanking_distance": 0.30,
@@ -5471,6 +5928,8 @@ class GprProfileViewer(QMainWindow):
                 "amplitude_filter": False,
                 "amplitude_sigma": 3.0,
                 "idw_mode": "quality",
+                "slice_source": "auto",
+                "search_radius": 0.0,
                 "idw_power": 2,
                 "overlap_fraction": 0.5,
                 "blanking_distance": 0.30,
@@ -5506,6 +5965,8 @@ class GprProfileViewer(QMainWindow):
         self._chk_amplitude_filter.setChecked(bool(cfg["amplitude_filter"]))
         self._spin_amplitude_sigma.setValue(float(cfg["amplitude_sigma"]))
         self._set_combo_to_data(self._cb_slice_idw_mode, cfg["idw_mode"])
+        self._spin_slice_search_radius.setValue(float(cfg.get("search_radius", 0.0) or 0.0))
+        self._set_combo_to_data(self._cb_slice_pipeline_source, str(cfg.get("slice_source", "auto") or "auto"))
         self._spin_slice_idw_power.setValue(int(cfg.get("idw_power", 2)))
         self._spin_slice_overlap_pct.setValue(int(round(float(cfg.get("overlap_fraction", 0.5)) * 100.0)))
         self._spin_slice_blanking_m.setValue(float(cfg.get("blanking_distance", 0.30)))
@@ -5536,6 +5997,7 @@ class GprProfileViewer(QMainWindow):
         self._spin_amplitude_sigma.setEnabled(bool(self._chk_amplitude_filter.isChecked()))
         self._spin_smooth_sigma.setEnabled(bool(self._chk_smooth.isChecked()))
         self._spin_slice_profile_workers.setEnabled(bool(self._chk_slice_parallel_profiles.isChecked()))
+        self._sync_slice_source_mode()
         self._safe_set_text(self._lbl_status, lbl)
 
     def get_slice_params(self) -> dict:
@@ -5545,9 +6007,15 @@ class GprProfileViewer(QMainWindow):
         if topo_mode == "custom":
             topo_custom = float(self._spin_slice_topo_ref_custom.value())
         proc_params = dict(self._current_processing_params() or {})
+        proc_params, use_processing, extraction_mode, use_hilbert, source_step = self._resolve_slice_source(
+            proc_params,
+            extraction_mode_manual=str(self._cb_slice_extraction.currentData() or "las_like"),
+            use_hilbert_manual=bool(self._chk_slice_use_hilbert.isChecked()),
+            use_processing_manual=bool(self._chk_slice_use_processing.isChecked()),
+        )
         # For timeslice pre-processing, avoid surface over-saturation with conservative defaults
         # when the panel is still using broad generic values.
-        if bool(self._chk_slice_use_processing.isChecked()):
+        if bool(use_processing):
             try:
                 if int(proc_params.get("bg_sample_start", 0) or 0) <= 0:
                     proc_params["bg_sample_start"] = 10
@@ -5560,11 +6028,22 @@ class GprProfileViewer(QMainWindow):
                     proc_params["agc_win"] = 32
             except Exception:
                 pass
+        try:
+            search_radius = float(self._spin_slice_search_radius.value())
+        except Exception:
+            search_radius = 0.0
+        radius_override = None
+        if np.isfinite(search_radius) and search_radius > 0.0:
+            radius_override = float(search_radius)
+        auto_radius = bool(self._chk_auto_radius.isChecked())
+        if radius_override is not None:
+            auto_radius = False
         return {
             "normalize_channels":  self._chk_normalize_ch.isChecked(),
-            "extraction_mode":     str(self._cb_slice_extraction.currentData() or "las_like"),
-            "use_hilbert":         self._chk_slice_use_hilbert.isChecked(),
-            "use_processing":      self._chk_slice_use_processing.isChecked(),
+            "slice_source":        str(source_step or "auto"),
+            "extraction_mode":     str(extraction_mode or "las_like"),
+            "use_hilbert":         bool(use_hilbert),
+            "use_processing":      bool(use_processing),
             "pre_slice_bg_removal": self._chk_slice_bg.isChecked(),
             "pre_slice_bg_mode": str(self._cb_slice_bg_mode.currentData() or "line_by_line"),
             "pre_slice_bg_window": (0 if slice_bg_auto else int(self._spin_slice_bg_window.value())),
@@ -5582,11 +6061,13 @@ class GprProfileViewer(QMainWindow):
                 if self._chk_amplitude_filter.isChecked() else None
             ),
             "idw_mode":            str(self._cb_slice_idw_mode.currentData() or "quality"),
+            "radius":              radius_override,
+            "search_radius":       radius_override,
             "idw_power":           int(self._spin_slice_idw_power.value()),
             "overlap_fraction":    float(self._spin_slice_overlap_pct.value()) / 100.0,
             "blanking_distance":   float(self._spin_slice_blanking_m.value()),
             "use_anisotropic_idw": self._chk_anisotropic_idw.isChecked(),
-            "auto_radius":         self._chk_auto_radius.isChecked(),
+            "auto_radius":         bool(auto_radius),
             "balance_profiles":    self._chk_slice_balance_profiles.isChecked(),
             "depth_radius_factor": float(self._spin_slice_depth_radius_factor.value()),
             "min_points":          int(self._spin_slice_min_points.value()),
@@ -5868,6 +6349,10 @@ class GprProfileViewer(QMainWindow):
         # This avoids stale Python refs to deleted Qt C++ objects on next reopen.
         if not bool(getattr(self, "_allow_close", False)):
             try:
+                self._save_gpr_processing_project_meta()
+            except Exception:
+                pass
+            try:
                 if self._processing_dock is not None:
                     self._save_dock_state(self._processing_dock, "processing")
                 if self._timeslice_dock is not None:
@@ -5883,6 +6368,10 @@ class GprProfileViewer(QMainWindow):
             return
 
         # Real close path (plugin unload).
+        try:
+            self._save_gpr_processing_project_meta()
+        except Exception:
+            pass
         self._close_3d_viewer()
         if self._processing_dock is not None:
             try:

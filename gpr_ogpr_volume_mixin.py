@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 from collections import Counter
 
+import numpy as np
+
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QDialogButtonBox,
     QLabel, QDoubleSpinBox, QComboBox, QLineEdit, QGroupBox,
@@ -82,6 +84,20 @@ class GprOgprVolumeMixin:
             saved.get("radius", default_res * 2 ** 0.5) if saved
             else default_res * 2 ** 0.5
         )
+        try:
+            forced_radius = (slice_params or {}).get("radius", None)
+            if forced_radius is None:
+                forced_radius = (slice_params or {}).get("search_radius", None)
+            if forced_radius is not None:
+                fr = float(forced_radius)
+                if np.isfinite(fr) and fr > 0.0:
+                    default_radius = fr
+                elif np.isfinite(fr) and fr <= 0.0:
+                    default_radius = 0.0
+            elif bool((slice_params or {}).get("auto_radius", False)):
+                default_radius = 0.0
+        except Exception:
+            pass
         adv_defaults = dict(saved or {})
         adv_defaults.update(slice_params or {})
 
@@ -159,7 +175,7 @@ class GprOgprVolumeMixin:
         sp_zmax   = _spin(0.001, 1000.0, 4, 0.01,   saved.get("z_max",   default_zmax) if saved else default_zmax)
         sp_step   = _spin(0.001,  100.0, 4, 0.005,  default_step)
         sp_res    = _spin(0.001,  100.0, 4, 0.01,   default_res)
-        sp_radius = _spin(0.001,  100.0, 4, 0.01,   default_radius)
+        sp_radius = _spin(0.0,  100.0, 4, 0.01,   default_radius)
         le_group  = QLineEdit(saved.get("group_name", default_group) if saved else default_group)
         le_group.setPlaceholderText("Nome gruppo catalogo")
         if forced_z_step is not None:
@@ -175,7 +191,7 @@ class GprOgprVolumeMixin:
         )
         sp_radius.setToolTip(
             "Raggio IDW massimo in metri.\n"
-            "Se Auto radius e' attivo nelle opzioni avanzate, puo' essere stimato dai dati."
+            "0 = Auto radius (stimato dai dati)."
         )
         le_group.setToolTip("Nome del gruppo catalogo per i raster generati.")
 
@@ -207,91 +223,112 @@ class GprOgprVolumeMixin:
         # Advanced parameters: collapsed by default.
         adv_widget = QWidget(dlg)
         adv_layout = QFormLayout(adv_widget)
+        dialog_advanced = {}
+        profile_viewer_mode = bool(slice_params and isinstance(slice_params, dict))
+        cb_extraction = None
+        cb_idw_mode = None
+        sp_idw_power = None
+        sp_min_points = None
+        sp_overlap = None
+        sp_blanking = None
+        chk_use_hilbert = None
+        chk_auto_radius = None
+        chk_aniso = None
+        chk_fill_nodata = None
+        chk_balance = None
+        sp_smooth = None
+        if profile_viewer_mode:
+            lbl_adv = QLabel(
+                "Le opzioni avanzate sono gestite dal pannello Slicing del GPR Profile Viewer.\n"
+                "Questo dialog applica solo i parametri base di griglia."
+            )
+            lbl_adv.setWordWrap(True)
+            adv_layout.addRow(lbl_adv)
+        else:
+            cb_extraction = QComboBox()
+            cb_extraction.addItem("LAS-like (abs)", "las_like")
+            cb_extraction.addItem("Envelope (Hilbert)", "envelope")
+            cb_extraction.addItem("Signed amplitude", "signed")
+            _ex_mode = str(adv_defaults.get("extraction_mode", "las_like") or "las_like")
+            for i in range(cb_extraction.count()):
+                if cb_extraction.itemData(i) == _ex_mode:
+                    cb_extraction.setCurrentIndex(i)
+                    break
+            cb_extraction.setToolTip("Metodo di estrazione ampiezza prima dell'interpolazione.")
 
-        cb_extraction = QComboBox()
-        cb_extraction.addItem("LAS-like (abs)", "las_like")
-        cb_extraction.addItem("Envelope (Hilbert)", "envelope")
-        cb_extraction.addItem("Signed amplitude", "signed")
-        _ex_mode = str(adv_defaults.get("extraction_mode", "las_like") or "las_like")
-        for i in range(cb_extraction.count()):
-            if cb_extraction.itemData(i) == _ex_mode:
-                cb_extraction.setCurrentIndex(i)
-                break
-        cb_extraction.setToolTip("Metodo di estrazione ampiezza prima dell'interpolazione.")
+            cb_idw_mode = QComboBox()
+            cb_idw_mode.addItem("Quality (radius)", "quality")
+            cb_idw_mode.addItem("Fast (kNN)", "fast")
+            _idw_mode = str(adv_defaults.get("idw_mode", "quality") or "quality")
+            for i in range(cb_idw_mode.count()):
+                if cb_idw_mode.itemData(i) == _idw_mode:
+                    cb_idw_mode.setCurrentIndex(i)
+                    break
+            cb_idw_mode.setToolTip("Quality: piu' fedele; Fast: piu' veloce su griglie grandi.")
 
-        cb_idw_mode = QComboBox()
-        cb_idw_mode.addItem("Quality (radius)", "quality")
-        cb_idw_mode.addItem("Fast (kNN)", "fast")
-        _idw_mode = str(adv_defaults.get("idw_mode", "quality") or "quality")
-        for i in range(cb_idw_mode.count()):
-            if cb_idw_mode.itemData(i) == _idw_mode:
-                cb_idw_mode.setCurrentIndex(i)
-                break
-        cb_idw_mode.setToolTip("Quality: piu' fedele; Fast: piu' veloce su griglie grandi.")
+            sp_idw_power = QSpinBox()
+            sp_idw_power.setRange(1, 4)
+            sp_idw_power.setValue(int(adv_defaults.get("idw_power", 2) or 2))
+            sp_idw_power.setToolTip("Esponente IDW (p). 2 standard, >2 enfatizza vicinanza.")
 
-        sp_idw_power = QSpinBox()
-        sp_idw_power.setRange(1, 4)
-        sp_idw_power.setValue(int(adv_defaults.get("idw_power", 2) or 2))
-        sp_idw_power.setToolTip("Esponente IDW (p). 2 standard, >2 enfatizza vicinanza.")
+            sp_min_points = QSpinBox()
+            sp_min_points.setRange(1, 12)
+            sp_min_points.setValue(int(adv_defaults.get("min_points", 1) or 1))
+            sp_min_points.setToolTip("Numero minimo di punti per stimare una cella.")
 
-        sp_min_points = QSpinBox()
-        sp_min_points.setRange(1, 12)
-        sp_min_points.setValue(int(adv_defaults.get("min_points", 1) or 1))
-        sp_min_points.setToolTip("Numero minimo di punti per stimare una cella.")
+            sp_overlap = QSpinBox()
+            sp_overlap.setRange(0, 90)
+            sp_overlap.setSingleStep(5)
+            sp_overlap.setSuffix(" %")
+            sp_overlap.setValue(int(round(float(adv_defaults.get("overlap_fraction", 0.5) or 0.0) * 100.0)))
+            sp_overlap.setToolTip("Overlap verticale tra slice consecutive.")
 
-        sp_overlap = QSpinBox()
-        sp_overlap.setRange(0, 90)
-        sp_overlap.setSingleStep(5)
-        sp_overlap.setSuffix(" %")
-        sp_overlap.setValue(int(round(float(adv_defaults.get("overlap_fraction", 0.5) or 0.0) * 100.0)))
-        sp_overlap.setToolTip("Overlap verticale tra slice consecutive.")
+            sp_blanking = QDoubleSpinBox()
+            sp_blanking.setRange(0.0, 100.0)
+            sp_blanking.setDecimals(3)
+            sp_blanking.setSingleStep(0.05)
+            sp_blanking.setValue(float(adv_defaults.get("blanking_distance", 0.0) or 0.0))
+            sp_blanking.setToolTip("Distanza massima dai dati reali; oltre questa soglia la cella e' NoData.")
 
-        sp_blanking = QDoubleSpinBox()
-        sp_blanking.setRange(0.0, 100.0)
-        sp_blanking.setDecimals(3)
-        sp_blanking.setSingleStep(0.05)
-        sp_blanking.setValue(float(adv_defaults.get("blanking_distance", 0.0) or 0.0))
-        sp_blanking.setToolTip("Distanza massima dai dati reali; oltre questa soglia la cella e' NoData.")
+            chk_use_hilbert = QCheckBox()
+            chk_use_hilbert.setChecked(bool(adv_defaults.get("use_hilbert", True)))
+            chk_use_hilbert.setToolTip("Usa envelope Hilbert come default per ampiezza.")
 
-        chk_use_hilbert = QCheckBox()
-        chk_use_hilbert.setChecked(bool(adv_defaults.get("use_hilbert", True)))
-        chk_use_hilbert.setToolTip("Usa envelope Hilbert come default per ampiezza.")
+            chk_auto_radius = QCheckBox()
+            chk_auto_radius.setChecked(bool(adv_defaults.get("auto_radius", True)))
+            chk_auto_radius.setToolTip("Stima automaticamente il raggio IDW dai dati.")
 
-        chk_auto_radius = QCheckBox()
-        chk_auto_radius.setChecked(bool(adv_defaults.get("auto_radius", True)))
-        chk_auto_radius.setToolTip("Stima automaticamente il raggio IDW dai dati.")
+            chk_aniso = QCheckBox()
+            chk_aniso.setChecked(bool(adv_defaults.get("use_anisotropic_idw", False)))
+            chk_aniso.setToolTip("Attiva distanza anisotropa lungo/tra profili.")
 
-        chk_aniso = QCheckBox()
-        chk_aniso.setChecked(bool(adv_defaults.get("use_anisotropic_idw", False)))
-        chk_aniso.setToolTip("Attiva distanza anisotropa lungo/tra profili.")
+            chk_fill_nodata = QCheckBox()
+            chk_fill_nodata.setChecked(bool(adv_defaults.get("fill_nodata", True)))
+            chk_fill_nodata.setToolTip("Riempie celle vuote entro distanza limite.")
 
-        chk_fill_nodata = QCheckBox()
-        chk_fill_nodata.setChecked(bool(adv_defaults.get("fill_nodata", True)))
-        chk_fill_nodata.setToolTip("Riempie celle vuote entro distanza limite.")
+            chk_balance = QCheckBox()
+            chk_balance.setChecked(bool(adv_defaults.get("balance_profiles", True)))
+            chk_balance.setToolTip("Bilancia ampiezza media tra profili diversi.")
 
-        chk_balance = QCheckBox()
-        chk_balance.setChecked(bool(adv_defaults.get("balance_profiles", True)))
-        chk_balance.setToolTip("Bilancia ampiezza media tra profili diversi.")
+            sp_smooth = QDoubleSpinBox()
+            sp_smooth.setRange(0.0, 10.0)
+            sp_smooth.setDecimals(2)
+            sp_smooth.setSingleStep(0.1)
+            sp_smooth.setValue(float(adv_defaults.get("smooth_sigma", 0.8) or 0.0))
+            sp_smooth.setToolTip("Sigma smoothing gaussiano post-IDW (0=off).")
 
-        sp_smooth = QDoubleSpinBox()
-        sp_smooth.setRange(0.0, 10.0)
-        sp_smooth.setDecimals(2)
-        sp_smooth.setSingleStep(0.1)
-        sp_smooth.setValue(float(adv_defaults.get("smooth_sigma", 0.8) or 0.0))
-        sp_smooth.setToolTip("Sigma smoothing gaussiano post-IDW (0=off).")
-
-        adv_layout.addRow("Estrazione:", cb_extraction)
-        adv_layout.addRow("IDW mode:", cb_idw_mode)
-        adv_layout.addRow("IDW power:", sp_idw_power)
-        adv_layout.addRow("Min punti:", sp_min_points)
-        adv_layout.addRow("Overlap slice:", sp_overlap)
-        adv_layout.addRow("Blanking (m):", sp_blanking)
-        adv_layout.addRow("Usa Hilbert:", chk_use_hilbert)
-        adv_layout.addRow("Auto radius:", chk_auto_radius)
-        adv_layout.addRow("IDW anisotropo:", chk_aniso)
-        adv_layout.addRow("Fill nodata:", chk_fill_nodata)
-        adv_layout.addRow("Smoothing sigma:", sp_smooth)
-        adv_layout.addRow("Balance profili:", chk_balance)
+            adv_layout.addRow("Estrazione:", cb_extraction)
+            adv_layout.addRow("IDW mode:", cb_idw_mode)
+            adv_layout.addRow("IDW power:", sp_idw_power)
+            adv_layout.addRow("Min punti:", sp_min_points)
+            adv_layout.addRow("Overlap slice:", sp_overlap)
+            adv_layout.addRow("Blanking (m):", sp_blanking)
+            adv_layout.addRow("Usa Hilbert:", chk_use_hilbert)
+            adv_layout.addRow("Auto radius:", chk_auto_radius)
+            adv_layout.addRow("IDW anisotropo:", chk_aniso)
+            adv_layout.addRow("Fill nodata:", chk_fill_nodata)
+            adv_layout.addRow("Smoothing sigma:", sp_smooth)
+            adv_layout.addRow("Balance profili:", chk_balance)
 
         btn_adv, adv_widget = _make_collapsible_section("Opzioni avanzate", adv_widget)
         root.addWidget(btn_adv)
@@ -311,6 +348,22 @@ class GprOgprVolumeMixin:
         if dlg.exec_() != QDialog.Accepted:
             return None
 
+        if not profile_viewer_mode:
+            dialog_advanced = {
+                "extraction_mode": str(cb_extraction.currentData() or "las_like"),
+                "idw_mode": str(cb_idw_mode.currentData() or "quality"),
+                "idw_power": int(sp_idw_power.value()),
+                "min_points": int(sp_min_points.value()),
+                "overlap_fraction": float(sp_overlap.value()) / 100.0,
+                "blanking_distance": float(sp_blanking.value()),
+                "use_hilbert": bool(chk_use_hilbert.isChecked()),
+                "auto_radius": bool(chk_auto_radius.isChecked()),
+                "use_anisotropic_idw": bool(chk_aniso.isChecked()),
+                "fill_nodata": bool(chk_fill_nodata.isChecked()),
+                "smooth_sigma": float(sp_smooth.value()),
+                "balance_profiles": bool(chk_balance.isChecked()),
+            }
+
         ch_val, comb_val = cb_ch.currentData()
         z_step_value = sp_step.value()
         if forced_z_step is not None:
@@ -324,20 +377,7 @@ class GprOgprVolumeMixin:
             "resolution":     sp_res.value(),
             "radius":         sp_radius.value(),
             "group_name":     le_group.text().strip() or default_group,
-            "advanced": {
-                "extraction_mode": str(cb_extraction.currentData() or "las_like"),
-                "idw_mode": str(cb_idw_mode.currentData() or "quality"),
-                "idw_power": int(sp_idw_power.value()),
-                "min_points": int(sp_min_points.value()),
-                "overlap_fraction": float(sp_overlap.value()) / 100.0,
-                "blanking_distance": float(sp_blanking.value()),
-                "use_hilbert": bool(chk_use_hilbert.isChecked()),
-                "auto_radius": bool(chk_auto_radius.isChecked()),
-                "use_anisotropic_idw": bool(chk_aniso.isChecked()),
-                "fill_nodata": bool(chk_fill_nodata.isChecked()),
-                "smooth_sigma": float(sp_smooth.value()),
-                "balance_profiles": bool(chk_balance.isChecked()),
-            },
+            "advanced": dialog_advanced,
         }
 
     # ------------------------------------------------------------------
@@ -391,7 +431,7 @@ class GprOgprVolumeMixin:
             else "gpr_slices"
         )
         candidate_dir = os.path.join(
-            project_root, "timeslices_2d", default_group
+            project_root, "GPR_Processing", "timeslices", default_group
         )
         saved = load_ogpr_slicer_params(candidate_dir)
         is_reslice = saved is not None
@@ -413,7 +453,7 @@ class GprOgprVolumeMixin:
         dialog_extra_slice_params = dict(params.pop("advanced", {}) or {})
 
         group_name = params["group_name"]
-        output_dir = os.path.join(project_root, "timeslices_2d", group_name)
+        output_dir = os.path.join(project_root, "GPR_Processing", "timeslices", group_name)
         out_override = str((slice_params or {}).get("output_dir") or "").strip()
         if out_override:
             if not os.path.isabs(out_override):
