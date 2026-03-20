@@ -135,6 +135,11 @@ class AppRuntimeMixin:
             self._init_name_raster_panel()
             self.populate_group_list()
             self.dlg.groupListWidget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            self.dlg.groupListWidget.setDragDropMode(QAbstractItemView.InternalMove)
+            self.dlg.groupListWidget.setDefaultDropAction(Qt.MoveAction)
+            self.dlg.groupListWidget.setDragEnabled(True)
+            self.dlg.groupListWidget.setAcceptDrops(True)
+            self.dlg.groupListWidget.setDropIndicatorShown(True)
             self.dlg.createGridButton.setEnabled(True)
             self.dlg.selectGridPointsButton.setEnabled(True)
             self.dlg.selectGridPointsButton.setText("Set Orientation")
@@ -162,6 +167,9 @@ class AppRuntimeMixin:
             #self.dlg.groupListWidget.itemClicked.connect(self.on_group_selected)
             self.dlg.groupListWidget.itemSelectionChanged.connect(self.on_group_selection_changed)
             self.dlg.groupListWidget.currentItemChanged.connect(self._sync_raster_lock_flag_for_current_group)
+            group_model = self.dlg.groupListWidget.model()
+            if group_model is not None:
+                group_model.rowsMoved.connect(self._on_group_list_rows_moved)
             self.dlg.selectGridPointsButton.clicked.connect(self.activate_grid_selection_tool)
 
             self.dlg.createGridButton.clicked.connect(self.create_grid_from_polygon_layer)

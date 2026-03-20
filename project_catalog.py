@@ -863,6 +863,57 @@ def update_raster_group(project_root, group_id, updates):
     return group
 
 
+def reorder_raster_groups(project_root, ordered_group_ids):
+    """Reorder catalog raster_groups using the provided id order.
+
+    Only groups listed in `ordered_group_ids` are reordered.
+    Other groups keep their relative positions.
+    """
+    data = load_catalog(project_root)
+    groups = list(data.get("raster_groups", []) or [])
+    if not groups:
+        return groups
+
+    normalized_ids = []
+    seen_ids = set()
+    for raw in list(ordered_group_ids or []):
+        gid = str(raw or "").strip()
+        if not gid or gid in seen_ids:
+            continue
+        normalized_ids.append(gid)
+        seen_ids.add(gid)
+
+    if not normalized_ids:
+        return groups
+
+    by_id = {
+        str(g.get("id") or "").strip(): g
+        for g in groups
+        if isinstance(g, dict) and str(g.get("id") or "").strip()
+    }
+    ordered_groups = [by_id[gid] for gid in normalized_ids if gid in by_id]
+    if not ordered_groups:
+        return groups
+
+    target_ids = {str(g.get("id") or "").strip() for g in ordered_groups}
+    ordered_iter = iter(ordered_groups)
+    reordered = []
+    for group in groups:
+        gid = str((group or {}).get("id") or "").strip()
+        if gid in target_ids:
+            reordered.append(next(ordered_iter, group))
+        else:
+            reordered.append(group)
+
+    old_order = [str((g or {}).get("id") or "").strip() for g in groups]
+    new_order = [str((g or {}).get("id") or "").strip() for g in reordered]
+    if new_order != old_order:
+        data["raster_groups"] = reordered
+        save_catalog(project_root, data)
+        return reordered
+    return groups
+
+
 def validate_catalog(project_root, catalog_data=None):
     data = ensure_catalog_schema(project_root, catalog_data or load_catalog(project_root))
     errors = []

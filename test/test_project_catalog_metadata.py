@@ -24,6 +24,7 @@ from project_catalog import (
     load_catalog_with_info,
     register_timeslices_batch,
     register_vector_layer,
+    reorder_raster_groups,
     remove_timeslices_from_group,
     save_catalog,
     validate_catalog,
@@ -168,6 +169,21 @@ class ProjectCatalogMetadataTest(unittest.TestCase):
         data = load_catalog(self.project_root)
         grp = next(g for g in data.get("raster_groups", []) if g.get("id") == gid)
         self.assertEqual(grp.get("timeslice_ids"), ["ts_a"])
+
+    def test_reorder_raster_groups_reorders_only_target_ids(self):
+        g1, _ = create_raster_group(self.project_root, "AreaA")
+        g2, _ = create_raster_group(self.project_root, "AreaB")
+        g3, _ = create_raster_group(self.project_root, "AreaC")
+        g1id = str(g1.get("id"))
+        g2id = str(g2.get("id"))
+        g3id = str(g3.get("id"))
+
+        reorder_raster_groups(self.project_root, [g3id, g1id, g2id])
+
+        data = load_catalog(self.project_root)
+        target_ids = {g1id, g2id, g3id}
+        ordered_targets = [str(g.get("id") or "") for g in data.get("raster_groups", []) if str(g.get("id") or "") in target_ids]
+        self.assertEqual(ordered_targets, [g3id, g1id, g2id])
 
     def test_validate_catalog_reports_duplicate_timeslice_ids(self):
         data = load_catalog(self.project_root)

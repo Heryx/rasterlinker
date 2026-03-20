@@ -22,6 +22,7 @@ from .project_catalog import (
     assign_timeslices_to_group,
     create_raster_group,
     load_catalog,
+    reorder_raster_groups,
     register_timeslices_batch,
     remove_timeslices_from_group,
 )
@@ -148,10 +149,17 @@ class CatalogGroupMixin:
             if not project_root:
                 return
 
-            by_name = self._catalog_groups_by_name(project_root)
-            for group_name in self._visible_plugin_group_names():
-                group = by_name.get(group_name)
-                if not group or not group.get("timeslice_ids"):
+            catalog = load_catalog(project_root)
+            visible_group_names = set(self._visible_plugin_group_names())
+            for group in catalog.get("raster_groups", []):
+                if not isinstance(group, dict):
+                    continue
+                group_name = str(group.get("name") or "").strip()
+                if not group_name:
+                    continue
+                if group_name not in visible_group_names:
+                    continue
+                if not group.get("timeslice_ids"):
                     continue
                 item = QListWidgetItem(group_name)
                 # Force a regular (non-bold) item font regardless of inherited styles.
@@ -167,6 +175,31 @@ class CatalogGroupMixin:
             self._sync_raster_lock_flag_for_current_group()
         except Exception as e:
             QMessageBox.critical(self.dlg, "Error", f"Error while loading plugin groups: {e}")
+
+    def _on_group_list_rows_moved(self, *_args):
+        if self.dlg is None or not hasattr(self.dlg, "groupListWidget"):
+            return
+        project_root = self._require_project_root(notify=False)
+        if not project_root:
+            return
+
+        widget = self.dlg.groupListWidget
+        ordered_group_ids = []
+        for idx in range(widget.count()):
+            item = widget.item(idx)
+            gid = str(item.data(Qt.UserRole) or "").strip() if item is not None else ""
+            if gid:
+                ordered_group_ids.append(gid)
+
+        if len(ordered_group_ids) < 2:
+            return
+
+        try:
+            reorder_raster_groups(project_root, ordered_group_ids)
+            if hasattr(self, "_save_ui_settings"):
+                self._save_ui_settings()
+        except Exception as e:
+            QMessageBox.warning(self.dlg, "Group reorder", f"Unable to persist group order: {e}")
 
     def _format_timeslice_depth_range(self, rec):
         if not isinstance(rec, dict):
@@ -485,12 +518,32 @@ class CatalogGroupMixin:
             widget.blockSignals(False)
         return bool(selected_items)
 
+    def _selected_groups_max_raster_steps(self):
+        if self.dlg is None or not hasattr(self.dlg, "groupListWidget"):
+            return 0
+
+        selected_group_items = list(self.dlg.groupListWidget.selectedItems())
+        if not selected_group_items:
+            return 0
+
+        max_steps = 0
+        for group_item in selected_group_items:
+            if group_item is None:
+                continue
+            group_name = str(group_item.text() or "").strip()
+            if not group_name:
+                continue
+            raster_nodes = self._selected_group_raster_nodes(group_name)
+            max_steps = max(max_steps, len(raster_nodes))
+
+        return max_steps
+
     def _update_navigation_controls(self, value=None):
         if self.dlg is None:
             return
 
-        total = self.dlg.rasterListWidget.count()
-        max_idx = max(0, total - 1)
+        max_steps = self._selected_groups_max_raster_steps()
+        max_idx = max(0, max_steps - 1)
         current = self.dlg.Dial.value() if value is None else int(value)
         if current < 0:
             current = 0
@@ -505,7 +558,7 @@ class CatalogGroupMixin:
             ctrl.setSingleStep(1)
             if hasattr(ctrl, "setPageStep"):
                 ctrl.setPageStep(1)
-            ctrl.setEnabled(total > 0)
+            ctrl.setEnabled(max_steps > 0)
             ctrl.setValue(current)
             ctrl.blockSignals(False)
 
