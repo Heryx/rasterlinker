@@ -4,6 +4,7 @@ Time-slice and group manager for GeoSurvey Studio projects.
 """
 
 import os
+import shutil
 
 from PyQt5.QtCore import Qt, QItemSelectionModel
 from PyQt5.QtWidgets import (
@@ -474,6 +475,26 @@ class TimesliceGroupManagerDialog(QDialog):
         if os.path.exists(aux):
             sidecars.append(aux)
         return sidecars
+
+    def _is_within_root(self, path, root):
+        try:
+            p_abs = os.path.normcase(os.path.abspath(path))
+            r_abs = os.path.normcase(os.path.abspath(root))
+        except Exception:
+            return False
+        return bool(p_abs and r_abs and (p_abs == r_abs or p_abs.startswith(r_abs + os.sep)))
+
+    def _group_folder_candidate(self, group_name):
+        root = os.path.abspath(os.path.join(self.project_root, "timeslices_2d"))
+        name = str(group_name or "").strip()
+        if not name:
+            return None
+        candidate = os.path.abspath(os.path.join(root, name))
+        if not self._is_within_root(candidate, root):
+            return None
+        if os.path.normcase(candidate) == os.path.normcase(root):
+            return None
+        return candidate
 
     def _rename_file_with_sidecars(self, old_path, new_path):
         warnings = []
@@ -986,14 +1007,25 @@ class TimesliceGroupManagerDialog(QDialog):
         if rec is None:
             return
         name = rec.get("name") or gid
-        ts_count = len(rec.get("timeslice_ids", []))
+        tids = list(dict.fromkeys([tid for tid in (rec.get("timeslice_ids") or []) if tid]))
+        records_by_id = {
+            str(r.get("id") or ""): r
+            for r in self._catalog.get("timeslices", [])
+            if isinstance(r, dict) and str(r.get("id") or "")
+        }
+        records = [records_by_id.get(str(tid)) for tid in tids]
+        records = [r for r in records if r is not None]
+        ts_count = len(records)
+        folder_candidate = self._group_folder_candidate(name)
+        folder_txt = folder_candidate or f"{os.path.join(self.project_root, 'timeslices_2d', str(name))}"
         answer = QMessageBox.question(
             self,
             "Delete Group",
             (
                 f"Delete group '{name}'?\n\n"
                 f"Time-slices linked to this group: {ts_count}\n"
-                "They will be moved to 'Imported'."
+                "All linked files will be deleted from disk and removed from catalog.\n"
+                f"Associated folder will be removed recursively:\n{folder_txt}"
             ),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -1001,11 +1033,84 @@ class TimesliceGroupManagerDialog(QDialog):
         if answer != QMessageBox.Yes:
             return
 
-        imported = self._ensure_imported_group()
-        moved = list(dict.fromkeys((imported.get("timeslice_ids") or []) + (rec.get("timeslice_ids") or [])))
-        imported["timeslice_ids"] = moved
+        progress = QProgressDialog("Deleting group files...", "Cancel", 0, len(records), self)
+        progress.setWindowTitle("Delete Group")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        deleted_ids = set()
+        failed_ids = set()
+        warnings = []
+
+        for idx, ts_rec in enumerate(records, start=1):
+            if progress.wasCanceled():
+                break
+            tid = str(ts_rec.get("id") or "").strip()
+            pth = str(ts_rec.get("project_path") or "").strip()
+            progress.setLabelText(f"Deleting {idx}/{len(records)}: {os.path.basename(pth)}")
+            QApplication.processEvents()
+            try:
+                if pth and os.path.exists(pth):
+                    pth_abs = os.path.abspath(pth)
+                    inside_group_folder = bool(folder_candidate and self._is_within_root(pth_abs, folder_candidate))
+                    if not inside_group_folder:
+                        for side in self._existing_sidecars(pth_abs):
+                            try:
+                                os.remove(side)
+                            except Exception as e:
+                                warnings.append(f"Sidecar delete failed: {os.path.basename(side)} ({e})")
+                        os.remove(pth_abs)
+                if tid:
+                    deleted_ids.add(tid)
+            except Exception as e:
+                if tid:
+                    failed_ids.add(tid)
+                warnings.append(f"Delete failed for {os.path.basename(pth)}: {e}")
+            progress.setValue(idx)
+            QApplication.processEvents()
+
+        progress.close()
+
+        if folder_candidate and os.path.isdir(folder_candidate):
+            try:
+                shutil.rmtree(folder_candidate)
+            except Exception as e:
+                warnings.append(f"Folder delete failed for '{folder_candidate}': {e}")
+                # Keep records that are still on disk under the folder.
+                for ts_rec in records:
+                    tid = str(ts_rec.get("id") or "").strip()
+                    pth = str(ts_rec.get("project_path") or "").strip()
+                    if not tid or tid in failed_ids:
+                        continue
+                    if pth and os.path.exists(pth) and self._is_within_root(pth, folder_candidate):
+                        deleted_ids.discard(tid)
+                        failed_ids.add(tid)
+
+        if deleted_ids:
+            self._catalog["timeslices"] = [
+                r for r in self._catalog.get("timeslices", []) if r.get("id") not in deleted_ids
+            ]
+            self._catalog["links"] = [
+                lk for lk in self._catalog.get("links", []) if lk.get("timeslice_id") not in deleted_ids
+            ]
+            for g in self._catalog.get("raster_groups", []):
+                g["timeslice_ids"] = [tid for tid in g.get("timeslice_ids", []) if tid not in deleted_ids]
+
+        if failed_ids:
+            imported = self._ensure_imported_group()
+            survivors = [tid for tid in tids if tid in failed_ids]
+            imported["timeslice_ids"] = list(dict.fromkeys((imported.get("timeslice_ids") or []) + survivors))
+
         self._catalog["raster_groups"] = [g for g in self._catalog.get("raster_groups", []) if g.get("id") != gid]
         self._save_and_refresh()
+
+        if warnings:
+            preview = "\n".join(warnings[:12])
+            extra = len(warnings) - min(len(warnings), 12)
+            if extra > 0:
+                preview += f"\n... and {extra} more."
+            QMessageBox.warning(self, "Delete Group warnings", preview)
 
     def _toggle_group_lock(self):
         gid = self._selected_group_id()
