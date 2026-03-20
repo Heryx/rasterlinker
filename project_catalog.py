@@ -1,0 +1,1365 @@
+# -*- coding: utf-8 -*-
+"""
+Project-folder and catalog helpers for 2D/3D geophysics workflows.
+"""
+
+import json
+import os
+import re
+import shutil
+import zipfile
+from datetime import datetime, timezone
+
+
+PROJECT_FOLDERS = (
+    "volumes_3d",
+    "timeslices_2d",
+    "radargrams",
+    "vector_layers",
+    "exports",
+    "metadata",
+)
+# Bump to 5 to enable v4->v5 migration (Unassigned / grp_no_crs / system flags)
+CATALOG_VERSION = 5
+# Legacy alias kept for backward compatibility with older code/sidecars.
+CATALOG_SCHEMA_VERSION = CATALOG_VERSION
+SURFER_GRID_EXTENSIONS = (".grd", ".gsag", ".gsbg")
+
+
+def _default_catalog(project_root, plugin_version=None):
+    now = utc_now_iso()
+    plugin_ver = str(plugin_version or "").strip()
+    return {
+        "catalog_version": CATALOG_VERSION,
+        "schema_version": CATALOG_VERSION,
+        "project_root": project_root,
+        "created_at": now,
+        "updated_at": now,
+        "created_with_plugin": plugin_ver,
+        "last_opened_with_plugin": plugin_ver,
+        "models_3d": [],
+        "radargrams": [],
+        "timeslices": [],
+        "vector_layers": [],
+        "links": [],
+        "raster_groups": [],
+    }
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def ensure_project_structure(project_root):
+    """
+    Create standard folders and return their absolute paths.
+    """
+    os.makedirs(project_root, exist_ok=True)
+    paths = {}
+    for folder in PROJECT_FOLDERS:
+        abs_path = os.path.join(project_root, folder)
+        os.makedirs(abs_path, exist_ok=True)
+        paths[folder] = abs_path
+    return paths
+
+
+def catalog_path(project_root):
+    return os.path.join(project_root, "metadata", "project_catalog.json")
+
+
+def _read_raw_catalog(project_root):
+    path = catalog_path(project_root)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def parse_depth_from_filename(filename: str, hints: dict | None = None) -> dict:
+    """Attempt to parse depth_from/depth_to and unit from a filename.
+
+    Returns dict: {depth_from: float|None, depth_to: float|None, unit: str|None, confidence: float}
+    confidence: 0.0-1.0 (1.0 = exact match)
+    """
+    base = os.path.basename(str(filename or "")).strip()
+    name = os.path.splitext(base)[0]
+    # Common patterns (priority): 0.000-0.008_m  or 0.000-0.008_(m)
+    patterns = [
+        r"(?P<from>\d+[.,]?\d*)\s*[-–_]\s*(?P<to>\d+[.,]?\d*)\s*[_\s]*\(?\s*(?P<unit>m|cm|ns|ft)\s*\)?$",
+        r"(?P<from>\d+[.,]?\d*)\s*[-–_]\s*(?P<to>\d+[.,]?\d*)$",
+        r"_(?P<from>\d+)[._](?P<to>\d+)[._]?$",
+    ]
+    for idx, pat in enumerate(patterns):
+        m = re.search(pat, name, flags=re.IGNORECASE)
+        if not m:
+            continue
+        try:
+            df = m.groupdict().get("from")
+            dt = m.groupdict().get("to")
+            unit = (m.groupdict().get("unit") or "").lower() or None
+            if df is None or dt is None:
+                continue
+            df = float(str(df).replace(",", "."))
+            dt = float(str(dt).replace(",", "."))
+            confidence = 1.0 if idx == 0 else 0.8 if idx == 1 else 0.6
+            return {"depth_from": df, "depth_to": dt, "unit": unit, "confidence": confidence}
+        except Exception:
+            continue
+    return {"depth_from": None, "depth_to": None, "unit": None, "confidence": 0.0}
+
+
+def parse_depth_from_raster_metadata(layer) -> dict:
+    """Attempt to extract depth info from raster metadata or GDAL tags.
+
+    Accepts a `QgsRasterLayer` or any object with `metadata()` / `dataProvider()`.
+    Returns same dict shape as `parse_depth_from_filename`.
+    """
+    try:
+        # Try QGIS metadata
+        md = None
+        if hasattr(layer, "metadata"):
+            try:
+                md = layer.metadata()
+            except Exception:
+                md = None
+        if not md and hasattr(layer, "dataProvider"):
+            prov = layer.dataProvider()
+            try:
+                md = prov.htmlMetadata()
+            except Exception:
+                md = None
+        text = ""
+        if isinstance(md, dict):
+            # some implementations return dict
+            text = json.dumps(md)
+        elif hasattr(md, "toHtml"):
+            try:
+                text = md.toHtml()
+            except Exception:
+                text = str(md)
+        elif md:
+            text = str(md)
+        # look for tags like DEPTH_FROM or DEPTH_TO or patterns like 0.000-0.008
+        if text:
+            m = re.search(r"DEPTH[_ ]?FROM\D*(?P<from>\d+[.,]?\d*)", text, flags=re.IGNORECASE)
+            m2 = re.search(r"DEPTH[_ ]?TO\D*(?P<to>\d+[.,]?\d*)", text, flags=re.IGNORECASE)
+            if m and m2:
+                try:
+                    df = float(m.group("from").replace(",", "."))
+                    dt = float(m2.group("to").replace(",", "."))
+                    return {"depth_from": df, "depth_to": dt, "unit": None, "confidence": 1.0}
+                except Exception:
+                    pass
+            # fallback: search numeric-range in text
+            m3 = re.search(r"(?P<from>\d+[.,]?\d*)\s*[-–_]\s*(?P<to>\d+[.,]?\d*)(?:\s*(?P<unit>m|cm|ns|ft))?", text, flags=re.IGNORECASE)
+            if m3:
+                try:
+                    df = float(m3.group("from").replace(",", "."))
+                    dt = float(m3.group("to").replace(",", "."))
+                    unit = (m3.group("unit") or "").lower() or None
+                    return {"depth_from": df, "depth_to": dt, "unit": unit, "confidence": 0.9}
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    # Try GDAL tags if available
+    try:
+        from osgeo import gdal
+        ds = None
+        if hasattr(layer, "dataProvider"):
+            prov = layer.dataProvider()
+            try:
+                uri = prov.dataSourceUri()
+            except Exception:
+                uri = None
+        else:
+            uri = None
+        if uri:
+            try:
+                ds = gdal.Open(uri)
+            except Exception:
+                ds = None
+        if ds is not None:
+            md = ds.GetMetadata()
+            for key in ("DEPTH_FROM", "DEPTH_TO", "DepthFrom", "DepthTo"):
+                if key in md:
+                    # if both present in tags
+                    df = md.get("DEPTH_FROM")
+                    dt = md.get("DEPTH_TO")
+                    try:
+                        if df is not None and dt is not None:
+                            return {"depth_from": float(str(df).replace(",", ".")), "depth_to": float(str(dt).replace(",", ".")), "unit": None, "confidence": 1.0}
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    return {"depth_from": None, "depth_to": None, "unit": None, "confidence": 0.0}
+
+
+def _detect_catalog_version(data):
+    if not isinstance(data, dict):
+        return 0
+    if "catalog_version" in data:
+        return max(0, _safe_int(data.get("catalog_version"), 0))
+    if "schema_version" in data:
+        return max(0, _safe_int(data.get("schema_version"), 0))
+    # Legacy fallback: existing dict without explicit version.
+    return 1 if data else 0
+
+
+def _write_catalog_file(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=True)
+    return path
+
+
+def _backup_catalog_file(path, suffix="migration"):
+    if not path or not os.path.exists(path):
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base = os.path.basename(path)
+    folder = os.path.dirname(path)
+    backup_name = f"{base}.{suffix}.{stamp}.bak"
+    backup_path = os.path.join(folder, backup_name)
+    shutil.copy2(path, backup_path)
+    return backup_path
+
+
+def _migrate_catalog_v0_to_v1(project_root, data):
+    data = dict(data or {})
+    now = utc_now_iso()
+    data.setdefault("project_root", project_root)
+    data.setdefault("created_at", now)
+    data.setdefault("updated_at", now)
+    data.setdefault("models_3d", [])
+    data.setdefault("radargrams", [])
+    data.setdefault("timeslices", [])
+    data.setdefault("links", [])
+    data.setdefault("raster_groups", [])
+    data["catalog_version"] = 1
+    data["schema_version"] = 1
+    return data
+
+
+def _migrate_catalog_v1_to_v2(project_root, data):
+    data = dict(data or {})
+    data.setdefault("raster_groups", [])
+    if not data["raster_groups"]:
+        data["raster_groups"] = [
+            {
+                "id": "grp_imported",
+                "name": "Unassigned",
+                "radargram_ids": [r.get("id") for r in data.get("radargrams", []) if isinstance(r, dict) and r.get("id")],
+                "timeslice_ids": [t.get("id") for t in data.get("timeslices", []) if isinstance(t, dict) and t.get("id")],
+                "created_at": utc_now_iso(),
+                "system": True,
+            }
+        ]
+    data["catalog_version"] = 2
+    data["schema_version"] = 2
+    return data
+
+
+def _migrate_catalog_v2_to_v3(project_root, data):
+    data = dict(data or {})
+    # Formalize catalog_version while keeping schema_version compatibility key.
+    data["catalog_version"] = 3
+    data["schema_version"] = 3
+    return data
+
+
+def _migrate_catalog_v3_to_v4(project_root, data):
+    data = dict(data or {})
+    data.setdefault("vector_layers", [])
+    data["catalog_version"] = 4
+    data["schema_version"] = 4
+    return data
+
+
+def _migrate_catalog_v4_to_v5(project_root, data):
+    """Migration v4 -> v5:
+    - Rename default system group `grp_imported` name to 'Unassigned'
+    - Add `system: true` to system groups
+    - Ensure `grp_no_crs` exists
+    """
+    data = dict(data or {})
+    data.setdefault("raster_groups", [])
+    changed = False
+    for g in data.get("raster_groups", []) or []:
+        if g.get("id") == "grp_imported":
+            if str(g.get("name") or "").strip() != "Unassigned":
+                g["name"] = "Unassigned"
+                changed = True
+            g.setdefault("system", True)
+            changed = True
+
+    # Ensure grp_no_crs exists as a system group
+    if not any(str(g.get("id") or "") == "grp_no_crs" for g in data.get("raster_groups", []) or []):
+        data.setdefault("raster_groups", []).append(
+            {
+                "id": "grp_no_crs",
+                "name": "No_CRS",
+                "radargram_ids": [],
+                "timeslice_ids": [],
+                "created_at": utc_now_iso(),
+                "system": True,
+            }
+        )
+        changed = True
+
+    data["catalog_version"] = 5
+    data["schema_version"] = 5
+    return data
+
+
+_CATALOG_MIGRATIONS = {
+    0: _migrate_catalog_v0_to_v1,
+    1: _migrate_catalog_v1_to_v2,
+    2: _migrate_catalog_v2_to_v3,
+    3: _migrate_catalog_v3_to_v4,
+    4: _migrate_catalog_v4_to_v5,
+}
+
+
+def _apply_catalog_migrations(project_root, data):
+    migrated = dict(data or {})
+    source_version = _detect_catalog_version(migrated)
+    applied = []
+    current = source_version
+
+    # Keep forward compatibility: do not downgrade unknown future versions.
+    if current > CATALOG_VERSION:
+        return migrated, source_version, current, applied
+
+    while current < CATALOG_VERSION:
+        prev = current
+        fn = _CATALOG_MIGRATIONS.get(current)
+        if fn is None:
+            break
+        migrated = fn(project_root, migrated)
+        next_version = _detect_catalog_version(migrated)
+        if next_version <= prev:
+            # Safety net for malformed migration functions.
+            next_version = prev + 1
+            migrated["catalog_version"] = next_version
+            migrated["schema_version"] = next_version
+        current = next_version
+        applied.append(current)
+
+    if current < CATALOG_VERSION:
+        migrated["catalog_version"] = CATALOG_VERSION
+        migrated["schema_version"] = CATALOG_VERSION
+        current = CATALOG_VERSION
+        applied.append(current)
+
+    return migrated, source_version, current, applied
+
+
+def inspect_catalog_compatibility(project_root, plugin_version=None):
+    """
+    Inspect catalog compatibility without mutating files.
+
+    Returns:
+        {
+            "status": "new_project|compatible|needs_migration|future_catalog|invalid_catalog",
+            "catalog_exists": bool,
+            "raw_catalog_version": int,
+            "supported_catalog_version": int,
+            "applied_migrations": [...],
+            "raw_plugin_version": "...",
+            "current_plugin_version": "...",
+            "error": "...",
+        }
+    """
+    result = {
+        "status": "new_project",
+        "catalog_exists": False,
+        "raw_catalog_version": 0,
+        "supported_catalog_version": CATALOG_VERSION,
+        "applied_migrations": [],
+        "raw_plugin_version": "",
+        "current_plugin_version": str(plugin_version or "").strip(),
+        "error": "",
+    }
+    try:
+        raw = _read_raw_catalog(project_root)
+    except Exception as e:
+        result["status"] = "invalid_catalog"
+        result["catalog_exists"] = True
+        result["error"] = str(e)
+        return result
+
+    if raw is None:
+        return result
+
+    result["catalog_exists"] = True
+    result["raw_plugin_version"] = str((raw or {}).get("last_opened_with_plugin") or "").strip()
+    raw_version = _detect_catalog_version(raw)
+    result["raw_catalog_version"] = raw_version
+
+    if raw_version > CATALOG_VERSION:
+        result["status"] = "future_catalog"
+        return result
+
+    _migrated, _src, _final, applied = _apply_catalog_migrations(project_root, raw)
+    result["applied_migrations"] = applied
+    result["status"] = "needs_migration" if applied else "compatible"
+    return result
+
+
+def _stamp_plugin_version(data, plugin_version):
+    plugin_ver = str(plugin_version or "").strip()
+    if not plugin_ver:
+        return False
+    changed = False
+    if not str(data.get("created_with_plugin") or "").strip():
+        data["created_with_plugin"] = plugin_ver
+        changed = True
+    if str(data.get("last_opened_with_plugin") or "").strip() != plugin_ver:
+        data["last_opened_with_plugin"] = plugin_ver
+        changed = True
+    return changed
+
+
+def load_catalog_with_info(project_root, plugin_version=None, create_backup_on_migrate=True):
+    path = catalog_path(project_root)
+    if not os.path.exists(path):
+        data = _default_catalog(project_root, plugin_version=plugin_version)
+        info = {
+            "raw_version": 0,
+            "final_version": data.get("catalog_version"),
+            "applied_migrations": [],
+            "changed": False,
+            "backup_path": None,
+            "stamped_plugin_version": bool(str(plugin_version or "").strip()),
+            "created_default": True,
+        }
+        return data, info
+
+    with open(path, "r", encoding="utf-8") as f:
+        loaded = json.load(f)
+
+    normalized, info = ensure_catalog_schema(project_root, loaded, return_info=True)
+    info = dict(info or {})
+    info.setdefault("backup_path", None)
+    info.setdefault("stamped_plugin_version", False)
+    info["created_default"] = False
+
+    plugin_stamped = _stamp_plugin_version(normalized, plugin_version)
+    if plugin_stamped:
+        info["stamped_plugin_version"] = True
+
+    if info.get("changed") or plugin_stamped:
+        if create_backup_on_migrate and os.path.exists(path):
+            applied = list(info.get("applied_migrations") or [])
+            if applied:
+                raw_v = info.get("raw_version")
+                final_v = info.get("final_version")
+                suffix = f"migrate_v{raw_v}_to_v{final_v}"
+            else:
+                suffix = "normalize"
+            try:
+                info["backup_path"] = _backup_catalog_file(path, suffix=suffix)
+            except Exception:
+                info["backup_path"] = None
+        _write_catalog_file(path, normalized)
+    return normalized, info
+
+
+def load_catalog(project_root, plugin_version=None, create_backup_on_migrate=True):
+    data, _info = load_catalog_with_info(
+        project_root,
+        plugin_version=plugin_version,
+        create_backup_on_migrate=create_backup_on_migrate,
+    )
+    return data
+
+
+def save_catalog(project_root, data):
+    data = ensure_catalog_schema(project_root, data)
+    data["updated_at"] = utc_now_iso()
+    path = catalog_path(project_root)
+    return _write_catalog_file(path, data)
+
+
+def register_model_3d(project_root, model_record):
+    data = load_catalog(project_root)
+    data["models_3d"].append(normalize_model_record(model_record))
+    return save_catalog(project_root, data)
+
+
+def register_radargram(project_root, radargram_record):
+    data = load_catalog(project_root)
+    data["radargrams"].append(normalize_radargram_record(radargram_record))
+    return save_catalog(project_root, data)
+
+
+def register_timeslice(project_root, timeslice_record):
+    data = load_catalog(project_root)
+    data["timeslices"].append(normalize_timeslice_record(timeslice_record))
+    return save_catalog(project_root, data)
+
+
+def register_timeslices_batch(project_root, timeslice_records):
+    records = [r for r in (timeslice_records or []) if isinstance(r, dict)]
+    if not records:
+        return
+    data = load_catalog(project_root)
+    data.setdefault("timeslices", [])
+    for rec in records:
+        data["timeslices"].append(normalize_timeslice_record(rec))
+    return save_catalog(project_root, data)
+
+
+def register_vector_layer(project_root, vector_record):
+    """
+    Add or update a vector layer record in catalog.
+    Upsert policy:
+      1) same id -> update
+      2) same (project_path, layer_name) -> update
+      3) otherwise append
+    """
+    rec = normalize_vector_layer_record(vector_record)
+    data = load_catalog(project_root)
+    data.setdefault("vector_layers", [])
+    layers = data.get("vector_layers", [])
+
+    match = None
+    rid = rec.get("id")
+    if rid:
+        match = next((r for r in layers if r.get("id") == rid), None)
+    if match is None:
+        pth = os.path.abspath((rec.get("project_path") or "").strip()) if rec.get("project_path") else ""
+        lname = (rec.get("layer_name") or "").strip().lower()
+        if pth and lname:
+            match = next(
+                (
+                    r for r in layers
+                    if os.path.abspath((r.get("project_path") or "").strip()) == pth
+                    and (r.get("layer_name") or "").strip().lower() == lname
+                ),
+                None,
+            )
+
+    rec["updated_at"] = utc_now_iso()
+    if match is None:
+        layers.append(rec)
+    else:
+        created_at = match.get("created_at") or rec.get("created_at") or utc_now_iso()
+        match.update(rec)
+        match["created_at"] = created_at
+        match["updated_at"] = rec.get("updated_at")
+
+    save_catalog(project_root, data)
+    return rec
+
+
+def register_link(project_root, link_record):
+    data = load_catalog(project_root)
+    data["links"].append(normalize_link_record(link_record))
+    return save_catalog(project_root, data)
+
+
+def ensure_catalog_schema(project_root, data, return_info=False):
+    raw_input = dict(data or {}) if isinstance(data, dict) else {}
+    migrated, raw_version, final_version, applied_migrations = _apply_catalog_migrations(project_root, raw_input)
+    data = dict(migrated or {})
+    if not isinstance(data, dict):
+        data = {}
+
+    default = _default_catalog(project_root)
+    for key, value in default.items():
+        if key not in data:
+            data[key] = value if not isinstance(value, list) else []
+
+    detected_version = _detect_catalog_version(data)
+    if detected_version < CATALOG_VERSION:
+        detected_version = CATALOG_VERSION
+    data["catalog_version"] = detected_version
+    data["schema_version"] = detected_version
+    data["project_root"] = project_root
+    data["models_3d"] = [normalize_model_record(v) for v in data.get("models_3d", []) if isinstance(v, dict)]
+    data["radargrams"] = [normalize_radargram_record(v) for v in data.get("radargrams", []) if isinstance(v, dict)]
+    data["timeslices"] = [normalize_timeslice_record(v) for v in data.get("timeslices", []) if isinstance(v, dict)]
+    data["vector_layers"] = [normalize_vector_layer_record(v) for v in data.get("vector_layers", []) if isinstance(v, dict)]
+    data["links"] = [normalize_link_record(v) for v in data.get("links", []) if isinstance(v, dict)]
+    data["raster_groups"] = [normalize_raster_group_record(v) for v in data.get("raster_groups", []) if isinstance(v, dict)]
+    if not data["raster_groups"]:
+        data["raster_groups"].append(
+            normalize_raster_group_record(
+                {
+                    "id": "grp_imported",
+                        "name": "Unassigned",
+                    "radargram_ids": [r.get("id") for r in data.get("radargrams", []) if r.get("id")],
+                    "timeslice_ids": [],
+                        "system": True,
+                }
+            )
+        )
+    else:
+        known_radargrams = {r.get("id") for r in data.get("radargrams", []) if r.get("id")}
+        known_timeslices = {t.get("id") for t in data.get("timeslices", []) if t.get("id")}
+        for group in data["raster_groups"]:
+            group["radargram_ids"] = [rid for rid in group.get("radargram_ids", []) if rid in known_radargrams]
+            group["timeslice_ids"] = [tid for tid in group.get("timeslice_ids", []) if tid in known_timeslices]
+
+    info = {
+        "raw_version": raw_version,
+        "final_version": data.get("catalog_version"),
+        "applied_migrations": applied_migrations,
+        "changed": bool(
+            applied_migrations
+            or raw_input != data
+            or final_version != data.get("catalog_version")
+        ),
+    }
+    if return_info:
+        return data, info
+    return data
+
+
+def normalize_model_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"model_{utc_now_iso()}")
+    rec.setdefault("normalized_name", rec.get("file_name", ""))
+    rec.setdefault("source_path", "")
+    rec.setdefault("project_path", "")
+    rec.setdefault("imported_at", utc_now_iso())
+    rec.setdefault("crs", None)
+    return rec
+
+
+def normalize_radargram_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"radargram_{utc_now_iso()}")
+    rec.setdefault("normalized_name", rec.get("file_name", ""))
+    rec.setdefault("source_path", "")
+    rec.setdefault("project_path", "")
+    rec.setdefault("imported_at", utc_now_iso())
+    rec.setdefault("import_mode", "catalog_only")
+    rec.setdefault("georef_level", "none")
+    rec.setdefault("line_id", None)
+    rec.setdefault("timeslice_id", None)
+    rec.setdefault("trace_count", None)
+    rec.setdefault("trace_spacing", None)
+    rec.setdefault("sample_interval", None)
+    rec.setdefault("time_zero", None)
+    rec.setdefault("velocity", None)
+    rec.setdefault("crs", rec.get("crs", None))
+    rec.setdefault("notes", "")
+    return rec
+
+
+def normalize_timeslice_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"timeslice_{utc_now_iso()}")
+    rec.setdefault("name", rec.get("normalized_name", ""))
+    rec.setdefault("project_path", rec.get("path", ""))
+    rec.setdefault("depth_from", None)
+    rec.setdefault("depth_to", None)
+    rec.setdefault("unit", "m")
+    rec.setdefault("crs", None)
+    rec.setdefault("z_source", "none")
+    rec.setdefault("z_grid_source_path", None)
+    rec.setdefault("z_grid_project_path", None)
+    rec.setdefault("z_grid_band", 1)
+    rec.setdefault("z_grid_linked_at", None)
+    rec.setdefault("imported_at", utc_now_iso())
+    return rec
+
+
+def normalize_vector_layer_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"vector_{utc_now_iso()}")
+    rec.setdefault("name", rec.get("layer_name") or "")
+    rec.setdefault("layer_name", rec.get("name") or "")
+    rec.setdefault("project_path", rec.get("path", ""))
+    rec.setdefault("source_path", rec.get("source_path", ""))
+    rec.setdefault("geometry_type", "unknown")
+    rec.setdefault("is_3d", False)
+    rec.setdefault("crs", None)
+    rec.setdefault("storage_mode", "gpkg" if str(rec.get("project_path") or "").lower().endswith(".gpkg") else "memory")
+    rec.setdefault("source_kind", "generic")
+    rec.setdefault("created_at", utc_now_iso())
+    rec.setdefault("updated_at", utc_now_iso())
+    rec.setdefault("notes", "")
+    return rec
+
+
+def normalize_link_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"link_{utc_now_iso()}")
+    rec.setdefault("radargram_id", None)
+    rec.setdefault("timeslice_id", None)
+    rec.setdefault("line_id", None)
+    rec.setdefault("trace_from", None)
+    rec.setdefault("trace_to", None)
+    rec.setdefault("confidence", 1.0)
+    rec.setdefault("notes", "")
+    rec.setdefault("created_at", utc_now_iso())
+    return rec
+
+
+def normalize_raster_group_record(rec):
+    rec = dict(rec or {})
+    rec.setdefault("id", f"group_{utc_now_iso()}")
+    rec.setdefault("name", "Group")
+    rec.setdefault("radargram_ids", [])
+    rec.setdefault("timeslice_ids", [])
+    rec.setdefault("pinned", False)  # Legacy, can be removed if unused
+    rec.setdefault("locked", False)  # New flag for locking visualization
+    rec.setdefault("system", False)
+    rec.setdefault("style_qml_path", "")
+    rec["radargram_ids"] = [v for v in rec.get("radargram_ids", []) if v]
+    rec["timeslice_ids"] = [v for v in rec.get("timeslice_ids", []) if v]
+    rec.setdefault("created_at", utc_now_iso())
+    return rec
+
+
+def create_raster_group(project_root, group_name):
+    data = load_catalog(project_root)
+    existing = [g for g in data.get("raster_groups", []) if (g.get("name") or "").strip().lower() == group_name.strip().lower()]
+    if existing:
+        return existing[0], False
+
+    group = normalize_raster_group_record(
+        {
+            "id": f"group_{utc_now_iso()}",
+            "name": group_name.strip(),
+            "radargram_ids": [],
+            "timeslice_ids": [],
+            "created_at": utc_now_iso(),
+            "system": False,
+        }
+    )
+    data["raster_groups"].append(group)
+    save_catalog(project_root, data)
+    return group, True
+
+
+def assign_radargrams_to_group(project_root, group_id, radargram_ids):
+    data = load_catalog(project_root)
+    radargram_ids = [rid for rid in radargram_ids if rid]
+
+    group = next((g for g in data.get("raster_groups", []) if g.get("id") == group_id), None)
+    if group is None:
+        raise ValueError(f"Raster group not found: {group_id}")
+
+    merged = list(dict.fromkeys(group.get("radargram_ids", []) + radargram_ids))
+    group["radargram_ids"] = merged
+    save_catalog(project_root, data)
+    return group
+
+
+def add_radargram_to_default_group(project_root, radargram_id):
+    if not radargram_id:
+        return
+    data = load_catalog(project_root)
+    default_group = next((g for g in data.get("raster_groups", []) if g.get("id") == "grp_imported"), None)
+    if default_group is None:
+        default_group = normalize_raster_group_record(
+            {
+                "id": "grp_imported",
+                "name": "Unassigned",
+                "radargram_ids": [],
+                "timeslice_ids": [],
+                "created_at": utc_now_iso(),
+            }
+        )
+        data.setdefault("raster_groups", []).append(default_group)
+    if radargram_id not in default_group["radargram_ids"]:
+        default_group["radargram_ids"].append(radargram_id)
+        save_catalog(project_root, data)
+
+
+def assign_timeslices_to_group(project_root, group_id, timeslice_ids):
+    data = load_catalog(project_root)
+    timeslice_ids = [tid for tid in timeslice_ids if tid]
+    group = next((g for g in data.get("raster_groups", []) if g.get("id") == group_id), None)
+    if group is None:
+        raise ValueError(f"Raster group not found: {group_id}")
+    merged = list(dict.fromkeys(group.get("timeslice_ids", []) + timeslice_ids))
+    group["timeslice_ids"] = merged
+    save_catalog(project_root, data)
+    return group
+
+
+def ensure_system_group(project_root, group_id, group_name):
+    """Ensure a system group with the given id exists; create if missing."""
+    data = load_catalog(project_root)
+    group = next((g for g in data.get("raster_groups", []) if g.get("id") == group_id), None)
+    if group is not None:
+        changed = False
+        if str(group.get("name") or "").strip() != str(group_name or "").strip():
+            group["name"] = group_name
+            changed = True
+        if not bool(group.get("system", False)):
+            group["system"] = True
+            changed = True
+        if changed:
+            save_catalog(project_root, data)
+        return group
+
+    new = normalize_raster_group_record({
+        "id": group_id,
+        "name": group_name,
+        "radargram_ids": [],
+        "timeslice_ids": [],
+        "created_at": utc_now_iso(),
+        "system": True,
+    })
+    data.setdefault("raster_groups", []).append(new)
+    save_catalog(project_root, data)
+    return new
+
+
+def remove_timeslices_from_group(project_root, group_id, timeslice_ids):
+    data = load_catalog(project_root)
+    timeslice_ids = set(tid for tid in timeslice_ids if tid)
+    group = next((g for g in data.get("raster_groups", []) if g.get("id") == group_id), None)
+    if group is None:
+        raise ValueError(f"Raster group not found: {group_id}")
+    group["timeslice_ids"] = [tid for tid in group.get("timeslice_ids", []) if tid not in timeslice_ids]
+    save_catalog(project_root, data)
+    return group
+
+
+def add_timeslice_to_default_group(project_root, timeslice_id):
+    if not timeslice_id:
+        return
+    data = load_catalog(project_root)
+    default_group = next((g for g in data.get("raster_groups", []) if g.get("id") == "grp_imported"), None)
+    if default_group is None:
+        default_group = normalize_raster_group_record(
+            {
+                "id": "grp_imported",
+                "name": "Unassigned",
+                "radargram_ids": [],
+                "timeslice_ids": [],
+                "created_at": utc_now_iso(),
+            }
+        )
+        data.setdefault("raster_groups", []).append(default_group)
+    if timeslice_id not in default_group["timeslice_ids"]:
+        default_group["timeslice_ids"].append(timeslice_id)
+        save_catalog(project_root, data)
+
+
+def update_raster_group(project_root, group_id, updates):
+    data = load_catalog(project_root)
+    group = next((g for g in data.get("raster_groups", []) if g.get("id") == group_id), None)
+    if group is None:
+        raise ValueError(f"Raster group not found: {group_id}")
+    group.update(dict(updates or {}))
+    save_catalog(project_root, data)
+    return group
+
+
+def reorder_raster_groups(project_root, ordered_group_ids):
+    """Reorder catalog raster_groups using the provided id order.
+
+    Only groups listed in `ordered_group_ids` are reordered.
+    Other groups keep their relative positions.
+    """
+    data = load_catalog(project_root)
+    groups = list(data.get("raster_groups", []) or [])
+    if not groups:
+        return groups
+
+    normalized_ids = []
+    seen_ids = set()
+    for raw in list(ordered_group_ids or []):
+        gid = str(raw or "").strip()
+        if not gid or gid in seen_ids:
+            continue
+        normalized_ids.append(gid)
+        seen_ids.add(gid)
+
+    if not normalized_ids:
+        return groups
+
+    by_id = {
+        str(g.get("id") or "").strip(): g
+        for g in groups
+        if isinstance(g, dict) and str(g.get("id") or "").strip()
+    }
+    ordered_groups = [by_id[gid] for gid in normalized_ids if gid in by_id]
+    if not ordered_groups:
+        return groups
+
+    target_ids = {str(g.get("id") or "").strip() for g in ordered_groups}
+    ordered_iter = iter(ordered_groups)
+    reordered = []
+    for group in groups:
+        gid = str((group or {}).get("id") or "").strip()
+        if gid in target_ids:
+            reordered.append(next(ordered_iter, group))
+        else:
+            reordered.append(group)
+
+    old_order = [str((g or {}).get("id") or "").strip() for g in groups]
+    new_order = [str((g or {}).get("id") or "").strip() for g in reordered]
+    if new_order != old_order:
+        data["raster_groups"] = reordered
+        save_catalog(project_root, data)
+        return reordered
+    return groups
+
+
+def validate_catalog(project_root, catalog_data=None):
+    data = ensure_catalog_schema(project_root, catalog_data or load_catalog(project_root))
+    errors = []
+    warnings = []
+
+    radargram_ids = set()
+    timeslice_ids = set()
+    vector_ids = set()
+    vector_keys = set()
+
+    for model in data.get("models_3d", []):
+        if not model.get("project_path"):
+            errors.append("Model missing project_path.")
+        elif not os.path.exists(model.get("project_path")):
+            errors.append(f"Missing model file: {model.get('project_path')}")
+        if not model.get("crs"):
+            warnings.append(f"Model without CRS: {model.get('normalized_name') or model.get('id')}")
+
+    for rg in data.get("radargrams", []):
+        rid = rg.get("id")
+        if rid:
+            if rid in radargram_ids:
+                errors.append(f"Duplicate radargram id: {rid}")
+            radargram_ids.add(rid)
+        else:
+            errors.append("Radargram missing id.")
+        if not rg.get("project_path"):
+            errors.append(f"Radargram without project_path: {rid}")
+        elif not os.path.exists(rg.get("project_path")):
+            errors.append(f"Missing radargram file: {rg.get('project_path')}")
+        if rg.get("import_mode") == "mapped" and rg.get("georef_level") == "none":
+            warnings.append(f"Radargram marked mapped but georef_level is none: {rid}")
+
+    for ts in data.get("timeslices", []):
+        tid = ts.get("id")
+        if tid:
+            if tid in timeslice_ids:
+                errors.append(f"Duplicate timeslice id: {tid}")
+            timeslice_ids.add(tid)
+        else:
+            errors.append("Timeslice missing id.")
+        pth = ts.get("project_path")
+        if pth and not os.path.exists(pth):
+            warnings.append(f"Missing timeslice file: {pth}")
+        z_grid_path = ts.get("z_grid_project_path")
+        if z_grid_path and not os.path.exists(z_grid_path):
+            warnings.append(f"Missing linked z-grid file: {z_grid_path}")
+
+    for vl in data.get("vector_layers", []):
+        vid = vl.get("id")
+        if vid:
+            if vid in vector_ids:
+                errors.append(f"Duplicate vector layer id: {vid}")
+            vector_ids.add(vid)
+        else:
+            errors.append("Vector layer missing id.")
+
+        pth = (vl.get("project_path") or "").strip()
+        lname = (vl.get("layer_name") or vl.get("name") or "").strip()
+        key = (os.path.abspath(pth).lower(), lname.lower()) if pth and lname else None
+        if key is not None:
+            if key in vector_keys:
+                warnings.append(f"Duplicate vector catalog entry for layer '{lname}' at path: {pth}")
+            vector_keys.add(key)
+
+        if not pth:
+            warnings.append(f"Vector layer without project_path: {vid or lname or 'unknown'}")
+            continue
+        if not os.path.exists(pth):
+            warnings.append(f"Missing vector layer file: {pth}")
+
+    for ln in data.get("links", []):
+        link_id = ln.get("id")
+        rid = ln.get("radargram_id")
+        tid = ln.get("timeslice_id")
+        lid = ln.get("line_id")
+
+        if not rid:
+            errors.append(f"Link without radargram_id: {link_id}")
+        elif rid not in radargram_ids:
+            warnings.append(f"Link references unknown radargram_id: {rid}")
+
+        if not tid and not lid:
+            warnings.append(f"Link without timeslice_id and line_id: {link_id}")
+        if tid and tid not in timeslice_ids:
+            warnings.append(f"Link references unknown timeslice_id: {tid}")
+
+    return {"errors": errors, "warnings": warnings, "catalog": data}
+
+
+def save_radargram_sidecar(project_root, radargram_record):
+    """
+    Save or update a radargram sidecar metadata JSON used for line/timeslice linking.
+    """
+    metadata_dir = os.path.join(project_root, "metadata", "radargram_sidecars")
+    os.makedirs(metadata_dir, exist_ok=True)
+
+    rid = radargram_record.get("id", f"radargram_{utc_now_iso()}").replace(":", "_")
+    sidecar_path = os.path.join(metadata_dir, f"{rid}.json")
+
+    payload = {
+        "catalog_version": CATALOG_VERSION,
+        "schema_version": CATALOG_VERSION,
+        "id": radargram_record.get("id"),
+        "normalized_name": radargram_record.get("normalized_name"),
+        "project_path": radargram_record.get("project_path"),
+        "source_path": radargram_record.get("source_path"),
+        "imported_at": radargram_record.get("imported_at"),
+        "import_mode": radargram_record.get("import_mode", "catalog_only"),
+        "georef_level": radargram_record.get("georef_level", "none"),
+        "line_id": radargram_record.get("line_id"),
+        "timeslice_id": radargram_record.get("timeslice_id"),
+        "start_xy": radargram_record.get("start_xy"),
+        "end_xy": radargram_record.get("end_xy"),
+        "trace_count": radargram_record.get("trace_count"),
+        "trace_spacing": radargram_record.get("trace_spacing"),
+        "sample_interval": radargram_record.get("sample_interval"),
+        "time_zero": radargram_record.get("time_zero"),
+        "velocity": radargram_record.get("velocity"),
+        "notes": radargram_record.get("notes", ""),
+        "auto_detected": {
+            "width": radargram_record.get("width"),
+            "height": radargram_record.get("height"),
+            "rows": radargram_record.get("rows"),
+            "cols": radargram_record.get("cols"),
+            "shape": radargram_record.get("shape"),
+            "crs": radargram_record.get("crs"),
+        },
+    }
+
+    with open(sidecar_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=True)
+    return sidecar_path
+
+
+def _slugify_filename(name):
+    base, ext = os.path.splitext(name)
+    base = base.strip().replace(" ", "_")
+    base = re.sub(r"[^A-Za-z0-9_\-\.]+", "_", base)
+    base = re.sub(r"_+", "_", base).strip("_")
+    if not base:
+        base = "file"
+    return f"{base}{ext.lower()}"
+
+
+def sanitize_filename(name):
+    return _slugify_filename(name)
+
+
+def _unique_destination_path(directory, filename):
+    os.makedirs(directory, exist_ok=True)
+    candidate = os.path.join(directory, filename)
+    if not os.path.exists(candidate):
+        return candidate
+
+    stem, ext = os.path.splitext(filename)
+    i = 1
+    while True:
+        candidate = os.path.join(directory, f"{stem}_{i:03d}{ext}")
+        if not os.path.exists(candidate):
+            return candidate
+        i += 1
+
+
+def normalize_copy_into_project(project_root, subfolder, source_path):
+    """
+    Copy source file to a canonical project subfolder with sanitized unique name.
+    Returns (project_path, normalized_name).
+    """
+    if not os.path.isfile(source_path):
+        raise FileNotFoundError(source_path)
+    source_name = os.path.basename(source_path)
+    normalized_name = _slugify_filename(source_name)
+    destination_dir = os.path.join(project_root, subfolder)
+    destination_path = _unique_destination_path(destination_dir, normalized_name)
+    shutil.copy2(source_path, destination_path)
+    return destination_path, os.path.basename(destination_path)
+
+
+def find_matching_surfer_grid(reference_raster_path, extra_search_dirs=None):
+    """
+    Find a Surfer grid file with the same basename (stem) as the reference raster.
+    """
+    if not reference_raster_path:
+        return None
+    ref_name = os.path.basename(reference_raster_path)
+    ref_stem = os.path.splitext(ref_name)[0].strip().lower()
+    if not ref_stem:
+        return None
+
+    search_dirs = [os.path.dirname(reference_raster_path)]
+    for d in (extra_search_dirs or []):
+        if d and d not in search_dirs:
+            search_dirs.append(d)
+
+    for directory in search_dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        try:
+            names = sorted(os.listdir(directory))
+        except Exception:
+            continue
+        for name in names:
+            cand_path = os.path.join(directory, name)
+            if not os.path.isfile(cand_path):
+                continue
+            stem, ext = os.path.splitext(name)
+            if stem.strip().lower() != ref_stem:
+                continue
+            if ext.lower() in SURFER_GRID_EXTENSIONS:
+                return cand_path
+    return None
+
+
+def link_surfer_grid_into_project(project_root, reference_raster_path, source_raster_path=None):
+    """
+    Try to auto-link a matching Surfer grid to a time-slice.
+    Returns a dict with z-grid linkage fields (empty dict if not found).
+    """
+    if not project_root or not reference_raster_path:
+        return {}
+
+    search_dirs = []
+    if source_raster_path:
+        search_dirs.append(os.path.dirname(source_raster_path))
+    search_dirs.append(os.path.dirname(reference_raster_path))
+    search_dirs.append(os.path.join(project_root, "timeslices_2d"))
+    search_dirs.append(os.path.join(project_root, "timeslices_2d", "z_grids"))
+
+    candidate = find_matching_surfer_grid(source_raster_path or reference_raster_path, search_dirs)
+    if not candidate:
+        return {}
+
+    target_subfolder = os.path.join("timeslices_2d", "z_grids")
+    target_dir = os.path.abspath(os.path.join(project_root, target_subfolder))
+    os.makedirs(target_dir, exist_ok=True)
+    candidate_abs = os.path.abspath(candidate)
+    copied = False
+
+    if os.path.normcase(os.path.dirname(candidate_abs)) == os.path.normcase(target_dir):
+        project_grid_path = candidate_abs
+    else:
+        project_grid_path, _normalized = normalize_copy_into_project(project_root, target_subfolder, candidate_abs)
+        copied = True
+
+    return {
+        "z_source": "surfer_grid",
+        "z_grid_source_path": candidate_abs,
+        "z_grid_project_path": project_grid_path,
+        "z_grid_band": 1,
+        "z_grid_linked_at": utc_now_iso(),
+        "z_grid_copied": copied,
+    }
+
+
+def _normalize_output_zip_path(output_zip_path):
+    out = str(output_zip_path or "").strip()
+    if not out:
+        raise ValueError("Output zip path is empty.")
+    if not out.lower().endswith(".zip"):
+        out += ".zip"
+    return out
+
+
+def _abs_norm(path):
+    try:
+        return os.path.normcase(os.path.abspath(path))
+    except Exception:
+        return os.path.normcase(str(path or ""))
+
+
+def _is_within_root(path, root):
+    p = _abs_norm(path)
+    r = _abs_norm(root)
+    if not p or not r:
+        return False
+    return p == r or p.startswith(r + os.sep)
+
+
+def _iter_catalog_file_paths(catalog):
+    data = dict(catalog or {})
+    for model in data.get("models_3d", []):
+        yield model.get("project_path")
+    for rg in data.get("radargrams", []):
+        yield rg.get("project_path")
+    for ts in data.get("timeslices", []):
+        yield ts.get("project_path")
+        yield ts.get("z_grid_project_path")
+    for vl in data.get("vector_layers", []):
+        yield vl.get("project_path")
+    for grp in data.get("raster_groups", []):
+        style_qml = grp.get("style_qml_path")
+        if style_qml:
+            yield style_qml
+
+
+def export_project_package(project_root, output_zip_path):
+    """
+    Export entire project folder as zip package (full backup mode).
+    """
+    if not os.path.isdir(project_root):
+        raise FileNotFoundError(project_root)
+    output_zip_path = _normalize_output_zip_path(output_zip_path)
+
+    with zipfile.ZipFile(output_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(project_root):
+            for fn in files:
+                abs_path = os.path.join(root, fn)
+                rel_path = os.path.relpath(abs_path, project_root)
+                zf.write(abs_path, rel_path)
+    return output_zip_path
+
+
+def export_project_package_portable(project_root, output_zip_path):
+    """
+    Export a portable package with catalog-referenced assets and metadata.
+
+    Returns:
+        {
+            "zip_path": "...",
+            "included_files": [...],
+            "missing_files": [...],
+            "external_files": [...],
+        }
+    """
+    if not os.path.isdir(project_root):
+        raise FileNotFoundError(project_root)
+    output_zip_path = _normalize_output_zip_path(output_zip_path)
+    catalog = load_catalog(project_root)
+    project_root_abs = _abs_norm(project_root)
+
+    include_paths = set()
+    missing_files = []
+    external_files = []
+
+    # Always include metadata folder content when available.
+    metadata_dir = os.path.join(project_root, "metadata")
+    if os.path.isdir(metadata_dir):
+        for root, _, files in os.walk(metadata_dir):
+            for fn in files:
+                include_paths.add(os.path.join(root, fn))
+
+    for raw_path in _iter_catalog_file_paths(catalog):
+        pth = str(raw_path or "").strip()
+        if not pth:
+            continue
+        abs_path = _abs_norm(pth)
+        if not os.path.exists(abs_path):
+            missing_files.append(abs_path)
+            continue
+        if not _is_within_root(abs_path, project_root_abs):
+            external_files.append(abs_path)
+            continue
+        if os.path.isfile(abs_path):
+            include_paths.add(abs_path)
+
+    included_files = []
+    with zipfile.ZipFile(output_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for abs_path in sorted(include_paths):
+            if not os.path.isfile(abs_path):
+                continue
+            rel_path = os.path.relpath(abs_path, project_root)
+            zf.write(abs_path, rel_path)
+            included_files.append(rel_path)
+
+    return {
+        "zip_path": output_zip_path,
+        "included_files": included_files,
+        "missing_files": sorted(set(missing_files)),
+        "external_files": sorted(set(external_files)),
+    }
+
+
+def inspect_package_import_conflicts(zip_path, target_project_root):
+    """
+    Inspect potential file conflicts before importing a package.
+    """
+    if not os.path.isfile(zip_path):
+        raise FileNotFoundError(zip_path)
+    target_abs = _abs_norm(target_project_root)
+    members = []
+    conflicts = []
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            members.append(info.filename)
+            dst = _safe_extract_destination(target_abs, info.filename)
+            if dst is None:
+                continue
+            if os.path.exists(dst):
+                conflicts.append(info.filename)
+    return {
+        "total_entries": len(members),
+        "conflict_count": len(conflicts),
+        "conflicts": conflicts,
+    }
+
+
+def _safe_extract_destination(target_root, member_name):
+    rel = str(member_name or "").replace("\\", "/").strip("/")
+    if not rel:
+        return None
+    dst = _abs_norm(os.path.join(target_root, rel))
+    if not _is_within_root(dst, target_root):
+        return None
+    return dst
+
+
+def import_project_package(zip_path, target_project_root, return_report=False):
+    """
+    Import project package zip into target folder.
+
+    Args:
+        return_report: when True, returns a dict summary instead of target path.
+    """
+    if not os.path.isfile(zip_path):
+        raise FileNotFoundError(zip_path)
+    ensure_project_structure(target_project_root)
+    target_abs = _abs_norm(target_project_root)
+
+    total_entries = 0
+    overwritten_entries = 0
+    skipped_unsafe = []
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            total_entries += 1
+            dst = _safe_extract_destination(target_abs, info.filename)
+            if dst is None:
+                skipped_unsafe.append(info.filename)
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if os.path.exists(dst):
+                overwritten_entries += 1
+            with zf.open(info, "r") as src, open(dst, "wb") as out:
+                shutil.copyfileobj(src, out)
+
+    report = {
+        "target_root": target_project_root,
+        "total_entries": total_entries,
+        "overwritten_entries": overwritten_entries,
+        "skipped_unsafe_entries": skipped_unsafe,
+    }
+    if return_report:
+        return report
+    return target_project_root

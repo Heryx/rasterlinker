@@ -1,22 +1,8 @@
 #/***************************************************************************
-# GPR
+# GeoSurvey Studio
 #
-# GPR
-#							 -------------------
-#		begin				: 2024-04-23
-#		git sha				: $Format:%H$
-#		copyright			: (C) 2024 by Giuseppe
-#		email				: guarino.archeo@gmail.com
-# ***************************************************************************/
-#
-#/***************************************************************************
-# *																		 *
-# *   This program is free software; you can redistribute it and/or modify  *
-# *   it under the terms of the GNU General Public License as published by  *
-# *   the Free Software Foundation; either version 2 of the License, or	 *
-# *   (at your option) any later version.								   *
-# *																		 *
-# ***************************************************************************/
+# Build/deploy helper makefile for local plugin development.
+#***************************************************************************/
 
 #################################################
 # Edit the following to match your sources lists
@@ -38,15 +24,15 @@ LOCALES =
 # translation
 SOURCES = \
 	__init__.py \
-	gpr_linker.py gpr_linker_dialog.py
+	geosurvey_studio.py geosurvey_studio_dialog.py
 
-PLUGINNAME = gpr_linker
+PLUGINNAME = geosurvey_studio
 
 PY_FILES = \
 	__init__.py \
-	gpr_linker.py gpr_linker_dialog.py
+	geosurvey_studio.py geosurvey_studio_dialog.py
 
-UI_FILES = gpr_linker_dialog_base.ui
+UI_FILES = geosurvey_studio_dialog_base.ui
 
 EXTRAS = metadata.txt icon.png
 

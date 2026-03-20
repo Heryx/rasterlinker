@@ -1,5 +1,5 @@
 <RCC>
-    <qresource prefix="/plugins/gpr_linker" >
+    <qresource prefix="/plugins/geosurvey_studio" >
         <file>icon.png</file>
     </qresource>
 </RCC>

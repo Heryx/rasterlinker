@@ -1,4 +1,4 @@
-import math
+﻿import math
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
@@ -9,18 +9,21 @@ from PyQt5.QtWidgets import QMessageBox, QInputDialog, QApplication
 
 class PolygonDrawTool(QgsMapToolEmitPoint):
     """
-    Strumento per disegnare un poligono.
+    Tool to draw a polygon.
 
-    Modalita 1 (default): disegno libero con click sinistro e chiusura con destro/Invio.
-    Modalita 2 (orientata): click primo punto, orienta col mouse, poi tasto D
-    (o click centrale) per bloccare
-    orientamento e inserire lunghezza/larghezza numeriche del rettangolo.
+    Mode 1 (default): free drawing with left click and close with right click/Enter.
+    Mode 2 (oriented): click first point, orient with mouse, then press D
+    (or middle click) to lock
+    orientation and enter numeric rectangle length/width.
     """
 
-    def __init__(self, canvas, parent_plugin):
+    def __init__(self, canvas, parent_plugin, session_dimension_mode=None):
         super().__init__(canvas)
         self.canvas = canvas
         self.parent_plugin = parent_plugin
+        self.session_dimension_mode = (
+            session_dimension_mode if session_dimension_mode in ("manual", "canvas") else None
+        )
         self.points = []
         self.current_mouse_point = None
         self.vertex_markers = []
@@ -39,51 +42,74 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         self.polygon_rubber_band.setStrokeColor(QColor(255, 140, 0))
         self.polygon_rubber_band.setFillColor(QColor(255, 140, 0, 50))
         self.polygon_rubber_band.setWidth(1)
+        self.snap_marker = QgsVertexMarker(self.canvas)
+        self.snap_marker.setIconType(QgsVertexMarker.ICON_BOX)
+        self.snap_marker.setIconSize(10)
+        self.snap_marker.setPenWidth(2)
+        self.snap_marker.setColor(QColor(0, 180, 0))
+        self.snap_marker.hide()
 
         if not self.canvas:
-            QMessageBox.critical(None, "Errore", "Canvas non valido.")
+            QMessageBox.critical(None, "Error", "Invalid canvas.")
 
     def canvasReleaseEvent(self, event):
         try:
             shift_active = self._shift_active(event)
             axis_constraint = shift_active or self.orthogonal_lock_enabled or self._plugin_force_orthogonal()
+            preferred_mode = self._plugin_dimension_mode()
+            # In free canvas mode, do not auto-open dimension flow:
+            # keep unlimited vertex clicks for arbitrary polygon shapes.
+            auto_dimension = preferred_mode in ("ask", "manual")
             if event.button() == Qt.MiddleButton:
                 self._lock_orientation_and_build_rectangle()
                 return
             if event.button() == Qt.LeftButton:
-                point = self._map_point_with_snap(event)
-                if len(self.points) >= 1 and axis_constraint:
-                    point = self._constraint_snapped_point(self.points[0], point)
+                point_raw, snapped = self._map_point_with_snap(event)
+                self._update_snap_marker(point_raw if snapped else None)
                 if self.dimension_pick_mode is not None:
-                    self._handle_canvas_dimension_pick(point)
+                    # In canvas dimension mode, consume click directly as length/width pick.
+                    self._handle_canvas_dimension_pick(point_raw)
                     return
+                point = point_raw
                 if len(self.points) >= 1 and axis_constraint:
-                    angle = self._compute_angle(self.points[0], point)
+                    point = self._constraint_snapped_point(self.points[0], point_raw)
+                # 3-click flow:
+                # 1) origin, 2) base orientation, 3) dimension mode (ask/manual/canvas).
+                # The third click is used to trigger dimensions while preserving
+                # first-second segment as explicit grid orientation.
+                if len(self.points) >= 2 and auto_dimension:
+                    angle = self._compute_angle(self.points[0], self.points[1])
                     if angle is None:
-                        QMessageBox.warning(None, "Orientamento", "Orientamento non valido.")
-                        return
-                    self.current_mouse_point = point
-                    self.locked_angle = angle
-                    self._begin_dimension_mode_selection()
-                    return
+                        QMessageBox.warning(None, "Orientation", "Invalid orientation.")
+                    else:
+                        self.current_mouse_point = point_raw
+                        self.locked_angle = angle
+                        # For Canvas mode, the third click is immediately reused as the
+                        # first dimension pick (length) to avoid an extra click.
+                        if self._begin_dimension_mode_selection(initial_canvas_point=point_raw):
+                            return
                 self.points.append(point)
                 self._add_vertex_marker(point)
                 self._update_preview()
             elif event.button() == Qt.RightButton:
                 self.finish_polygon()
         except Exception as e:
-            QMessageBox.critical(None, "Errore", f"Errore durante l'aggiunta del punto: {e}")
+            QMessageBox.critical(None, "Error", f"Error while adding point: {e}")
 
     def canvasMoveEvent(self, event):
         if not self.points:
+            point, snapped = self._map_point_with_snap(event)
+            self._update_snap_marker(point if snapped else None)
             return
-        point = self._map_point_with_snap(event)
+        point, snapped = self._map_point_with_snap(event)
+        self._update_snap_marker(point if snapped else None)
         if len(self.points) >= 1 and (self._shift_active(event) or self.orthogonal_lock_enabled or self._plugin_force_orthogonal()):
             point = self._constraint_snapped_point(self.points[0], point)
         self.current_mouse_point = point
         self._update_preview()
 
     def keyPressEvent(self, event):
+        event.accept()
         if event.key() == Qt.Key_X:
             self.orthogonal_lock_enabled = not self.orthogonal_lock_enabled
             if self.points and self.current_mouse_point is not None:
@@ -98,12 +124,12 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             self.finish_polygon()
         elif event.key() == Qt.Key_Escape:
             self.reset()
-            self.canvas.unsetMapTool(self)
-            self._notify_info("Disegno poligono annullato.")
+            self._notify_info("Polygon drawing canceled.")
+            return
 
     def _lock_orientation_and_build_rectangle(self):
         if not self.points:
-            self._notify_info("Fai prima click sul punto di origine.")
+            self._notify_info("Click the origin point first.")
             return
 
         origin = self.points[0]
@@ -112,45 +138,38 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             reference = self.points[1]
 
         if reference is None:
-            self._notify_info("Muovi il mouse per orientare la base, poi premi D o click centrale.")
+            self._notify_info("Move the mouse to orient the base, then press D or middle-click.")
             return
 
         angle = self._compute_angle(origin, reference)
         if angle is None:
-            QMessageBox.warning(None, "Orientamento", "Orientamento non valido: scegli una direzione diversa.")
+            QMessageBox.warning(None, "Orientation", "Invalid orientation: choose a different direction.")
             return
         self.locked_angle = angle
         self._begin_dimension_mode_selection()
 
-    def _begin_dimension_mode_selection(self):
+    def _begin_dimension_mode_selection(self, initial_canvas_point=None):
         preferred_mode = self._plugin_dimension_mode()
         if preferred_mode == "manual":
-            self._build_rectangle_from_dialog()
-            return
+            return self._build_rectangle_from_dialog()
         if preferred_mode == "canvas":
             self.dimension_pick_mode = "length"
             self.pending_length = None
-            self._notify_info("Canvas mode: click 1 lunghezza, click 2 larghezza.")
-            return
+            if initial_canvas_point is not None:
+                self._handle_canvas_dimension_pick(initial_canvas_point)
+            else:
+                self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
+            return True
 
-        choice = QMessageBox(None)
-        choice.setWindowTitle("Dimensioni area")
-        choice.setText("Come vuoi definire lunghezza e larghezza?")
-        manual_btn = choice.addButton("Inserimento manuale", QMessageBox.AcceptRole)
-        canvas_btn = choice.addButton("Da canvas", QMessageBox.ActionRole)
-        cancel_btn = choice.addButton(QMessageBox.Cancel)
-        choice.exec_()
-
-        clicked = choice.clickedButton()
-        if clicked == cancel_btn:
-            return
-        if clicked == manual_btn:
-            self._build_rectangle_from_dialog()
-            return
-        if clicked == canvas_btn:
-            self.dimension_pick_mode = "length"
-            self.pending_length = None
-            self._notify_info("Canvas mode: click 1 lunghezza, click 2 larghezza.")
+        # Fallback behavior for unexpected/legacy "ask": default to canvas
+        # to keep drawing uninterrupted.
+        self.dimension_pick_mode = "length"
+        self.pending_length = None
+        if initial_canvas_point is not None:
+            self._handle_canvas_dimension_pick(initial_canvas_point)
+        else:
+            self._notify_info("Canvas mode: click 1 for length, click 2 for width.")
+        return True
 
     def _compute_angle(self, origin, reference):
         dx = reference.x() - origin.x()
@@ -207,31 +226,32 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
     def _build_rectangle_from_dialog(self):
         length, ok_len = QInputDialog.getDouble(
             None,
-            "Lunghezza totale area",
-            "Inserisci lunghezza totale:",
+            "Total area length",
+            "Enter total length:",
             self.last_total_length,
             0.0001,
             1e12,
             3,
         )
         if not ok_len:
-            return
+            return False
 
         width, ok_wid = QInputDialog.getDouble(
             None,
-            "Larghezza totale area",
-            "Inserisci larghezza totale:",
+            "Total area width",
+            "Enter total width:",
             self.last_total_width,
             0.0001,
             1e12,
             3,
         )
         if not ok_wid:
-            return
+            return False
 
         self.last_total_length = length
         self.last_total_width = width
         self._build_rectangle_from_values(length, width)
+        return True
 
     def _handle_canvas_dimension_pick(self, point):
         if not self.points or self.locked_angle is None:
@@ -247,17 +267,17 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         if self.dimension_pick_mode == "length":
             length = abs(vx * ux[0] + vy * ux[1])
             if length <= 0:
-                QMessageBox.warning(None, "Valore non valido", "Lunghezza non valida, riprova.")
+                QMessageBox.warning(None, "Invalid value", "Invalid length, try again.")
                 return
             self.pending_length = length
             self.dimension_pick_mode = "width"
-            self._notify_info("Ora clicca per impostare la larghezza.")
+            self._notify_info("Now click to set width.")
             return
 
         if self.dimension_pick_mode == "width":
             width = abs(vx * uy[0] + vy * uy[1])
             if width <= 0:
-                QMessageBox.warning(None, "Valore non valido", "Larghezza non valida, riprova.")
+                QMessageBox.warning(None, "Invalid value", "Invalid width, try again.")
                 return
             self.last_total_length = self.pending_length
             self.last_total_width = width
@@ -282,14 +302,14 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
 
     def finish_polygon(self):
         if len(self.points) < 3:
-            QMessageBox.warning(None, "Errore", "Un poligono deve avere almeno 3 vertici.")
+            QMessageBox.warning(None, "Error", "A polygon must have at least 3 vertices.")
             return
 
         try:
             project_crs = QgsProject.instance().crs()
-            polygon_layer = QgsVectorLayer(f"Polygon?crs={project_crs.authid()}", "Poligono Disegnato", "memory")
+            polygon_layer = QgsVectorLayer(f"Polygon?crs={project_crs.authid()}", "Drawn Polygon", "memory")
             if not polygon_layer.isValid():
-                raise Exception("Errore nella creazione del layer poligonale.")
+                raise Exception("Error while creating polygon layer.")
 
             pr = polygon_layer.dataProvider()
             feature = QgsFeature()
@@ -301,9 +321,9 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
             if hasattr(self.parent_plugin, "create_grid_from_drawn_polygon"):
                 self.parent_plugin.create_grid_from_drawn_polygon(polygon_layer)
 
-            self._notify_info("Poligono creato.")
+            self._notify_info("Polygon created.")
         except Exception as e:
-            QMessageBox.critical(None, "Errore", f"Errore durante la creazione del poligono: {e}")
+            QMessageBox.critical(None, "Error", f"Error while creating polygon: {e}")
         finally:
             self.reset()
             self.canvas.unsetMapTool(self)
@@ -320,19 +340,33 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
 
     def _map_point_with_snap(self, event):
         """
-        Usa lo snapping di QGIS se disponibile/valido; fallback su coordinate libere.
+        Use QGIS snapping if available/valid, fallback to free coordinates.
         """
         if not self._plugin_use_snap():
-            return self.toMapCoordinates(event.pos())
+            return self.toMapCoordinates(event.pos()), False
         try:
             snap_utils = self.canvas.snappingUtils()
             if snap_utils is not None:
-                match = snap_utils.snapToMap(event.pos())
+                get_filter = getattr(self.parent_plugin, "get_snap_filter", None)
+                if callable(get_filter):
+                    try:
+                        match = snap_utils.snapToMap(event.pos(), get_filter())
+                    except TypeError:
+                        match = snap_utils.snapToMap(event.pos())
+                else:
+                    match = snap_utils.snapToMap(event.pos())
                 if match.isValid():
-                    return match.point()
+                    return match.point(), True
         except Exception:
             pass
-        return self.toMapCoordinates(event.pos())
+        return self.toMapCoordinates(event.pos()), False
+
+    def _update_snap_marker(self, point):
+        if point is None:
+            self.snap_marker.hide()
+            return
+        self.snap_marker.setCenter(QgsPointXY(point))
+        self.snap_marker.show()
 
     def _plugin_use_snap(self):
         return bool(getattr(self.parent_plugin, "grid_use_snap", True))
@@ -344,13 +378,15 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         return bool(getattr(self.parent_plugin, "grid_relative_orthogonal", False))
 
     def _plugin_dimension_mode(self):
+        if self.session_dimension_mode in ("manual", "canvas"):
+            return self.session_dimension_mode
         mode = getattr(self.parent_plugin, "grid_dimension_mode", "ask")
         return mode if mode in ("ask", "manual", "canvas") else "ask"
 
     def _notify_info(self, message, duration=5):
         iface = getattr(self.parent_plugin, "iface", None)
         if iface is not None and hasattr(iface, "messageBar"):
-            iface.messageBar().pushMessage("RasterLinker", message, level=Qgis.Info, duration=duration)
+            iface.messageBar().pushMessage("GeoSurvey Studio", message, level=Qgis.Info, duration=duration)
             return
         QMessageBox.information(None, "Info", message)
 
@@ -393,6 +429,7 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
         for marker in self.vertex_markers:
             self.canvas.scene().removeItem(marker)
         self.vertex_markers = []
+        self._update_snap_marker(None)
         self._publish_base_angle()
 
     def _publish_base_angle(self):
@@ -424,3 +461,4 @@ class PolygonDrawTool(QgsMapToolEmitPoint):
     def deactivate(self):
         self.reset()
         super().deactivate()
+

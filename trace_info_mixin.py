@@ -1,0 +1,1357 @@
+# -*- coding: utf-8 -*-
+"""Trace info panel mixin for GeoSurvey Studio plugin."""
+
+import json
+
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor
+from qgis.core import QgsProject, QgsMessageLog, Qgis
+from qgis.PyQt.QtWidgets import (
+    QMessageBox,
+    QDockWidget,
+    QTableView,
+    QAbstractItemView,
+)
+from PyQt5.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLineEdit,
+    QComboBox,
+    QMenu,
+    QToolButton,
+    QActionGroup,
+    QHeaderView,
+    QStackedWidget,
+    QFormLayout,
+    QLabel,
+    QTableWidget,
+    QTableWidgetItem,
+)
+
+from .trace_info_table_model import TraceInfoTableModel
+from .trace_info_help_mixin import TraceInfoHelpMixin
+from .trace_info_state_mixin import TraceInfoStateMixin
+
+
+class TraceInfoMixin(TraceInfoHelpMixin, TraceInfoStateMixin):
+    def _init_trace_info(self):
+        """Initialise trace info dock state. Called by the plugin constructor."""
+        self.trace_info_dock = None
+        self.trace_info_is_docked = False
+        self.trace_info_table = None
+        self.trace_info_model = None
+        self.trace_info_filter_edit = None
+        self.trace_info_filter_field_combo = None
+        self.trace_info_mode_combo = None
+        self.trace_info_sort_field_combo = None
+        self.trace_info_sort_order_combo = None
+        self.trace_info_depth_pick_combo = None
+        self.trace_info_depth_pick_btn = None
+        self.trace_info_stack = None
+        self.trace_info_form_list = None
+        self.trace_info_form_fields = {}
+        self.trace_info_vertex_table = None
+        self.trace_info_form_preview_combo = None
+        self.trace_info_view_table_btn = None
+        self.trace_info_view_form_btn = None
+        self.trace_info_query_btn = None
+        self.trace_info_query_panel = None
+        self.trace_info_interpretation_prompt_action = None
+        self.trace_info_discard_outside_raster_action = None
+        self.trace_info_help_btn = None
+        self.trace_info_help_panel = None
+        self.trace_info_source_layer_id = None
+        self.trace_info_selection_guard = False
+        self.trace_info_saved_selected_fid = None
+        self.trace_info_saved_selected_trace_id = ""
+        self.trace_info_form_preview_key = "timeslice"
+
+    def _cleanup_trace_info(self):
+        """Teardown trace info dock state. Called by plugin unload()."""
+        if self.trace_info_dock is not None:
+            try:
+                self.iface.removeDockWidget(self.trace_info_dock)
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
+            try:
+                self.trace_info_dock.deleteLater()
+            except Exception as e:
+                QgsMessageLog.logMessage(str(e), "GeoSurvey Studio", Qgis.Warning)
+            self.trace_info_dock = None
+
+        self.trace_info_table = None
+        self.trace_info_model = None
+        self.trace_info_filter_edit = None
+        self.trace_info_filter_field_combo = None
+        self.trace_info_mode_combo = None
+        self.trace_info_sort_field_combo = None
+        self.trace_info_sort_order_combo = None
+        self.trace_info_depth_pick_combo = None
+        self.trace_info_depth_pick_btn = None
+        self.trace_depth_pick_mode = "off"
+        self.trace_info_stack = None
+        self.trace_info_form_list = None
+        self.trace_info_form_fields = {}
+        self.trace_info_vertex_table = None
+        self.trace_info_source_layer_id = None
+        self.trace_info_form_preview_combo = None
+        self.trace_info_form_preview_key = "timeslice"
+        self.trace_info_view_table_btn = None
+        self.trace_info_view_form_btn = None
+        self.trace_info_query_btn = None
+        self.trace_info_query_panel = None
+        self.trace_info_interpretation_prompt_action = None
+        self.trace_info_discard_outside_raster_action = None
+        self.trace_info_help_btn = None
+        self.trace_info_help_panel = None
+        self.trace_info_selection_guard = False
+        self.trace_info_is_docked = False
+
+    def _set_trace_interpretation_prompt_enabled(self, enabled, persist=True):
+        self.trace_prompt_interpretation_popup = bool(enabled)
+        act = getattr(self, "trace_info_interpretation_prompt_action", None)
+        if act is not None and act.isChecked() != bool(enabled):
+            blocked = act.blockSignals(True)
+            act.setChecked(bool(enabled))
+            act.blockSignals(blocked)
+        if persist:
+            self._save_trace_info_ui_state()
+
+    def _resync_vertex_layers_for_all_traces(self):
+        """Recompute per-vertex depth values/labels and ensure parent-child relations."""
+        try:
+            project_layers = list(QgsProject.instance().mapLayers().values())
+        except Exception:
+            project_layers = []
+
+        candidates = []
+        seen = set()
+
+        def _add_candidate(layer):
+            if layer is None:
+                return
+            try:
+                lid = str(layer.id())
+            except Exception:
+                return
+            if lid in seen:
+                return
+            seen.add(lid)
+            candidates.append(layer)
+
+        try:
+            grp = self._find_trace_group() if hasattr(self, "_find_trace_group") else None
+            if grp is not None and hasattr(grp, "findLayers"):
+                for child in grp.findLayers():
+                    layer = child.layer() if child is not None else None
+                    if layer is not None:
+                        _add_candidate(layer)
+        except Exception:
+            pass
+
+        for lyr in project_layers:
+            try:
+                is_line = self._is_line_layer(lyr)
+            except Exception:
+                is_line = False
+            if not is_line:
+                continue
+            trace_like = False
+            try:
+                trace_like = self._is_trace_layer(lyr)
+            except Exception:
+                trace_like = False
+            if not trace_like and hasattr(self, "_is_trace_related_line_layer"):
+                try:
+                    trace_like = bool(self._is_trace_related_line_layer(lyr))
+                except Exception:
+                    trace_like = False
+            if trace_like:
+                _add_candidate(lyr)
+
+        for lyr in candidates:
+            try:
+                if hasattr(self, "_ensure_trace_layer_schema_and_form"):
+                    self._ensure_trace_layer_schema_and_form(lyr)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "_connect_trace_layer_signals"):
+                    self._connect_trace_layer_signals(lyr)
+            except Exception:
+                pass
+            try:
+                if not self._is_trace_layer(lyr):
+                    continue
+            except Exception:
+                continue
+            try:
+                self._sync_trace_vertex_depth_labels(lyr, create_if_missing=False)
+            except Exception:
+                continue
+        try:
+            self.refresh_trace_info_table()
+        except Exception:
+            pass
+
+    def _update_trace_info_depth_pick_button(self):
+        btn = getattr(self, "trace_info_depth_pick_btn", None)
+        combo = getattr(self, "trace_info_depth_pick_combo", None)
+        mode = str(getattr(self, "trace_depth_pick_mode", "off") or "off").strip().lower()
+        labels = {"off": "None", "min": "Min", "mid": "Mid", "max": "Max"}
+        if btn is not None:
+            btn.setText(f"Depth: {labels.get(mode, 'None')}")
+        if combo is not None:
+            idx = combo.findData(mode)
+            if idx >= 0 and combo.currentIndex() != idx:
+                blocked = combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(blocked)
+
+    def _set_trace_depth_pick_mode(self, mode, persist=True):
+        mode_txt = str(mode or "off").strip().lower()
+        if mode_txt not in ("off", "min", "mid", "max"):
+            mode_txt = "off"
+        old_mode = str(getattr(self, "trace_depth_pick_mode", "off") or "off").strip().lower()
+        combo = getattr(self, "trace_info_depth_pick_combo", None)
+        if combo is not None:
+            idx = combo.findData(mode_txt)
+            if idx >= 0 and combo.currentIndex() != idx:
+                blocked = combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(blocked)
+        self.trace_depth_pick_mode = mode_txt
+        self._update_trace_info_depth_pick_button()
+        if old_mode != mode_txt:
+            self._resync_vertex_layers_for_all_traces()
+        else:
+            try:
+                lyr = self._current_trace_layer(prefer_active=True, require_trace=False)
+                if lyr is not None and hasattr(self, "_sync_trace_vertex_depth_labels"):
+                    self._sync_trace_vertex_depth_labels(lyr, create_if_missing=False)
+            except Exception:
+                pass
+        if hasattr(self, "_apply_vertex_label_mode_to_layers"):
+            try:
+                self._apply_vertex_label_mode_to_layers()
+            except Exception:
+                pass
+        try:
+            self.iface.mapCanvas().refreshAllLayers()
+        except Exception:
+            pass
+        if persist:
+            self._save_trace_info_ui_state()
+
+    def _on_trace_info_table_selection_changed(self):
+        if self.trace_info_selection_guard:
+            return
+        self._update_trace_info_form_from_table_selection()
+        self._save_trace_info_ui_state()
+
+    def _on_trace_info_form_list_selection_changed(self):
+        if self.trace_info_selection_guard:
+            return
+        self._update_trace_info_form_from_table_selection()
+        self._save_trace_info_ui_state()
+
+    def _select_trace_info_row(self, row_idx):
+        if row_idx is None or row_idx < 0:
+            return
+        self.trace_info_selection_guard = True
+        try:
+            if (
+                self.trace_info_table is not None
+                and self.trace_info_table.model() is not None
+                and row_idx < self.trace_info_table.model().rowCount()
+            ):
+                self.trace_info_table.selectRow(row_idx)
+        finally:
+            self.trace_info_selection_guard = False
+        self._update_trace_info_form_from_table_selection()
+
+    def _on_trace_info_top_level_changed(self, is_floating):
+        self.trace_info_is_docked = not bool(is_floating)
+        self._save_trace_info_ui_state()
+
+    def _dock_trace_info_to(self, area):
+        if self.trace_info_dock is None:
+            return
+        try:
+            self.iface.addDockWidget(area, self.trace_info_dock)
+            self.trace_info_dock.setFloating(False)
+            self._tabify_trace_info_with_existing_dock(area)
+            self.trace_info_dock.show()
+            self.trace_info_dock.raise_()
+            self.trace_info_is_docked = True
+            self._save_trace_info_ui_state()
+        except Exception:
+            try:
+                self.trace_info_dock.setFloating(True)
+                self.trace_info_is_docked = False
+                self._save_trace_info_ui_state()
+            except Exception:
+                pass
+
+    def _tabify_trace_info_with_existing_dock(self, area):
+        if self.trace_info_dock is None:
+            return
+        main_window = self.iface.mainWindow()
+        try:
+            main_window.setDockNestingEnabled(True)
+        except Exception:
+            pass
+
+        candidates = []
+        for dock in main_window.findChildren(QDockWidget):
+            if dock is self.trace_info_dock:
+                continue
+            try:
+                if dock.isFloating():
+                    continue
+                if main_window.dockWidgetArea(dock) != area:
+                    continue
+            except Exception:
+                continue
+            candidates.append(dock)
+
+        if not candidates:
+            return
+
+        tokens = (
+            "browser",
+            "processing",
+            "style",
+            "layer",
+            "raster linker",
+            "strumenti di processing",
+            "stile layer",
+        )
+
+        def _dock_score(dock):
+            text = f"{dock.windowTitle()} {dock.objectName()}".lower()
+            score = 0
+            for token in tokens:
+                if token in text:
+                    score += 10
+            if dock.isVisible():
+                score += 3
+            return score
+
+        target = sorted(candidates, key=_dock_score, reverse=True)[0]
+        try:
+            main_window.tabifyDockWidget(target, self.trace_info_dock)
+        except Exception:
+            pass
+
+    def _undock_trace_info(self):
+        if self.trace_info_dock is None:
+            return
+        try:
+            self.trace_info_dock.setFloating(True)
+            self.trace_info_dock.show()
+            self.trace_info_dock.raise_()
+            self.trace_info_is_docked = False
+            self._save_trace_info_ui_state()
+        except Exception:
+            pass
+
+    def _update_trace_info_form_from_table_selection(self):
+        if not self.trace_info_form_fields:
+            return
+        row_data = None
+        selected_rows = []
+        if self.trace_info_table is not None:
+            row = None
+            selected_rows = self.trace_info_table.selectionModel().selectedRows() if self.trace_info_table.selectionModel() else []
+            if selected_rows:
+                row = selected_rows[0].row()
+            elif self.trace_info_table.model() is not None and self.trace_info_table.model().rowCount() > 0 and self.trace_info_form_list is None:
+                row = 0
+            if row is not None and row >= 0:
+                payload = self._trace_info_payload_from_table_row(row)
+                if isinstance(payload, dict):
+                    row_data = payload
+                if not selected_rows and self.trace_info_form_list is None:
+                    self._select_trace_info_row(row)
+
+        if row_data is None and self.trace_info_form_list is not None:
+            form_selected_rows = (
+                self.trace_info_form_list.selectionModel().selectedRows()
+                if self.trace_info_form_list.selectionModel()
+                else []
+            )
+            if form_selected_rows:
+                payload = self._trace_info_payload_from_table_row(form_selected_rows[0].row())
+                if isinstance(payload, dict):
+                    row_data = payload
+
+        if (
+            row_data is None
+            and self.trace_info_table is not None
+            and self.trace_info_table.model() is not None
+            and self.trace_info_table.model().rowCount() > 0
+        ):
+            self._select_trace_info_row(0)
+            payload = self._trace_info_payload_from_table_row(0)
+            if isinstance(payload, dict):
+                row_data = payload
+
+        key_map = {
+            "FID": "fid",
+            "Trace ID": "trace_id",
+            "Time-slice": "timeslice",
+            "Depth": "depth_text",
+            "Z mode": "z_mode",
+            "Length": "length_text",
+            "Vertices": "vertices_text",
+            "Group": "group_name",
+            "Z source": "z_source",
+            "Z grid path": "z_grid_path",
+            "Notes": "notes",
+            "Interpretation": "interpretation",
+            "Comment": "comment",
+        }
+        for label, widget in self.trace_info_form_fields.items():
+            value = ""
+            if isinstance(row_data, dict):
+                value = row_data.get(key_map.get(label, ""), "")
+            widget.setText("" if value is None else str(value))
+        self._update_trace_info_vertex_child_table(row_data)
+
+    def _update_trace_info_vertex_child_table(self, row_data):
+        table = getattr(self, "trace_info_vertex_table", None)
+        if table is None:
+            return
+        table.setRowCount(0)
+        if not isinstance(row_data, dict):
+            return
+        trace_id = str(row_data.get("trace_id") or "").strip()
+        if not trace_id:
+            return
+        line_layer = None
+        src_layer_id = str(getattr(self, "trace_info_source_layer_id", "") or "").strip()
+        if src_layer_id:
+            try:
+                line_layer = QgsProject.instance().mapLayer(src_layer_id)
+            except Exception:
+                line_layer = None
+        if line_layer is None:
+            line_layer = self._current_trace_layer(prefer_active=True, require_trace=False)
+        if line_layer is None:
+            for lyr in QgsProject.instance().mapLayers().values():
+                try:
+                    if not self._is_line_layer(lyr):
+                        continue
+                    idx_tid = lyr.fields().indexOf("trace_id")
+                    if idx_tid < 0:
+                        continue
+                    found = False
+                    for feat in lyr.getFeatures():
+                        if str(feat.attribute(idx_tid) or "").strip() == trace_id:
+                            found = True
+                            break
+                    if found:
+                        line_layer = lyr
+                        break
+                except Exception:
+                    continue
+        if line_layer is None:
+            return
+        try:
+            label_layer = (
+                self._find_trace_vertex_label_layer(line_layer)
+                if hasattr(self, "_find_trace_vertex_label_layer")
+                else None
+            )
+        except Exception:
+            label_layer = None
+        if label_layer is None:
+            return
+        fields = label_layer.fields()
+        field_names = [f.name() for f in fields]
+        idx_status = fields.indexOf("depth_status")
+        idx_depth_val = fields.indexOf("depth_val")
+        idx_depth_min = fields.indexOf("depth_min")
+        idx_depth_max = fields.indexOf("depth_max")
+        if idx_status < 0:
+            field_names.append("depth_status")
+        table.setColumnCount(len(field_names))
+        table.setHorizontalHeaderLabels(field_names)
+
+        idx_trace = fields.indexOf("trace_id")
+        idx_vertex = fields.indexOf("vertex_idx")
+        matched_features = []
+        for feat in label_layer.getFeatures():
+            try:
+                feat_trace = str(feat.attribute(idx_trace) or "").strip() if idx_trace >= 0 else ""
+            except Exception:
+                feat_trace = ""
+            if feat_trace != trace_id:
+                continue
+            matched_features.append(feat)
+
+        def _sort_key(feat_obj):
+            if idx_vertex < 0:
+                return 999999
+            try:
+                return int(feat_obj.attribute(idx_vertex))
+            except Exception:
+                return 999999
+
+        matched_features.sort(key=_sort_key)
+        table.setRowCount(len(matched_features))
+        for r, feat in enumerate(matched_features):
+            depth_status = ""
+            try:
+                if idx_status >= 0:
+                    depth_status = str(feat.attribute(idx_status) or "").strip().lower()
+            except Exception:
+                depth_status = ""
+            if depth_status not in ("hit", "no_raster_hit"):
+                d_val = None
+                d_min = None
+                d_max = None
+                try:
+                    if idx_depth_val >= 0:
+                        d_val = feat.attribute(idx_depth_val)
+                except Exception:
+                    d_val = None
+                try:
+                    if idx_depth_min >= 0:
+                        d_min = feat.attribute(idx_depth_min)
+                except Exception:
+                    d_min = None
+                try:
+                    if idx_depth_max >= 0:
+                        d_max = feat.attribute(idx_depth_max)
+                except Exception:
+                    d_max = None
+                if d_val in (None, "") and d_min in (None, "") and d_max in (None, ""):
+                    depth_status = "no_raster_hit"
+                else:
+                    depth_status = "hit"
+            for c, fname in enumerate(field_names):
+                if fname == "depth_status":
+                    val = depth_status
+                else:
+                    try:
+                        val = feat.attribute(fname)
+                    except Exception:
+                        val = ""
+                if isinstance(val, float):
+                    txt = f"{val:.3f}"
+                else:
+                    txt = "" if val in (None, "") else str(val)
+                item = QTableWidgetItem(txt)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if depth_status == "no_raster_hit":
+                    item.setBackground(QColor(255, 236, 236))
+                    item.setForeground(QColor(130, 45, 45))
+                    item.setToolTip("No raster hit: depth/time-slice metadata is intentionally empty for this vertex.")
+                table.setItem(r, c, item)
+        try:
+            hdr = table.horizontalHeader()
+            if hdr is not None:
+                for c in range(max(0, len(field_names) - 1)):
+                    hdr.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+                hdr.setStretchLastSection(True)
+        except Exception:
+            pass
+
+    def _ensure_trace_info_dock(self):
+        if self.trace_info_dock is not None and self.trace_info_table is not None:
+            return
+        self._ensure_trace_actions()
+
+        main_window = self.iface.mainWindow()
+        dock = QDockWidget("2D/3D Draw Panel", main_window)
+        dock.setObjectName("GeoSurveyStudioTraceInfoDock")
+        dock.setFeatures(
+            QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+            | QDockWidget.DockWidgetClosable
+        )
+        dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea
+            | Qt.RightDockWidgetArea
+            | Qt.BottomDockWidgetArea
+            | Qt.TopDockWidgetArea
+        )
+        dock.setMinimumWidth(300)
+        dock.setMinimumHeight(220)
+        dock.setToolTip("Drag the title bar to dock this panel on left/right/top/bottom.")
+        try:
+            dock.topLevelChanged.connect(self._on_trace_info_top_level_changed)
+        except Exception:
+            pass
+
+        container = QWidget(dock)
+        main_layout = QHBoxLayout(container)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(6)
+
+        left_widget = QWidget(container)
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(4)
+
+        filter_field_combo = QComboBox(left_widget)
+        filter_field_combo.addItem("All fields", "all")
+        filter_field_combo.addItem("Trace ID", "trace_id")
+        filter_field_combo.addItem("Time-slice", "timeslice")
+        filter_field_combo.addItem("Depth", "depth")
+        filter_field_combo.addItem("Z mode", "z_mode")
+        filter_field_combo.addItem("Length", "length")
+        filter_field_combo.addItem("Vertices", "vertices")
+        filter_field_combo.addItem("Notes", "notes")
+        filter_field_combo.addItem("Interpretation", "interpretation")
+        filter_field_combo.addItem("Comment", "comment")
+        filter_field_combo.setVisible(False)
+
+        depth_pick_combo = QComboBox(left_widget)
+        depth_pick_combo.addItem("Depth: None", "off")
+        depth_pick_combo.addItem("Depth: Min", "min")
+        depth_pick_combo.addItem("Depth: Mid", "mid")
+        depth_pick_combo.addItem("Depth: Max", "max")
+        depth_pick_combo.setMinimumWidth(120)
+        depth_pick_combo.setMaximumWidth(140)
+
+        filter_edit = QLineEdit(left_widget)
+        filter_edit.setPlaceholderText("Filter traces...")
+        top_row.addWidget(filter_edit, 1)
+
+        table_view_btn = QToolButton(left_widget)
+        table_view_btn.clicked.connect(lambda: self._set_trace_info_view_mode("table"))
+        table_view_btn.setToolTip("Switch to table view")
+        table_view_btn.setAutoRaise(True)
+
+        form_view_btn = QToolButton(left_widget)
+        form_view_btn.clicked.connect(lambda: self._set_trace_info_view_mode("form"))
+        form_view_btn.setToolTip("Switch to form view")
+        form_view_btn.setAutoRaise(True)
+
+        icon_table = self._qgis_theme_icon("mActionOpenTable.svg", "mActionTable.svg")
+        if icon_table is not None and not icon_table.isNull():
+            table_view_btn.setIcon(icon_table)
+        else:
+            table_view_btn.setText("Tbl")
+        icon_form = self._qgis_theme_icon("mActionFormView.svg", "mActionOptions.svg")
+        if icon_form is not None and not icon_form.isNull():
+            form_view_btn.setIcon(icon_form)
+        else:
+            form_view_btn.setText("Frm")
+        top_row.addWidget(table_view_btn, 0)
+        top_row.addWidget(form_view_btn, 0)
+
+        top_row.addWidget(depth_pick_combo, 0)
+
+        query_btn = QToolButton(left_widget)
+        query_btn.setAutoRaise(True)
+        query_btn.setToolTip("Filter / sort / preview options")
+        query_btn.setPopupMode(QToolButton.InstantPopup)
+        icon_query = self._qgis_theme_icon("mActionFilter2.svg", "mActionFilterExpression.svg", "mActionFilter.svg")
+        if icon_query is not None and not icon_query.isNull():
+            query_btn.setIcon(icon_query)
+        else:
+            query_btn.setText("Opt")
+        top_row.addWidget(query_btn, 0)
+
+        refresh_btn = QToolButton(left_widget)
+        refresh_btn.clicked.connect(self.refresh_trace_info_table)
+        refresh_btn.setAutoRaise(True)
+        refresh_btn.setToolTip("Refresh")
+        icon_refresh = self._qgis_theme_icon("mActionRefresh.svg", "mActionReload.svg")
+        if icon_refresh is not None and not icon_refresh.isNull():
+            refresh_btn.setIcon(icon_refresh)
+        else:
+            refresh_btn.setText("Ref")
+        top_row.addWidget(refresh_btn, 0)
+
+        help_btn = QToolButton(left_widget)
+        help_btn.setCheckable(True)
+        help_btn.setChecked(False)
+        help_btn.toggled.connect(self._toggle_trace_help_panel)
+        help_btn.setAutoRaise(True)
+        help_btn.setToolTip("Show/hide help")
+        icon_help = self._qgis_theme_icon("mActionHelpContents.svg", "mActionHelp.svg", "mIconInfo.svg")
+        if icon_help is not None and not icon_help.isNull():
+            help_btn.setIcon(icon_help)
+        else:
+            help_btn.setText("?")
+        top_row.addWidget(help_btn, 0)
+        left_layout.addLayout(top_row)
+
+        query_menu = QMenu(query_btn)
+        query_btn.setMenu(query_menu)
+
+        filter_menu = query_menu.addMenu("Filter column")
+        filter_actions = {}
+        for title, key in (
+            ("All fields", "all"),
+            ("Trace ID", "trace_id"),
+            ("Time-slice", "timeslice"),
+            ("Depth", "depth"),
+            ("Z mode", "z_mode"),
+            ("Length", "length"),
+            ("Vertices", "vertices"),
+            ("Notes", "notes"),
+            ("Interpretation", "interpretation"),
+            ("Comment", "comment"),
+        ):
+            act = filter_menu.addAction(title)
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: (
+                    self._set_combo_current_data(self.trace_info_filter_field_combo, data_key),
+                    self._save_trace_info_ui_state(),
+                    self.refresh_trace_info_table(),
+                )
+            )
+            filter_actions[key] = act
+
+        mode_menu = query_menu.addMenu("Mode")
+        mode_actions = {}
+        for title, key in (
+            ("All", "all"),
+            ("Only Missing Z", "missing_z"),
+            ("Only With Z", "with_z"),
+            ("Only No Raster Hit", "no_raster_hit"),
+        ):
+            act = mode_menu.addAction(title)
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: (
+                    self._set_combo_current_data(self.trace_info_mode_combo, data_key),
+                    self._save_trace_info_ui_state(),
+                    self.refresh_trace_info_table(),
+                )
+            )
+            mode_actions[key] = act
+
+        sort_menu = query_menu.addMenu("Sort by")
+        sort_actions = {}
+        for title, key in (
+            ("FID", "fid"),
+            ("Trace ID", "trace_id"),
+            ("Time-slice", "timeslice"),
+            ("Depth", "depth"),
+            ("Z mode", "z_mode"),
+            ("Length", "length"),
+            ("Vertices", "vertices"),
+        ):
+            act = sort_menu.addAction(title)
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: (
+                    self._set_combo_current_data(self.trace_info_sort_field_combo, data_key),
+                    self._save_trace_info_ui_state(),
+                    self.refresh_trace_info_table(),
+                )
+            )
+            sort_actions[key] = act
+
+        order_menu = query_menu.addMenu("Sort order")
+        order_actions = {}
+        for title, key in (
+            ("Asc", Qt.AscendingOrder),
+            ("Desc", Qt.DescendingOrder),
+        ):
+            act = order_menu.addAction(title)
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: (
+                    self._set_combo_current_data(self.trace_info_sort_order_combo, data_key),
+                    self._save_trace_info_ui_state(),
+                    self.refresh_trace_info_table(),
+                )
+            )
+            order_actions[key] = act
+
+        depth_pick_menu = query_menu.addMenu("Depth from range")
+        depth_pick_actions = {}
+        depth_pick_action_group = QActionGroup(depth_pick_menu)
+        depth_pick_action_group.setExclusive(True)
+        for title, key in (
+            ("None (hide labels)", "off"),
+            ("Min", "min"),
+            ("Mid", "mid"),
+            ("Max", "max"),
+        ):
+            act = depth_pick_menu.addAction(title)
+            act.setCheckable(True)
+            depth_pick_action_group.addAction(act)
+            act.triggered.connect(lambda _checked=False, data_key=key: self._set_trace_depth_pick_mode(data_key, persist=True))
+            depth_pick_actions[key] = act
+
+        wheel_mod_menu = query_menu.addMenu("Canvas wheel modifier")
+        wheel_mod_actions = {}
+        wheel_mod_action_group = QActionGroup(wheel_mod_menu)
+        wheel_mod_action_group.setExclusive(True)
+        for title, key in (
+            ("Alt", "alt"),
+            ("Shift", "shift"),
+            ("Ctrl", "ctrl"),
+        ):
+            act = wheel_mod_menu.addAction(title)
+            act.setCheckable(True)
+            wheel_mod_action_group.addAction(act)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: (
+                    self._set_trace_canvas_wheel_modifier(data_key, persist=True)
+                    if hasattr(self, "_set_trace_canvas_wheel_modifier")
+                    else None
+                )
+            )
+            wheel_mod_actions[key] = act
+
+        preview_menu = query_menu.addMenu("Form preview")
+        preview_actions = {}
+        for title, key in (
+            ("Time-slice", "timeslice"),
+            ("Depth", "depth"),
+            ("Z mode", "z_mode"),
+            ("Length", "length"),
+            ("Vertices", "vertices"),
+        ):
+            act = preview_menu.addAction(title)
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, data_key=key: self._set_trace_info_form_preview_column(data_key, persist=True)
+            )
+            preview_actions[key] = act
+
+        query_menu.addSeparator()
+        interpretation_prompt_act = query_menu.addAction("Prompt interpretation form after draw")
+        interpretation_prompt_act.setCheckable(True)
+        interpretation_prompt_act.setChecked(bool(getattr(self, "trace_prompt_interpretation_popup", False)))
+        interpretation_prompt_act.toggled.connect(
+            lambda checked=False: self._set_trace_interpretation_prompt_enabled(bool(checked), persist=True)
+        )
+        interpretation_prompt_act.triggered.connect(
+            lambda checked=False: self._set_trace_interpretation_prompt_enabled(bool(checked), persist=True)
+        )
+        discard_outside_act = query_menu.addAction("Discard traces outside raster")
+        discard_outside_act.setCheckable(True)
+        discard_outside_act.setChecked(bool(getattr(self, "trace_discard_outside_raster", False)))
+        discard_outside_act.toggled.connect(
+            lambda checked=False: (
+                self._set_trace_discard_outside_raster_enabled(bool(checked), persist=True)
+                if hasattr(self, "_set_trace_discard_outside_raster_enabled")
+                else None
+            )
+        )
+        discard_outside_act.triggered.connect(
+            lambda checked=False: (
+                self._set_trace_discard_outside_raster_enabled(bool(checked), persist=True)
+                if hasattr(self, "_set_trace_discard_outside_raster_enabled")
+                else None
+            )
+        )
+
+        query_menu.addSeparator()
+        clear_text_act = query_menu.addAction("Clear text filter")
+        clear_text_act.triggered.connect(lambda: (filter_edit.clear(), self.refresh_trace_info_table()))
+
+        def _sync_query_menu_checks():
+            current_filter = (
+                self.trace_info_filter_field_combo.currentData() if self.trace_info_filter_field_combo is not None else "all"
+            )
+            current_mode = self.trace_info_mode_combo.currentData() if self.trace_info_mode_combo is not None else "all"
+            current_sort = self.trace_info_sort_field_combo.currentData() if self.trace_info_sort_field_combo is not None else "fid"
+            current_order = (
+                self.trace_info_sort_order_combo.currentData()
+                if self.trace_info_sort_order_combo is not None
+                else Qt.AscendingOrder
+            )
+            current_preview = str(getattr(self, "trace_info_form_preview_key", "timeslice") or "timeslice").strip().lower()
+
+            for key, act in filter_actions.items():
+                act.setChecked(key == current_filter)
+            for key, act in mode_actions.items():
+                act.setChecked(key == current_mode)
+            for key, act in sort_actions.items():
+                act.setChecked(key == current_sort)
+            for key, act in order_actions.items():
+                act.setChecked(key == current_order)
+            current_depth_pick = (
+                self.trace_info_depth_pick_combo.currentData() if self.trace_info_depth_pick_combo is not None else "off"
+            )
+            for key, act in depth_pick_actions.items():
+                act.setChecked(key == current_depth_pick)
+            self._update_trace_info_depth_pick_button()
+            wheel_mod = (
+                str(getattr(self, "_trace_canvas_wheel_modifier", lambda: "alt")() or "alt").strip().lower()
+                if hasattr(self, "_trace_canvas_wheel_modifier")
+                else "alt"
+            )
+            for key, act in wheel_mod_actions.items():
+                act.setChecked(key == wheel_mod)
+            for key, act in preview_actions.items():
+                act.setChecked(key == current_preview)
+            interpretation_prompt_act.setChecked(bool(getattr(self, "trace_prompt_interpretation_popup", False)))
+            discard_outside = (
+                bool(self._trace_discard_outside_raster_enabled())
+                if hasattr(self, "_trace_discard_outside_raster_enabled")
+                else bool(getattr(self, "trace_discard_outside_raster", False))
+            )
+            discard_outside_act.setChecked(discard_outside)
+
+        query_menu.aboutToShow.connect(_sync_query_menu_checks)
+
+        tools_row_widget = self._build_trace_info_tools_panel(left_widget)
+        left_layout.addWidget(tools_row_widget, 0)
+
+        query_panel = QWidget(left_widget)
+        query_row = QHBoxLayout(query_panel)
+        query_row.setContentsMargins(0, 0, 0, 0)
+        query_row.setSpacing(6)
+
+        mode_combo = QComboBox(query_panel)
+        mode_combo.addItem("All", "all")
+        mode_combo.addItem("Only Missing Z", "missing_z")
+        mode_combo.addItem("Only With Z", "with_z")
+        mode_combo.addItem("Only No Raster Hit", "no_raster_hit")
+        mode_combo.setMinimumWidth(110)
+        mode_combo.setMaximumWidth(150)
+        query_row.addWidget(mode_combo, 0)
+
+        sort_field_combo = QComboBox(query_panel)
+        sort_field_combo.addItem("Sort: FID", "fid")
+        sort_field_combo.addItem("Sort: Trace ID", "trace_id")
+        sort_field_combo.addItem("Sort: Time-slice", "timeslice")
+        sort_field_combo.addItem("Sort: Depth", "depth")
+        sort_field_combo.addItem("Sort: Z mode", "z_mode")
+        sort_field_combo.addItem("Sort: Length", "length")
+        sort_field_combo.addItem("Sort: Vertices", "vertices")
+        sort_field_combo.setMinimumWidth(120)
+        sort_field_combo.setMaximumWidth(180)
+        query_row.addWidget(sort_field_combo, 0)
+
+        sort_order_combo = QComboBox(query_panel)
+        sort_order_combo.addItem("Asc", Qt.AscendingOrder)
+        sort_order_combo.addItem("Desc", Qt.DescendingOrder)
+        sort_order_combo.setMinimumWidth(70)
+        sort_order_combo.setMaximumWidth(90)
+        query_row.addWidget(sort_order_combo, 0)
+        query_row.addStretch(1)
+        query_panel.setVisible(False)
+        left_layout.addWidget(query_panel, 0)
+
+        help_panel = self._build_trace_help_panel(left_widget)
+        left_layout.addWidget(help_panel, 0)
+
+        stack = QStackedWidget(left_widget)
+
+        table_page = QWidget(stack)
+        table_page_layout = QVBoxLayout(table_page)
+        table_page_layout.setContentsMargins(0, 0, 0, 0)
+        table_page_layout.setSpacing(0)
+
+        table = QTableView(table_page)
+        table_model = TraceInfoTableModel(table)
+        table.setModel(table_model)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.ElideRight)
+        header = table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.setColumnWidth(1, 170)
+        table.setColumnWidth(2, 240)
+        table.setColumnWidth(3, 90)
+        table.setColumnWidth(4, 90)
+        table.setColumnWidth(5, 80)
+        table.setColumnWidth(6, 70)
+        table.setColumnHidden(0, True)
+        table.setColumnHidden(1, True)
+        table_page_layout.addWidget(table, 1)
+        stack.addWidget(table_page)
+
+        form_page = QWidget(stack)
+        form_page_layout = QHBoxLayout(form_page)
+        form_page_layout.setContentsMargins(0, 0, 0, 0)
+        form_page_layout.setSpacing(6)
+
+        form_list = QTableView(form_page)
+        form_list.setModel(table_model)
+        form_list.setSelectionBehavior(QAbstractItemView.SelectRows)
+        form_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        form_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        form_list.setWordWrap(False)
+        form_list.setTextElideMode(Qt.ElideRight)
+        form_list_header = form_list.horizontalHeader()
+        form_list_header.setStretchLastSection(True)
+        form_list_header.setSectionResizeMode(QHeaderView.Interactive)
+        form_list_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        for col_idx in (0, 1):
+            form_list.setColumnHidden(col_idx, True)
+        form_list.setSelectionModel(table.selectionModel())
+        form_list.setMinimumWidth(240)
+        form_list.setMaximumWidth(330)
+        form_page_layout.addWidget(form_list, 0)
+
+        form_right_widget = QWidget(form_page)
+        form_right_layout = QVBoxLayout(form_right_widget)
+        form_right_layout.setContentsMargins(4, 6, 8, 6)
+        form_right_layout.setSpacing(6)
+
+        form_fields_widget = QWidget(form_right_widget)
+        form_layout = QFormLayout(form_fields_widget)
+        form_layout.setContentsMargins(4, 8, 8, 8)
+        form_layout.setSpacing(8)
+        form_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        form_fields = {}
+        for label_text in (
+            "FID",
+            "Trace ID",
+            "Time-slice",
+            "Depth",
+            "Z mode",
+            "Length",
+            "Vertices",
+            "Group",
+            "Z source",
+            "Z grid path",
+            "Notes",
+            "Interpretation",
+            "Comment",
+        ):
+            field = QLineEdit(form_right_widget)
+            field.setReadOnly(True)
+            form_layout.addRow(f"{label_text}:", field)
+            form_fields[label_text] = field
+        form_right_layout.addWidget(form_fields_widget, 0)
+
+        vertices_title = QLabel("Vertices (child by Trace ID)", form_right_widget)
+        vertices_title.setStyleSheet("color: #444;")
+        form_right_layout.addWidget(vertices_title, 0)
+
+        vertices_table = QTableWidget(form_right_widget)
+        vertices_table.setColumnCount(4)
+        vertices_table.setHorizontalHeaderLabels(["Vertex", "Depth", "Min", "Max"])
+        vertices_table.verticalHeader().setVisible(False)
+        vertices_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        vertices_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        vertices_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        vertices_table.setWordWrap(False)
+        try:
+            vh = vertices_table.horizontalHeader()
+            vh.setStretchLastSection(True)
+            vh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            vh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            vh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        except Exception:
+            pass
+        vertices_table.setMinimumHeight(120)
+        form_right_layout.addWidget(vertices_table, 1)
+        form_page_layout.addWidget(form_right_widget, 1)
+        stack.addWidget(form_page)
+        left_layout.addWidget(stack, 1)
+
+        filter_edit.returnPressed.connect(self.refresh_trace_info_table)
+        filter_edit.textChanged.connect(self._save_trace_info_ui_state)
+        filter_field_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
+        filter_field_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
+        mode_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
+        mode_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
+        sort_field_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
+        sort_field_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
+        sort_order_combo.currentIndexChanged.connect(self.refresh_trace_info_table)
+        sort_order_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
+        depth_pick_combo.currentIndexChanged.connect(
+            lambda _idx=0: self._set_trace_depth_pick_mode(depth_pick_combo.currentData(), persist=True)
+        )
+        depth_pick_combo.currentIndexChanged.connect(self._save_trace_info_ui_state)
+        table_selection_model = table.selectionModel()
+        if table_selection_model is not None:
+            table_selection_model.selectionChanged.connect(
+                lambda _selected, _deselected: self._on_trace_info_table_selection_changed()
+            )
+
+        main_layout.addWidget(left_widget, 1)
+
+        dock.setWidget(container)
+        dock.setFloating(True)
+        dock.resize(700, 460)
+
+        self.trace_info_dock = dock
+        self.trace_info_is_docked = False
+        self.trace_info_table = table
+        self.trace_info_model = table_model
+        self.trace_info_filter_edit = filter_edit
+        self.trace_info_filter_field_combo = filter_field_combo
+        self.trace_info_mode_combo = mode_combo
+        self.trace_info_sort_field_combo = sort_field_combo
+        self.trace_info_sort_order_combo = sort_order_combo
+        self.trace_info_depth_pick_combo = depth_pick_combo
+        self.trace_info_depth_pick_btn = None
+        self.trace_info_stack = stack
+        self.trace_info_form_list = form_list
+        self.trace_info_form_fields = form_fields
+        self.trace_info_vertex_table = vertices_table
+        self.trace_info_form_preview_combo = None
+        self.trace_info_view_table_btn = table_view_btn
+        self.trace_info_view_form_btn = form_view_btn
+        self.trace_info_query_btn = query_btn
+        self.trace_info_query_panel = query_panel
+        self.trace_info_interpretation_prompt_action = interpretation_prompt_act
+        self.trace_info_discard_outside_raster_action = discard_outside_act
+        self.trace_info_help_btn = help_btn
+        self.trace_info_help_panel = help_panel
+        self._set_trace_info_view_mode("table", persist=False)
+        self._set_trace_info_form_preview_column(getattr(self, "trace_info_form_preview_key", "timeslice"), persist=False)
+        self._apply_trace_info_ui_state()
+        self._update_trace_info_depth_pick_button()
+
+    def open_trace_info_tab(self, checked=False):
+        self._ensure_trace_info_dock()
+        if self.trace_info_dock is not None:
+            self.trace_info_dock.show()
+            self.trace_info_dock.raise_()
+            self.trace_info_dock.activateWindow()
+        try:
+            layer = self._current_trace_layer(prefer_active=True, require_trace=True)
+            if layer is not None:
+                self.trace_line_layer_id = layer.id()
+                if hasattr(self, "_connect_trace_layer_signals"):
+                    self._connect_trace_layer_signals(layer)
+        except Exception:
+            pass
+        self._resync_vertex_layers_for_all_traces()
+        self.refresh_trace_info_table()
+
+    def refresh_trace_info_table(self, checked=False):
+        if self.trace_info_table is None or self.trace_info_model is None:
+            return
+        layer = self._current_trace_layer(prefer_active=True, require_trace=False)
+        selected_fid = None
+        if self.trace_info_table.selectionModel() is not None:
+            selected_rows = self.trace_info_table.selectionModel().selectedRows()
+            if selected_rows:
+                row = selected_rows[0].row()
+                payload = self._trace_info_payload_from_table_row(row)
+                if isinstance(payload, dict):
+                    selected_fid = payload.get("fid")
+        if selected_fid is None:
+            selected_fid = getattr(self, "trace_info_saved_selected_fid", None)
+        selected_trace_id = str(getattr(self, "trace_info_saved_selected_trace_id", "") or "").strip()
+        self.trace_info_model.set_rows([])
+        if not self._is_line_layer(layer):
+            self.trace_info_source_layer_id = None
+            self._update_trace_info_form_from_table_selection()
+            return
+        self.trace_info_source_layer_id = layer.id()
+
+        vertex_counts = {}
+        try:
+            vlyr = self._find_trace_vertex_label_layer(layer) if hasattr(self, "_find_trace_vertex_label_layer") else None
+            if vlyr is not None:
+                idx_tid = vlyr.fields().indexOf("trace_id")
+                if idx_tid >= 0:
+                    for vfeat in vlyr.getFeatures():
+                        tid = str(vfeat.attribute(idx_tid) or "").strip()
+                        if not tid:
+                            continue
+                        vertex_counts[tid] = int(vertex_counts.get(tid, 0)) + 1
+        except Exception:
+            vertex_counts = {}
+
+        filter_text = ""
+        if self.trace_info_filter_edit is not None:
+            filter_text = (self.trace_info_filter_edit.text() or "").strip().lower()
+
+        filter_field = "all"
+        if self.trace_info_filter_field_combo is not None:
+            filter_field = self.trace_info_filter_field_combo.currentData() or "all"
+
+        mode_filter = "all"
+        if self.trace_info_mode_combo is not None:
+            mode_filter = self.trace_info_mode_combo.currentData() or "all"
+
+        sort_field = "fid"
+        if self.trace_info_sort_field_combo is not None:
+            sort_field = self.trace_info_sort_field_combo.currentData() or "fid"
+
+        sort_desc = False
+        if self.trace_info_sort_order_combo is not None:
+            sort_desc = self.trace_info_sort_order_combo.currentData() == Qt.DescendingOrder
+
+        rows = []
+        for feat in layer.getFeatures():
+            fid = feat.id()
+            trace_id = feat.attribute("trace_id") if layer.fields().indexOf("trace_id") >= 0 else ""
+            ts_name = feat.attribute("ts_name") if layer.fields().indexOf("ts_name") >= 0 else ""
+            ts_id = feat.attribute("ts_id") if layer.fields().indexOf("ts_id") >= 0 else ""
+            group_name = feat.attribute("group_name") if layer.fields().indexOf("group_name") >= 0 else ""
+            depth_list = feat.attribute("depth_list") if layer.fields().indexOf("depth_list") >= 0 else ""
+            depth_from = feat.attribute("depth_from") if layer.fields().indexOf("depth_from") >= 0 else None
+            depth_to = feat.attribute("depth_to") if layer.fields().indexOf("depth_to") >= 0 else None
+            depth_unit = feat.attribute("depth_unit") if layer.fields().indexOf("depth_unit") >= 0 else "m"
+            z_source = feat.attribute("z_source") if layer.fields().indexOf("z_source") >= 0 else ""
+            z_grid_path = feat.attribute("z_grid_path") if layer.fields().indexOf("z_grid_path") >= 0 else ""
+            z_mode = feat.attribute("z_mode") if layer.fields().indexOf("z_mode") >= 0 else ""
+            vertex_depths_raw = feat.attribute("vertex_depths") if layer.fields().indexOf("vertex_depths") >= 0 else ""
+            notes = feat.attribute("notes") if layer.fields().indexOf("notes") >= 0 else ""
+            interpretation = feat.attribute("interpretation") if layer.fields().indexOf("interpretation") >= 0 else ""
+            comment = feat.attribute("comment") if layer.fields().indexOf("comment") >= 0 else ""
+            depth_txt = ""
+            depth_num = None
+            if depth_list not in (None, ""):
+                depth_txt = str(depth_list)
+            try:
+                if depth_from not in (None, "") and depth_to not in (None, ""):
+                    depth_num = (float(depth_from) + float(depth_to)) / 2.0
+                    if not depth_txt:
+                        depth_txt = f"{float(depth_from):.3f}-{float(depth_to):.3f} {depth_unit}"
+                elif depth_from not in (None, ""):
+                    depth_num = float(depth_from)
+                    if not depth_txt:
+                        depth_txt = f"from {float(depth_from):.3f} {depth_unit}"
+                elif depth_to not in (None, ""):
+                    depth_num = float(depth_to)
+                    if not depth_txt:
+                        depth_txt = f"to {float(depth_to):.3f} {depth_unit}"
+            except Exception:
+                if not depth_txt:
+                    depth_txt = str(depth_from or depth_to or "")
+            length_val = feat.geometry().length() if feat.geometry() is not None else 0.0
+            ts_label = ts_name or ts_id or ""
+
+            z_mode_text = str(z_mode or "")
+            missing_z = z_mode_text.lower().startswith("missing")
+            hit_count = 0
+            no_hit_count = 0
+            parsed_vertices = False
+            if vertex_depths_raw not in (None, ""):
+                try:
+                    items = json.loads(str(vertex_depths_raw))
+                except Exception:
+                    items = []
+                if isinstance(items, list) and items:
+                    parsed_vertices = True
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        st = str(item.get("s") or "").strip().lower()
+                        if st not in ("hit", "no_raster_hit"):
+                            d = item.get("d")
+                            dmin = item.get("dmin")
+                            dmax = item.get("dmax")
+                            if d in (None, "") and dmin in (None, "") and dmax in (None, ""):
+                                st = "no_raster_hit"
+                            else:
+                                st = "hit"
+                        if st == "no_raster_hit":
+                            no_hit_count += 1
+                        else:
+                            hit_count += 1
+            if not parsed_vertices:
+                try:
+                    total_vertices = int(vertex_counts.get(trace_id or f"fid_{fid}", 0))
+                except Exception:
+                    total_vertices = 0
+                hit_count = max(0, total_vertices)
+                no_hit_count = 0
+            has_no_raster_hit = no_hit_count > 0
+
+            if mode_filter == "missing_z" and not missing_z:
+                continue
+            if mode_filter == "with_z" and missing_z:
+                continue
+            if mode_filter == "no_raster_hit" and not has_no_raster_hit:
+                continue
+
+            trace_text = trace_id or f"fid_{fid}"
+            if filter_text:
+                field_values = {
+                    "fid": str(fid),
+                    "trace_id": str(trace_text),
+                    "timeslice": str(ts_label),
+                    "depth": str(depth_txt),
+                    "z_mode": str(z_mode_text),
+                    "length": f"{float(length_val):.2f}",
+                    "vertices": str(vertex_counts.get(trace_text, 0)),
+                    "no_raster_hit": str(no_hit_count),
+                    "notes": str(notes or ""),
+                    "interpretation": str(interpretation or ""),
+                    "comment": str(comment or ""),
+                }
+                if str(filter_field or "all") == "all":
+                    hay = " ".join(field_values.values()).lower()
+                else:
+                    hay = str(field_values.get(str(filter_field), "")).lower()
+                if filter_text not in hay:
+                    continue
+
+            rows.append(
+                {
+                    "fid": fid,
+                    "trace_id": trace_text,
+                    "timeslice": ts_label,
+                    "depth_text": depth_txt,
+                    "depth_num": depth_num,
+                    "z_mode": z_mode_text,
+                    "length_num": float(length_val),
+                    "length_text": f"{float(length_val):.2f}",
+                    "vertices_text": str(vertex_counts.get(trace_text, 0)),
+                    "has_no_raster_hit": has_no_raster_hit,
+                    "hit_count": int(hit_count),
+                    "no_raster_hit_count": int(no_hit_count),
+                    "group_name": group_name or "",
+                    "z_source": z_source or "",
+                    "z_grid_path": z_grid_path or "",
+                    "notes": notes or "",
+                    "interpretation": interpretation or "",
+                    "comment": comment or "",
+                }
+            )
+
+        if sort_field in ("fid", "depth", "length", "vertices"):
+            value_key = {"fid": "fid", "depth": "depth_num", "length": "length_num", "vertices": "vertices_num"}[sort_field]
+            if value_key == "vertices_num":
+                for r in rows:
+                    try:
+                        r["vertices_num"] = int(str(r.get("vertices_text") or "0"))
+                    except Exception:
+                        r["vertices_num"] = 0
+            with_val = [r for r in rows if r.get(value_key) is not None]
+            without_val = [r for r in rows if r.get(value_key) is None]
+            with_val.sort(key=lambda r: r.get(value_key), reverse=sort_desc)
+            rows = with_val + without_val
+        else:
+            value_key = {"trace_id": "trace_id", "timeslice": "timeslice", "z_mode": "z_mode", "vertices": "vertices_text"}.get(sort_field, "trace_id")
+            rows.sort(key=lambda r: str(r.get(value_key) or "").lower(), reverse=sort_desc)
+
+        self.trace_info_model.set_rows(rows)
+
+        target_row = 0
+        if selected_fid is not None:
+            for idx, row_data in enumerate(rows):
+                if row_data.get("fid") == selected_fid:
+                    target_row = idx
+                    break
+        elif selected_trace_id:
+            for idx, row_data in enumerate(rows):
+                if str(row_data.get("trace_id") or "") == selected_trace_id:
+                    target_row = idx
+                    break
+        if rows:
+            self._select_trace_info_row(target_row)
+        else:
+            self._update_trace_info_form_from_table_selection()
+        self._save_trace_info_ui_state()
+
+        if hasattr(self, "_sync_draw_action_checked_for_layer"):
+            try:
+                self._sync_draw_action_checked_for_layer(layer)
+            except Exception:
+                pass
